@@ -1,0 +1,73 @@
+function [Y_network1,Y_line1,Y_TR1,nodes_from_r,nodes_to_r,Line_RX,Load_P,Load_Q,Line_R,Line_L,Line_C,Line_length] = MVAC_raw(wb,Sb,Zb_lines,Lb_lines,modif)
+% This script describes the raw form of the CIGRE MV benchmark network
+% S0: if 1 means we are using the interconnected mode, else it is the
+% islanded mode
+% S1: it is the switch between node 8 & node 12
+% S2: it is the switch between node 6 & node 7
+% S3: it is the switch between node 4 & node 11
+
+% Lines Parameters:
+Line.R                 = [0.1 0.1 0.1 0.1 0.1 0.1]; 
+Line.XL                = [0.1 0.1 0.1 0.1 0.1 0.1]; 
+Line.B                 = [59.69 59.69 59.69 59.69 59.69 59.69] .*1e-6;
+Line.length            = [1 1 1 1 1 1]; %2.82 km
+Line.C                 = Line.B ./wb;
+Line.L                 = Line.XL ./wb; %H/km
+Line.R_pu              = (Line.R .* Line.length) ./ Zb_lines;
+Line.L_pu              = (Line.L .* Line.length) ./ Lb_lines;
+Line.C_pu              = (Line.B .* Line.length).* Zb_lines;
+Line_RX                = Line.R_pu ./ Line.L_pu;
+
+% Loads Parameters:
+Load.P                 = [0 0 0.5 0 0 0.5 0] .*1e6;
+Load.Q                 = [0 0 0.5*0.01 0 0 0.5*0.01 0] .*1e6;
+Load.P_pu              = Load.P ./ Sb;
+Load.Q_pu              = Load.Q ./ Sb;
+
+
+% Outputs:
+Load_P = Load.P;
+Load_Q = Load.Q;
+Line_R = Line.R;
+Line_L = Line.L;
+Line_C = Line.C;
+Line_length = Line.length;
+
+% GFM_controls = ["Droop","dVOC","Matching","VSM"];
+% for i_test1 = 1:length(GFM_controls)
+% DG-type: 0=none, 1=IB, 2=GFM, 3=GFL, 4=SM
+% Load = 0 -> no load connected to this node , load = 1 -> a load is
+% connected to this node
+% BusType: 1=slack bus, 2=PV bus , 3=PQ bus
+% subType: For GFM: "Droop","Droop+PLL","Droop+VIM", "dVOC",
+% "Matching", "VSM". For GFL: "PLL", "VIM". For SM/IB leave blank "". 
+% DCType: "Ideal" (GFM or GFL), "BESS" (in case of GFM),or "PV" (in case of GFL)
+%            Node    DG-type  Load  BusType  V_init  delta_init   P_gen   Q_gen   P_cons         Q_cons 
+Y_network1 = [1      0        0     3        1       0            0       0       Load.P_pu(1)   Load.Q_pu(1);
+              2      0        0     3        1       0            0       0       Load.P_pu(2)   Load.Q_pu(2);
+              3      0        1     3        1       0            0       0       Load.P_pu(3)   Load.Q_pu(3);
+              4      0        0     3        1       0            0       0       Load.P_pu(4)   Load.Q_pu(4);
+              5      0        0     3        1       0            0       0       Load.P_pu(5)   Load.Q_pu(5);
+              6      0        1     3        1       0            0       0       Load.P_pu(6)   Load.Q_pu(6);
+              7      0        0     3        1       0            0       0       Load.P_pu(7)   Load.Q_pu(7)];
+
+          
+% Line Description:
+%            Line   From To  R(pu)         L(pu)         C(pu)           Length(km)
+Y_line1    = [1     1    2   Line.R_pu(1)  Line.L_pu(1)  Line.C_pu(1)    Line.length(1);
+              2     3    2   Line.R_pu(2)  Line.L_pu(2)  Line.C_pu(2)    Line.length(2);
+              3     4    2   Line.R_pu(3)  Line.L_pu(3)  Line.C_pu(3)    Line.length(3);
+              4     5    2   Line.R_pu(4)  Line.L_pu(4)  Line.C_pu(4)    Line.length(4);
+              5     5    6   Line.R_pu(5)  Line.L_pu(5)  Line.C_pu(5)    Line.length(5);
+              6     5    7   Line.R_pu(6)  Line.L_pu(6)  Line.C_pu(6)    Line.length(6)]; 
+
+
+nonZeroRows = any(Y_line1, 2);
+Y_line1 = Y_line1(nonZeroRows, :);
+             
+nodes_from_r = sort(unique(Y_line1(:,2)));
+nodes_to_r   = sort(unique(Y_line1(:,3)));
+
+Y_TR1      = [];
+
+end

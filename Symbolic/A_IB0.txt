@@ -1,0 +1,4 @@
+A[1][1] = -(Rup*wb)/Lup 
+A[1][2] = wb*wup_0 
+A[2][1] = -wb*wup_0 
+A[2][2] = -(Rup*wb)/Lup 

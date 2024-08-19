@@ -20,7 +20,7 @@ To download and run G2ELin, follow these steps:
 1. Clone the repository from GitHub: git clone https://github.com/FKELADA/G2ELin
 2. Open MATLAB and ensure you have the required licenses (MATLAB 2020b, Simulink 2020b, Symbolic Math Toolbox).
 3. Run the "startup.m" file.
-4. Further detailed instructions on how to use the tool are provided in the documentation file included in the repository. This documentation covers the full description of the tool, its components, and usage instructions, along with plans for future development.
+4. Further detailed instructions on how to use the tool are provided in the documentation file available for download here: https://drive.google.com/file/d/1-DTTyxWwiWgtkX1zVO4x9t-7Lmzfc_G6/view?usp=sharing. This documentation covers the full description of the tool, its components, and usage instructions, along with plans for future development.
 
 ## Copyright and License
 This tool is developed by Fadi Kelada at G2ELab. It is provided under the GNU GPL-3 license. 

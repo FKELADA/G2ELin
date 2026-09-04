@@ -1,0 +1,171 @@
+"""Structural pre-flight checks for a :class:`~g2elin_core.network.schema.Network`
+-- catches problems that would otherwise surface one at a time as a crash
+(or a confusing wrong answer) deep inside power flow, modal analysis, or
+EMT simulation, and reports *every* issue found in one pass instead of
+just the first.
+
+Every hand-crafted preset in this codebase satisfies all of these by
+construction; a network assembled by hand (the web UI's network editor /
+drag-and-drop builder) can easily violate any of them. pydantic's own
+validators on ``Network`` already guarantee two structural properties
+unconditionally (every bus reference resolves, exactly one slack DER) --
+this module covers everything else: things that are *syntactically* valid
+``Network`` JSON but still make power flow, modal analysis, or EMT/ROA
+simulation fail, or silently misbehave, downstream.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import networkx as nx
+
+from .schema import DerUnit, Network, UnitType
+
+# Only an SM or IB slack is wired up in interconnect/network_assembly.py --
+# power flow doesn't care (pandapower's ext_grid is agnostic to unit
+# type), so this is a *warning* for modal/EMT/ROA, not a power flow error.
+_SUPPORTED_SLACK_UNIT_TYPES = {"sm", "infinite_bus"}
+# Unit types operating_point.py actually derives a dynamics operating point
+# for -- these are the ones that need their own transformer.
+_DYNAMICS_UNIT_TYPES = {"sm", "gfm", "gfl", "infinite_bus"}
+
+
+@dataclass(frozen=True)
+class NetworkIssue:
+    severity: str  # "error" (blocks the affected capabilities) | "warning" (a heads-up, not blocking)
+    message: str
+    affects: tuple[str, ...]  # which of "powerflow"/"modal"/"emt"/"roa" this issue affects
+
+
+def validate_network(network: Network) -> list[NetworkIssue]:
+    """Every structural problem found, not just the first. An empty list
+    means the network is safe to run power flow, modal analysis, and EMT/
+    ROA simulation on -- modulo the actual numerics still converging for a
+    given operating point, which no static check can guarantee.
+    """
+    issues: list[NetworkIssue] = []
+    all_caps = ("powerflow", "modal", "emt", "roa")
+    dynamics_caps = ("modal", "emt", "roa")
+
+    bus_ids_seen: set[int] = set()
+    for bus in network.buses:
+        if bus.id in bus_ids_seen:
+            issues.append(NetworkIssue("error", f"bus id {bus.id} is used more than once", all_caps))
+        bus_ids_seen.add(bus.id)
+
+    der_by_bus: dict[int, DerUnit] = {}
+    der_ids_seen: set[int] = set()
+    for der in network.der_units:
+        if der.id in der_ids_seen:
+            issues.append(NetworkIssue("error", f"DER unit id {der.id} is used more than once", all_caps))
+        der_ids_seen.add(der.id)
+
+        if der.bus in der_by_bus:
+            other = der_by_bus[der.bus]
+            issues.append(NetworkIssue(
+                "error",
+                f"DER units id={der.id} and id={other.id} are both on bus {der.bus} -- each DER unit "
+                "needs its own private bus",
+                all_caps,
+            ))
+        else:
+            der_by_bus[der.bus] = der
+
+        if der.unit_type == UnitType.NONE:
+            issues.append(NetworkIssue(
+                "error", f"DER unit id={der.id} has unit_type 'none' -- give it a real type or remove it",
+                all_caps,
+            ))
+
+    for ln in network.lines:
+        if ln.from_bus == ln.to_bus:
+            issues.append(NetworkIssue(
+                "error", f"a line has from_bus == to_bus == {ln.from_bus} (self-loop)", all_caps,
+            ))
+        for bus_id, end in ((ln.from_bus, "from_bus"), (ln.to_bus, "to_bus")):
+            if bus_id in der_by_bus:
+                d = der_by_bus[bus_id]
+                issues.append(NetworkIssue(
+                    "error",
+                    f"a line's {end} (bus {bus_id}) is DER unit id={d.id} ({d.unit_type.value})'s own "
+                    "bus -- a DER's own bus may only be reached through its own transformer, never a "
+                    "line directly",
+                    dynamics_caps,
+                ))
+
+    for tr in network.transformers:
+        if tr.hv_bus == tr.lv_bus:
+            issues.append(NetworkIssue(
+                "error", f"a transformer has hv_bus == lv_bus == {tr.hv_bus} (self-loop)", all_caps,
+            ))
+
+    for idx, ld in enumerate(network.loads):
+        if ld.bus in der_by_bus:
+            d = der_by_bus[ld.bus]
+            issues.append(NetworkIssue(
+                "error",
+                f"load #{idx} sits on bus {ld.bus}, DER unit id={d.id} ({d.unit_type.value})'s own bus "
+                "-- a DER's own local consumption belongs on the unit itself (its p_cons_mw/q_cons_mvar "
+                "fields), not as a separate Load on its private bus",
+                dynamics_caps,
+            ))
+
+    if not network.transformers:
+        if network.der_units:
+            issues.append(NetworkIssue(
+                "error",
+                "this network has no transformers -- every SM/GFM/GFL/IB unit must sit behind its own "
+                "transformer (a Transformer whose lv_bus is that unit's own bus)",
+                dynamics_caps,
+            ))
+    else:
+        transformer_by_lv_bus = {tr.lv_bus: tr for tr in network.transformers}
+        for der in network.der_units:
+            if der.unit_type.value not in _DYNAMICS_UNIT_TYPES:
+                continue
+            tr = transformer_by_lv_bus.get(der.bus)
+            if tr is None:
+                issues.append(NetworkIssue(
+                    "error",
+                    f"DER unit id={der.id} ({der.unit_type.value}) at bus {der.bus} has no transformer "
+                    f"connecting it to the rest of the network (no Transformer has lv_bus={der.bus})",
+                    dynamics_caps,
+                ))
+            elif tr.hv_bus in der_by_bus and der_by_bus[tr.hv_bus].id != der.id:
+                other = der_by_bus[tr.hv_bus]
+                issues.append(NetworkIssue(
+                    "error",
+                    f"DER unit id={der.id} ({der.unit_type.value})'s own transformer connects directly "
+                    f"to DER unit id={other.id} ({other.unit_type.value})'s bus ({tr.hv_bus}) instead of "
+                    "a plain grid bus",
+                    dynamics_caps,
+                ))
+
+    slack = next((d for d in network.der_units if d.bus_type.value == "slack"), None)
+    if slack is not None and slack.unit_type.value not in _SUPPORTED_SLACK_UNIT_TYPES:
+        issues.append(NetworkIssue(
+            "warning",
+            f"the slack unit (id={slack.id}) is a {slack.unit_type.value}, not a synchronous machine or "
+            f"infinite bus -- power flow works, but modal analysis/EMT/ROA don't support a "
+            f"{slack.unit_type.value} slack yet",
+            dynamics_caps,
+        ))
+
+    # Connectivity: every bus must be reachable from the slack through
+    # lines/transformers, or whichever part isn't has no reference bus for
+    # power flow to solve against.
+    graph = nx.Graph()
+    graph.add_nodes_from(b.id for b in network.buses)
+    graph.add_edges_from((ln.from_bus, ln.to_bus) for ln in network.lines)
+    graph.add_edges_from((tr.hv_bus, tr.lv_bus) for tr in network.transformers)
+    if network.buses and not nx.is_connected(graph):
+        sizes = sorted((len(c) for c in nx.connected_components(graph)), reverse=True)
+        issues.append(NetworkIssue(
+            "error",
+            f"the network isn't fully connected ({len(sizes)} separate groups of buses, sizes {sizes}) "
+            "-- every bus must be reachable from the slack through lines/transformers",
+            all_caps,
+        ))
+
+    return issues

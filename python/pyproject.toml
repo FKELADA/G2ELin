@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "g2elin-core"
+version = "0.1.0"
+description = "Python core for G2ELin: power-system network model, load flow, modal analysis, time-domain simulation and stability tools."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Fadi Kelada" }]
+dependencies = [
+    "pydantic>=2.6",
+    "pandapower>=2.14",
+    "numba>=0.60",  # pandapower's own JIT backend -- without it, every power flow silently falls back to a much slower pure-Python path (and prints a warning saying so on first use)
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "sympy>=1.12",
+    "scipy>=1.11",
+    "networkx>=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+api = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "httpx>=0.27",
+]
+docs = [
+    "sphinx>=8.0",
+    "myst-parser>=4.0",
+    "myst-nb>=1.1",
+    "sphinxcontrib-mermaid>=1.0",
+    "furo>=2024.8",
+]
+notebook = [
+    "jupyterlab>=4.0",
+    "ipykernel>=6.29",
+    "matplotlib>=3.8",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

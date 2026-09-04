@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+uvicorn_out.log
+uvicorn_err.log
+docs/sphinx/_build/
+docs/sphinx/_notebooks/
+.ipynb_checkpoints/

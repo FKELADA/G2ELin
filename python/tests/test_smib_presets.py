@@ -17,7 +17,6 @@ from g2elin_core.modal import analyze
 from g2elin_core.network.presets import gfl_smib, gfm_smib, sm_smib
 from g2elin_core.pipeline import linearize_network
 from g2elin_core.powerflow import run_power_flow
-from g2elin_core.stability import find_state_index, trace_roa_grid, RoaAxis
 from g2elin_core.timedomain import build_nonlinear_network, simulate
 
 PRESETS = {"sm": sm_smib, "gfm": gfm_smib, "gfl": gfl_smib}
@@ -59,21 +58,3 @@ def test_emt_simulation_runs():
     model = build_nonlinear_network(net, result)
     sim = simulate(model, (0.0, 0.2), rtol=1e-4, atol=1e-6, first_step=1e-8)
     assert np.all(np.isfinite(sim.x))
-
-
-def test_roa_grid_runs():
-    # Smallest possible grid (2x2) -- this is a smoke test that the ROA
-    # machinery works end-to-end on an IB-slack network, not a stability
-    # study in its own right (see test_roa.py for that on WSCC-9).
-    net = sm_smib()
-    result = run_power_flow(net)
-    model = build_nonlinear_network(net, result)
-    idx_th = find_state_index(model, "theta_{SM_1}")
-    idx_w = find_state_index(model, "dw_r_{SM_1}")
-    axis_x = RoaAxis(label="theta", state_index=idx_th, offsets=np.array([-0.1, 0.1]))
-    axis_y = RoaAxis(label="dw_r", state_index=idx_w, offsets=np.array([-0.01, 0.01]))
-    grid = trace_roa_grid(
-        model, axis_x=axis_x, axis_y=axis_y, t_final=0.3, t_early=0.1,
-        simulate_kwargs=dict(rtol=1e-3, atol=1e-5, first_step=1e-8),
-    )
-    assert grid.in_roa.shape == (2, 2)

@@ -7,11 +7,9 @@ distributed-network model. Whether that counts as "EMT" is a matter of
 definition: it integrates the actual nonlinear differential-algebraic
 equations (not a linearized small-signal approximation), which is the
 property that matters for this project's purposes, so it's named and
-scoped as the EMT simulation feature. A richer, switching-level/abc-frame
-extension — informed by ``G2ELib_V1.slx``'s Simscape network blocks and
-PWM/modulation logic, which this simpler formulation doesn't have — is
-tracked separately as future work ("detailed EMT models"; see the README
-and ``docs/sphinx/emt_investigation.md``), not started here.
+scoped as the EMT simulation feature. It doesn't capture switching-level
+converter physics, abc-frame/unbalanced faults, or distributed/
+traveling-wave line effects.
 
 Reuses exactly the nonlinear ``f``/``g``/``h`` callables built for
 cross-validation (:mod:`g2elin_core.components.base`) and the same
@@ -471,6 +469,20 @@ class EmtSimulationResult:
     scipy_result: object = field(repr=False)
 
 
+def find_state_index(model: NonlinearNetworkModel, name_contains: str) -> int:
+    """Locates a state by a (unique) substring of its name, e.g.
+    ``"dw_r_{SM_2}"`` or just ``"SM_2}"`` if that's unambiguous. Raises if
+    zero or more than one state matches, rather than silently guessing.
+    """
+    matches = [i for i, n in enumerate(model.state_names) if name_contains in n]
+    if len(matches) == 0:
+        raise ValueError(f"no state name contains {name_contains!r}")
+    if len(matches) > 1:
+        names = [model.state_names[i] for i in matches]
+        raise ValueError(f"{name_contains!r} matches more than one state: {names}")
+    return matches[0]
+
+
 def simulate(
     model: NonlinearNetworkModel,
     t_span: tuple[float, float],
@@ -485,8 +497,7 @@ def simulate(
 ) -> EmtSimulationResult:
     """Integrates the nonlinear DAE from ``x0`` (defaults to the model's own
     operating point — pass an explicit ``x0`` to start from a perturbed
-    state, e.g. for region-of-attraction sampling in ``stability/roa.py``).
-    ``u_exo_fn(t)`` lets a caller drive a disturbance (e.g. a P_ref step) by
+    state). ``u_exo_fn(t)`` lets a caller drive a disturbance (e.g. a P_ref step) by
     returning a modified exogenous-input vector at each t; defaults to
     holding it fixed at the operating point.
 

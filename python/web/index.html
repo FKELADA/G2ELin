@@ -271,17 +271,6 @@
   .chart-tooltip .muted { fill: var(--text-muted); }
   .chart-capture { fill: transparent; cursor: crosshair; }
 
-  .roa-table { border-collapse: separate; border-spacing: 3px; }
-  .roa-table th { font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-muted); font-weight: 500; padding: 0.3rem 0.4rem; }
-  .roa-table th.axis-title { color: var(--text-secondary); font-weight: 600; }
-  .roa-cell {
-    width: 3.4rem; height: 2.6rem; border-radius: 6px; text-align: center; vertical-align: middle;
-    font-family: var(--font-mono); font-size: 0.82rem; font-weight: 600; color: #ffffff;
-  }
-  .roa-cell.recovers { background: var(--good); }
-  .roa-cell.diverges { background: var(--critical); }
-  .roa-cell.unknown { background: var(--text-muted); color: var(--surface-1); }
-
   .net-edge { stroke: var(--baseline); stroke-width: 1.5; cursor: pointer; }
   .net-edge.transformer-marker { fill: var(--surface-1); stroke: var(--text-secondary); stroke-width: 1.5; cursor: pointer; }
   .net-bus { stroke: var(--surface-1); stroke-width: 2; cursor: pointer; }
@@ -393,10 +382,6 @@
       <span class="info-icon" tabindex="0">i<span class="tooltip">Integrates the network's actual nonlinear equations forward in time after perturbing one state — the real transient a linearized modal analysis can only approximate.</span></span>
     </span>
     <span class="tab-wrap">
-      <button class="tab" data-panel="roa" role="tab" aria-selected="false">Region of Attraction</button>
-      <span class="info-icon" tabindex="0">i<span class="tooltip">Grid-perturbation stability sampling: nonlinearly simulates many perturbed starting points and checks whether each recovers or drifts away.</span></span>
-    </span>
-    <span class="tab-wrap">
       <button class="tab" data-panel="docs" role="tab" aria-selected="false">Documentation</button>
       <span class="info-icon" tabindex="0">i<span class="tooltip">The full physics and architecture reference this UI is built on — equations, methodology, and how every module fits together.</span></span>
     </span>
@@ -409,7 +394,7 @@
       power injection must equal what its neighbors deliver through the network's impedances — via Newton-Raphson
       iteration, to get every bus's voltage, angle, and power flow at the DER dispatch and load levels currently
       set. It's the foundation everything else in this tool is built on: modal analysis linearizes around this
-      operating point, and EMT/ROA simulate around it too. Useful for: checking a dispatch is even feasible
+      operating point, and EMT simulation runs around it too. Useful for: checking a dispatch is even feasible
       (voltages in range, no overloaded lines) before asking anything about its dynamics.</p>
     </div>
     <div class="controls">
@@ -541,52 +526,6 @@
     </div>
     <div id="emt-results"><p class="empty">EMT time-domain simulation: perturb a state away from its
       operating point and integrate the full nonlinear network model to see whether — and how — it recovers.</p></div>
-  </section>
-
-  <section class="panel" id="panel-roa">
-    <div class="panel-intro">
-      <span class="info-icon" aria-hidden="true">i</span>
-      <p><strong>Region of attraction</strong> tracing perturbs the operating point along two chosen states in a
-      grid, nonlinearly simulates each point briefly (via the same EMT engine as the tab above), and checks
-      whether its distance from the unperturbed baseline trajectory shrinks or grows — a cheap, simulation-based
-      estimate of stability that doesn't require a formal Lyapunov-function certification. Useful for: mapping
-      out roughly how large a disturbance (e.g. a rotor-angle or speed jump) a given operating point can absorb
-      before it loses synchronism, and comparing that margin across different dispatches or DER mixes.</p>
-    </div>
-    <div class="controls">
-      <div class="field">
-        <label for="roa-axis-x">X axis: state</label>
-        <select id="roa-axis-x"></select>
-      </div>
-      <div class="field">
-        <label for="roa-axis-x-range">X range (+/-)</label>
-        <input type="number" id="roa-axis-x-range" step="0.01" value="0.4">
-      </div>
-      <div class="field">
-        <label for="roa-axis-y">Y axis: state</label>
-        <select id="roa-axis-y"></select>
-      </div>
-      <div class="field">
-        <label for="roa-axis-y-range">Y range (+/-)</label>
-        <input type="number" id="roa-axis-y-range" step="0.001" value="0.02">
-      </div>
-      <div class="field">
-        <label for="roa-grid-n">Grid</label>
-        <select id="roa-grid-n">
-          <option value="3">3 x 3</option>
-          <option value="5">5 x 5</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="roa-t-final">t_final (s, max 2)</label>
-        <input type="number" id="roa-t-final" step="0.1" min="0.2" max="2" value="1.0">
-      </div>
-      <button id="run-roa">Trace region of attraction</button>
-      <span class="spinner" id="roa-spinner"></span>
-    </div>
-    <div id="roa-results"><p class="empty">Simulation-based Lyapunov region-of-attraction tracing: grid-perturbs the
-      operating point along two states and checks whether each nonlinear trajectory trends back toward the
-      unperturbed baseline. A 5x5 grid can take a few minutes.</p></div>
   </section>
 
   <section class="panel" id="panel-docs">
@@ -986,10 +925,10 @@ function scheduleEditorPreview() {
 // One issue per structural problem network.validate_network() finds (not
 // just the first) -- "error" blocks the listed capabilities, "warning" is
 // a heads-up (e.g. an unsupported slack unit type: power flow still
-// works, modal/EMT/ROA don't yet).
+// works, modal/EMT don't yet).
 function issueListHtml(issues) {
   if (!issues.length) {
-    return '<p class="status-line"><span class="ok">No issues found</span> — safe for power flow and modal/EMT/ROA.</p>';
+    return '<p class="status-line"><span class="ok">No issues found</span> — safe for power flow and modal/EMT.</p>';
   }
   const rows = issues.map(i => {
     const cls = i.severity === "error" ? "bad" : "warning";
@@ -1588,7 +1527,6 @@ function renderPresetSummary(id) {
   document.getElementById("modal-results").innerHTML = '<p class="empty">Run modal analysis to see the eigenvalue map and mode table.</p>';
   document.getElementById("timeseries-results").innerHTML = '<p class="empty">Run the sweep to see bus voltages at each load level.</p>';
   document.getElementById("emt-results").innerHTML = '<p class="empty">EMT time-domain simulation: perturb a state away from its operating point and integrate the full nonlinear network model to see whether — and how — it recovers.</p>';
-  document.getElementById("roa-results").innerHTML = '<p class="empty">Simulation-based Lyapunov region-of-attraction tracing: grid-perturbs the operating point along two states and checks whether each nonlinear trajectory trends back toward the unperturbed baseline. A 5x5 grid can take a few minutes.</p>';
   loadStateOptions();
   if (document.getElementById("panel-network").classList.contains("active")) loadNetworkTab();
 }
@@ -1660,7 +1598,7 @@ document.getElementById("reset-network-btn").addEventListener("click", () => {
 // network transparently.
 const TAB_RUN_BUTTON_ID = {
   powerflow: "run-powerflow", modal: "run-modal", timeseries: "run-timeseries",
-  emt: "run-emt", roa: "run-roa",
+  emt: "run-emt",
 };
 function recalculateActiveTab() {
   const activeTab = document.querySelector("nav.tabs .tab[aria-selected='true']");
@@ -1671,33 +1609,21 @@ function recalculateActiveTab() {
   if (btnId) document.getElementById(btnId).click();
 }
 
-// --- EMT / ROA: state pickers. Nonlinear-model state names are entirely
+// --- EMT: state pickers. Nonlinear-model state names are entirely
 // preset-dependent (which DER id is the slack, which unit types exist), so
 // these are populated from GET /states rather than hard-coded -- see that
 // endpoint's docstring in g2elin_api/main.py.
 async function loadStateOptions() {
-  const xSel = document.getElementById("roa-axis-x");
-  const ySel = document.getElementById("roa-axis-y");
   const pSel = document.getElementById("emt-perturb-name");
   const plotStatesSel = document.getElementById("emt-plot-states");
   const plotInputsSel = document.getElementById("emt-plot-inputs");
   const plotOutputsSel = document.getElementById("emt-plot-outputs");
-  const all = [xSel, ySel, pSel, plotStatesSel, plotInputsSel, plotOutputsSel];
+  const all = [pSel, plotStatesSel, plotInputsSel, plotOutputsSel];
   all.forEach(s => { s.innerHTML = '<option>loading...</option>'; s.disabled = true; });
   try {
     const r = await fetchStatesActive();
-    // ROA's axis pickers stay filtered to rotor-like states (theta/dw_r) --
-    // that's still the physically meaningful pair for a stability-boundary
-    // sweep. The EMT tab's own pickers show every state/input/output --
-    // "expose all possible states to perturb and all states, inputs and
-    // outputs to plot" was the explicit ask, not a curated subset.
     const rotorLike = r.state_names.filter(n => n.includes("dw_r") || n.startsWith("theta"));
-    const rotorOptions = (rotorLike.length ? rotorLike : r.state_names).map(n => `<option value="${n}">${n}</option>`).join("");
-    [xSel, ySel].forEach(s => { s.innerHTML = rotorOptions; s.disabled = false; });
-    const firstTheta = rotorLike.find(n => n.startsWith("theta"));
     const firstDw = rotorLike.find(n => n.includes("dw_r"));
-    if (firstTheta) xSel.value = firstTheta;
-    if (firstDw) ySel.value = firstDw;
 
     // The EMT tab can perturb either a state (initial-condition offset) or
     // an input (a permanent step in an exogenous reference) -- one merged
@@ -2684,72 +2610,6 @@ document.getElementById("run-emt").addEventListener("click", async () => {
       const card = emtSeriesCard(title, { __t__: t, __series__: series });
       if (card) out.appendChild(card);
     });
-  } catch (e) {
-    spinner.textContent = "";
-    out.innerHTML = `<p class="status-line"><span class="bad">Error:</span> ${e.message}</p>`;
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-// --- Region of attraction ---
-function renderRoaGrid(r) {
-  const ny = r.axis_y_offsets.length;
-  const rowOrder = [...Array(ny).keys()].reverse(); // larger y offset on top, like a normal chart
-  const header = `<tr><th></th>${r.axis_x_offsets.map(v => `<th>${fmt(v, 3)}</th>`).join("")}</tr>`;
-  const rows = rowOrder.map(iy => {
-    const cells = r.axis_x_offsets.map((_, ix) => {
-      const failed = r.failed[iy][ix];
-      const cls = failed ? "unknown" : (r.in_roa[iy][ix] ? "recovers" : "diverges");
-      const symbol = failed ? "?" : (r.in_roa[iy][ix] ? "✓" : "✕");
-      const title = failed
-        ? "Newton solve did not converge from this perturbation"
-        : `distance to baseline: ${fmt(r.early_distance[iy][ix], 4)} (early) -> ${fmt(r.late_distance[iy][ix], 4)} (late)`;
-      return `<td class="roa-cell ${cls}" title="${title}">${symbol}</td>`;
-    }).join("");
-    return `<tr><th>${fmt(r.axis_y_offsets[iy], 3)}</th>${cells}</tr>`;
-  }).join("");
-  return `
-    <p class="status-line">x (columns): <b>${r.axis_x_label}</b> &nbsp;&nbsp; y (rows): <b>${r.axis_y_label}</b></p>
-    <div class="tablewrap"><table class="roa-table">${header}${rows}</table></div>`;
-}
-
-document.getElementById("run-roa").addEventListener("click", async () => {
-  const btn = document.getElementById("run-roa");
-  const spinner = document.getElementById("roa-spinner");
-  const out = document.getElementById("roa-results");
-  const axisXState = document.getElementById("roa-axis-x").value;
-  const axisXRange = parseFloat(document.getElementById("roa-axis-x-range").value);
-  const axisYState = document.getElementById("roa-axis-y").value;
-  const axisYRange = parseFloat(document.getElementById("roa-axis-y-range").value);
-  const gridN = parseInt(document.getElementById("roa-grid-n").value, 10);
-  const tFinal = parseFloat(document.getElementById("roa-t-final").value);
-  const tEarly = Math.min(0.1, tFinal * 0.2);
-  if (!axisXState || !axisYState) {
-    out.innerHTML = '<p class="status-line"><span class="bad">Error:</span> no state available for this preset.</p>';
-    return;
-  }
-  btn.disabled = true;
-  spinner.textContent = `Tracing a ${gridN}x${gridN} grid — each point is its own nonlinear trajectory, can take a while...`;
-  try {
-    const r = await runAnalysis("roa", {
-      axis_x_state: axisXState, axis_x_range: axisXRange, axis_y_state: axisYState, axis_y_range: axisYRange,
-      grid_n: gridN, t_final: tFinal, t_early: tEarly,
-    });
-    spinner.textContent = "";
-    const total = gridN * gridN;
-    const recovers = r.in_roa.flat().filter(Boolean).length;
-    const failedN = r.failed.flat().filter(Boolean).length;
-    out.innerHTML = `
-      <p class="status-line">${recovers} of ${total} perturbations trended back toward the baseline by t=${fmt(tFinal, 2)}s`
-      + (failedN ? ` (${failedN} solver failure${failedN === 1 ? "" : "s"})` : "") + `</p>
-      <div class="card">${renderRoaGrid(r)}
-        <div class="legend">
-          <span><span class="swatch" style="background:var(--good)"></span>Trending toward baseline</span>
-          <span><span class="swatch" style="background:var(--critical)"></span>Trending away</span>
-          <span><span class="swatch" style="background:var(--text-muted)"></span>Solver did not converge</span>
-        </div>
-      </div>`;
   } catch (e) {
     spinner.textContent = "";
     out.innerHTML = `<p class="status-line"><span class="bad">Error:</span> ${e.message}</p>`;

@@ -13,13 +13,9 @@ Phase P0 (foundations), P1 (static power flow), P2 (linear small-signal /
 modal analysis — SM/GFM(Droop)/GFL/IB slack, plus the full toolbox:
 sensitivity, mode shape, free/step response), P3 (time-series load flow),
 P4 (EMT/nonlinear time-domain simulation — now with an analytic Newton
-Jacobian, ~9x faster than the first working slice), P5 (Lyapunov
-region-of-attraction tracing, simulation-based), and P7 (web UI — result
+Jacobian, ~9x faster than the first working slice), and P7 (web UI — result
 tabs, always-light theme, a network editor and drag-and-drop from-scratch
-builder over an arbitrary `Network` JSON, not just the fixed presets). P6
-(detailed EMT models) is planned but not started — see its own section
-below for what it would add on top of P4's simulation and why it's a
-separate, later phase rather than a prerequisite:
+builder over an arbitrary `Network` JSON, not just the fixed presets):
 
 - `g2elin_core.network` — typed network schema (buses, lines, transformers,
   DER units), replacing the MATLAB `Y_network`/`Y_line`/`Y_TR`/`Y_DER`
@@ -36,8 +32,8 @@ separate, later phase rather than a prerequisite:
     1 SM + 2 GFM + 1 GFL (`Functions/CIGRE_raw.m` +
     `CIGRE/script_CIGRE_Islanded.m`, case `'CIGRE_Islanded_1SM_2GFM_1GFL'`
     — matches the `.slx` model actually present in this repo). Transcribed
-    line-by-line; used for power flow, modal analysis, EMT simulation and
-    ROA tracing alike.
+    line-by-line; used for power flow, modal analysis, and EMT simulation
+    alike.
   - `sm_smib()` / `gfm_smib()` / `gfl_smib()` — single-machine-infinite-bus
     presets: one SM/GFM/GFL against an infinite bus. **Not** a straight
     port like the two above — `Functions/preset_networks.m` names exactly
@@ -189,9 +185,7 @@ physics, no abc/unbalanced-fault representation, and lines/transformers
 are lumped RL branches rather than distributed/traveling-wave models. That
 still integrates real nonlinear time-domain dynamics, which is what
 "EMT simulation" means for this project's purposes, so it's named and
-scoped that way here rather than as a separate "RMS" fidelity tier. A
-richer, switching-level/abc-frame extension is tracked as its own,
-later phase — see P6 below.
+scoped that way here rather than as a separate "RMS" fidelity tier.
 
 - `g2elin_core.timedomain` — integrates the network's *nonlinear* DAE
   forward in time, reusing the same nonlinear `f`/`g`/`h` callables the
@@ -248,143 +242,13 @@ later phase — see P6 below.
   doing what they're defined to do (see `test_emt_simulation.py`'s
   `_non_rotating_mask` note) — everything else stays bounded.
 
-  This is a large enough speedup that it changes what's practical next:
-  Lyapunov region-of-attraction tracing (P5, still not started) needs many
-  multi-second trajectories from perturbed initial conditions, which
-  wasn't realistic on the old numeric-Jacobian solver and now plausibly
-  is. Excluding the rotating-angle states from whatever distance metric
-  classifies "returned to equilibrium" vs. "diverged" is a real
-  requirement for that work, not an edge case — noted here so it isn't
-  rediscovered from scratch.
-
-### P5: Lyapunov region-of-attraction tracing (simulation-based)
-
-- `g2elin_core.stability.roa` — exactly the "cheap simulation-based/
-  trajectory-sampling ROA estimator" the migration plan proposed as the
-  fast, dependency-light method (a formal SOS/Lyapunov certification via
-  e.g. `pydrake` isn't implemented). `trace_roa_grid` perturbs the
-  operating point along two chosen state directions, integrates the
-  nonlinear EMT model from each perturbed point (reusing `timedomain/emt.py`
-  directly — this is what the analytic-Jacobian speedup above unblocked),
-  and classifies each grid point by whether its distance to the
-  unperturbed trajectory's own path is shrinking or growing between an
-  early and a late checkpoint.
-
-  Two real design points, not incidental details:
-  - **Trend, not fixed-time convergence.** An early version compared the
-    distance at a single fixed end time against a threshold, and it
-    misclassified clearly-stable, only-moderately-perturbed points as
-    "unstable" simply because WSCC-9's ~0.5-1.4s-period electromechanical
-    modes hadn't finished a full oscillation yet by the time checked.
-    Comparing distance at two checkpoints (early, after the fast
-    sub-millisecond transients settle; late, near the end of the window)
-    and checking whether it *shrank* is a much better proxy for "is this
-    converging" from an affordable short trajectory.
-  - **A solver failure is tracked, not misclassified as instability.** The
-    single most extreme corner of the validated 3x3 grid (theta and omega
-    both perturbed to their most negative offset together) failed to
-    converge in the coupled Newton solve. That's recorded in a separate
-    `failed` grid and excluded from `in_roa`, rather than silently reading
-    as "not in the ROA" — those are different claims ("we don't know" vs.
-    "no"), and conflating them would be a real correctness bug, not a
-    cosmetic one.
-
-  Validated on a small (3x3), affordable (~100s) grid on WSCC-9,
-  perturbing a non-slack machine's rotor angle and speed deviation: the
-  center (zero-perturbation) point trivially matches its own baseline, and
-  7 of 8 surrounding points show real, substantial distance shrinkage
-  (e.g. 5.28 -> 0.44) consistent with the system's known 12-49% modal
-  damping. A finer grid or a proper ROA *boundary* (as opposed to "this
-  grid mostly recovers") is unstarted — this validates the mechanism, not
-  a finished feature.
-
-### P6: detailed EMT models — planned, not started
-
-**Renamed and rescoped.** This phase used to be called "full EMT" on the
-theory that P4's nonlinear simulation wasn't "real" EMT and this phase was
-the one that would deliver it. On reflection that drew the RMS/EMT line in
-the wrong place: P4 already integrates the actual nonlinear
-differential-algebraic equations forward in time (not a linearized
-approximation), which is the property that makes something EMT simulation
-for this project's purposes — so it's now named and counted as that (see
-P4 above). What P6 would add on top isn't "EMT simulation" as a category,
-it's specific higher-fidelity physics P4's dq-frame, averaged-converter,
-single-rotating-reference-frame formulation structurally can't represent:
-switching-level converter behavior (PWM/modulation, not just an averaged
-control law), a three-phase/abc-frame or explicitly unbalanced
-representation (single-line-to-ground faults, negative-sequence currents),
-and distributed/traveling-wave line models (surge propagation, the kind of
-transient that shows up on a timescale shorter than a line's propagation
-delay). None of that is in `symGFM_types.m`/`symLine.m` etc., and none of
-it is in P4's port of them — it would have to come from somewhere else,
-which is what makes this a separate, later phase rather than a blocking
-prerequisite.
-
-That "somewhere else" is `G2ELib_V1.slx` — the original tool's actual
-Simulink/Simscape EMT model, which *does* have this physics (explicit
-Simscape/SimPowerSystems physical network blocks, PWM/modulation logic)
-that the symbolic MATLAB source never did. Unlike every other feature in
-this project, P6 has **no symbolic MATLAB source to port** — it has to be
-reverse-engineered from a block diagram instead. Real investigative work
-has already been done here, ahead of actually building anything, and is
-worth preserving even though implementation hasn't started:
-
-- **The `.slx` is a readable zip/XML archive, not an opaque binary.**
-  `simulink/systems/system_<SID>.xml` holds one file per subsystem: every
-  block's type, name, and parameters as literal `<P>` text, every wire as
-  `<Line Src=... Dst=...>`. No MATLAB/Simulink installation is needed to
-  read it — see [`tools/slx_inspect.py`](tools/slx_inspect.py), a small
-  dev-time inspector (not a `g2elin_core` runtime dependency) that walks the
-  library-wide block-type histogram, the per-subsystem size ranking, and
-  the full subsystem hierarchy from `system_root`.
-- **Full inventory generated and preserved**: see
-  [`docs/emt_inventory.md`](docs/emt_inventory.md) for the complete
-  histogram (1135 blocks / 55 subsystems), hierarchy tree, and a worked
-  cross-validation example. The headline finding: only ~6% of all blocks
-  (13 `PMComponent` + 6 `Ground` + 48 `PMIOPort` = 67 of 1135) are opaque
-  Simscape/SimPowerSystems acausal physical blocks, concentrated in the
-  Transformer/Load/Upstream-Network subsystems where the underlying physics
-  is standard RL/RLC and already implemented in this codebase's (P4) EMT
-  component models. The other 94% — droop/VSM/dVOC control loops, PLLs,
-  current/voltage loops, AVRs — are ordinary Simulink signal-flow blocks
-  (Gain, Sum, Product, Integrator, TransferFcn, StateSpace) with literal
-  parameter values, i.e. genuinely readable, just voluminous.
-- **First real independent cross-validation in this project.** Every other
-  phase checked a Python port against the MATLAB script it was transcribed
-  from — never against the actual compiled/executable artifact. Hand-tracing
-  `system_1846` ("Q-V Droop MMU (PU)", 13 blocks) block-by-block from its
-  XML — a low-pass filter on `Q`, a `Sum`, a `Gain(Droop_nq)`, a `hypot` on
-  `Eg_set_dq0`, and a rescaling `Product` — reduces to exactly
-  `ved_ref = ve_ref + (Q_set - qm) * Droop_nq`, matching
-  [`components/gfm.py`](src/g2elin_core/components/gfm.py)'s already-ported
-  Droop equation (from `Functions/symGFM_types.m`) precisely. Full trace in
-  `docs/emt_inventory.md`.
-
-**What a "detailed EMT models" phase would actually need to do**, when it's
-picked up: resolve `Reference` blocks (98 of them, including a MathWorks
-"Synchronous Machine pu Fundamental" library block) against Simulink's own
-block semantics; resolve `From`/`Goto` tag-based signal routing (260 blocks
-combined) into explicit wiring, which the current inventory tool doesn't
-attempt; model the Simscape physical-network blocks as DAEs rather than
-signal flow (or derive equivalent switching/abc-frame equations directly,
-informed by — not mechanically transcribed from — the diagrams, the way the
-Q-V droop cross-validation above was done by hand); and — the part with no
-available workaround — find some way to validate the *behavior* of the
-result, since this environment has no MATLAB/Simulink installation to run
-the original and diff against. Translating and validating all 1135 blocks
-is not realistic to complete in a small number of sessions, so this stays
-explicitly a "planned, later" phase rather than something to start now —
-picking it up means choosing one subsystem at a time (GFL and GFM's shared
-inner loops are the highest-value first targets, since GFM's Droop outer
-loop is already ported and cross-validated) rather than a single push.
-
 ### P7: a first slice of the web UI
 
 - `g2elin_api` (`src/g2elin_api/`) — a FastAPI app wrapping the real
   `g2elin_core` functions (no mocking) over the five validated presets:
   `POST /api/presets/{id}/powerflow`, `/modal` (+ `/modal/sensitivity`,
   `/modal/mode_shape`, `/modal/free_response`, `/modal/step_response`),
-  `/timeseries`, `/emt`, `/roa`, plus `GET /api/presets`, `GET
+  `/timeseries`, `/emt`, plus `GET /api/presets`, `GET
   /api/presets/{id}/topology`, `GET /api/presets/{id}/states` for the
   picker/diagram/pickers. Response models (`g2elin_api/schemas.py`) are
   deliberately separate from `g2elin_core`'s own result types
@@ -392,8 +256,8 @@ loop is already ported and cross-validated) rather than a single push.
   holds numpy arrays — neither is JSON-serializable), so the wire format
   is a considered choice, not whatever `dict()` happened to produce.
 - `web/index.html` — a single-page frontend: a preset picker, and (now)
-  seven tabs (Power Flow, Modal Analysis, Time Series, Network, EMT
-  Simulation, Region of Attraction, Documentation) that call the API and
+  six tabs (Power Flow, Modal Analysis, Time Series, Network, EMT
+  Simulation, Documentation) that call the API and
   render results, including an eigenvalue map (SVG, symlog-scaled real
   axis and frequency axis since eigenvalues here span ~15 orders of
   magnitude — see the Rg-penalty-parameter note above — with points
@@ -429,43 +293,31 @@ loop is already ported and cross-validated) rather than a single push.
   includes building/editing arbitrary networks interactively, which is
   substantially more work and deferred).
 
-- **EMT Simulation and Region of Attraction tabs**, wrapping P4/P5
-  (`g2elin_core.timedomain`/`g2elin_core.stability`) over HTTP: three new
-  endpoints (`GET /api/presets/{id}/states`, `POST .../emt`,
-  `POST .../roa`). `/states` exists because the nonlinear model's state
-  names are entirely preset-dependent (which DER id is the slack, which
-  unit types exist), so the two tabs' state pickers are populated from it
-  rather than hard-coded — the same problem `stability.find_state_index`'s
-  substring matching solves internally, which `/emt`/`/roa` reuse
-  server-side so a typo'd/ambiguous state name comes back as a 422 with
-  that function's own error message, not a silently wrong answer.
-  `t_final`/`grid_n` are bounded server-side (not just documented) since
-  these endpoints run a real nonlinear DAE integration — or a grid of
-  them, for ROA — synchronously inside one HTTP request.
+- **EMT Simulation tab**, wrapping P4 (`g2elin_core.timedomain`) over
+  HTTP: two new endpoints (`GET /api/presets/{id}/states`, `POST .../emt`).
+  `/states` exists because the nonlinear model's state names are entirely
+  preset-dependent (which DER id is the slack, which unit types exist), so
+  the tab's state pickers are populated from it rather than hard-coded —
+  the same problem `find_state_index`'s substring matching solves
+  internally, which `/emt` reuses server-side so a typo'd/ambiguous state
+  name comes back as a 422 with that function's own error message, not a
+  silently wrong answer. `t_final` is bounded server-side (not just
+  documented) since this endpoint runs a real nonlinear DAE integration
+  synchronously inside one HTTP request.
 
   The **EMT Simulation** tab perturbs a chosen state and plots the
   resulting trajectory as a multi-series line chart — built directly via
   the SVG DOM API (not the `innerHTML` string templates the other tabs
   use), since it needed live `mousemove` listeners for a real
   crosshair+tooltip (per the dataviz skill: not optional for a line
-  chart). The **Region of Attraction** tab renders `trace_roa_grid`'s
-  output as an HTML `<table>` — a natural fit for a small labeled matrix,
-  giving the axis-offset row/column headers "for free" — with cells
-  colored good/critical/muted-gray for trending-toward/trending-away/
-  solver-didn't-converge, using the same validated categorical/status
-  palette (`--series-1..8`, `--good`, `--critical`) the eigenvalue map
-  already established. `RoaResponse`'s distance grids use `float | None`
-  rather than `float` since JSON has no `NaN` literal (Python's `json`
-  module would otherwise emit a bare `NaN` token, which fails
-  `fetch().json()` in the browser) — `None` is what actually survives the
-  round trip for a grid point where the Newton solve failed.
+  chart).
 
   Verified the same way as the rest of P7: `tests/test_api.py` exercises
-  all three new endpoints (happy path, an ambiguous/unknown
-  `perturb_state`, an out-of-bounds `t_final`/`grid_n`) over HTTP, plus
-  the frontend was reviewed by hand against those confirmed response
-  shapes; not personally visually verified in a browser, same
-  no-browser-automation constraint as the rest of this tab set.
+  the new endpoints (happy path, an ambiguous/unknown `perturb_state`, an
+  out-of-bounds `t_final`) over HTTP, plus the frontend was reviewed by
+  hand against those confirmed response shapes; not personally visually
+  verified in a browser, same no-browser-automation constraint as the
+  rest of this tab set.
 
 - **Sphinx documentation, integrated as a tab.** `docs/sphinx/`
   builds full API-reference + architecture documentation via
@@ -473,7 +325,7 @@ loop is already ported and cross-validated) rather than a single push.
   subpackage, each with a hand-written [Mermaid](https://mermaid.js.org/)
   diagram (class diagrams for the data structures, flowcharts/sequence
   diagrams for the non-obvious control flow — the coupled Newton solve in
-  `timedomain`, the ROA classification loop, the EMT subsystem hierarchy)
+  `timedomain`, the EMT subsystem hierarchy)
   plus the real docstrings pulled straight from the code, so the diagrams
   and the reference can't drift apart silently. Build it with
   `pip install -e ".[docs]"` then `python tools/build_docs.py`; `g2elin_api`
@@ -604,7 +456,7 @@ loop is already ported and cross-validated) rather than a single push.
   (`wscc9_1gfm_2gfl`, `wscc9_3gfm`) have a **GFM as the slack** in the
   MATLAB source — power flow works (pandapower's slack handling doesn't
   care about unit type), but `interconnect/network_assembly.py` only wires
-  up an SM/IB slack so far, so modal/EMT/ROA raise a documented
+  up an SM/IB slack so far, so modal/EMT raise a documented
   `NotImplementedError` (HTTP 501) for those two, not a silent wrong
   answer. `g2elin_api/presets.py`'s `PRESETS` dict is now built from a
   `(id, name, description, build)` table rather than 5 (now 15)
@@ -655,7 +507,7 @@ loop is already ported and cross-validated) rather than a single push.
   bus, graph connectivity, and an unsupported slack unit type -- and
   returns *every* issue found, each tagged `"error"` (blocks the affected
   capability) or `"warning"` (e.g. a GFM/GFL slack: power flow still
-  works, modal/EMT/ROA don't support it yet). `compute_operating_point()`
+  works, modal/EMT don't support it yet). `compute_operating_point()`
   calls this itself and raises one combined `ValueError` listing every
   error (-> HTTP 422, not a 500) regardless of whether a caller checks
   proactively; a new `POST /api/network/validate` endpoint also exposes it
@@ -679,8 +531,7 @@ loop is already ported and cross-validated) rather than a single push.
   eigenvalue/damping/participation-factor and sensitivity/mode-shape/
   free-response/step-response formulas in `modules/pipeline.md`; the
   coupled-Newton DAE residual and its analytic Jacobian in
-  `modules/timedomain.md`; and the ROA distance-metric/trend
-  classification in `modules/stability.md`. Every equation was
+  `modules/timedomain.md`. Every equation was
   transcribed directly from the source it documents (Sphinx builds
   clean, `-W --keep-going`, 0 warnings) rather than re-derived from
   memory. Separately, `web/index.html` gained a short pedagogical
@@ -700,9 +551,8 @@ loop is already ported and cross-validated) rather than a single push.
   before it reached the docs: an earlier draft picked "the least-damped
   mode" mechanically for its free-response/EMT-comparison sections, and
   that mode turned out to be the network's numerically-near-zero
-  reference-angle eigenvalue (the "theta problem" `stability/roa.py`'s
-  own module docstring already documents — an absolute angle has no
-  restoring force, so every closed-loop network here has exactly one
+  reference-angle eigenvalue (the "theta problem" — an absolute angle has
+  no restoring force, so every closed-loop network here has exactly one
   structurally-zero eigenvalue), not a real dynamic mode; comparing a nonlinear
   trajectory against a frozen baseline for that kind of state diverges
   by construction and has nothing to do with instability. Fixed by
@@ -719,7 +569,7 @@ loop is already ported and cross-validated) rather than a single push.
   `myst-parser` — it supersedes it as the registered Markdown/`.ipynb`
   parser (`source_suffix` now maps both to `"myst-nb"`; `conf.py`'s
   `nb_execution_mode = "off"` renders the notebook's own already-executed,
-  already-verified outputs instead of re-running a multi-minute EMT/ROA
+  already-verified outputs instead of re-running a multi-minute EMT
   simulation on every docs build). `notebooks/` stays the single
   git-tracked source of truth (same as `tour.ipynb`/`random_network.ipynb`)
   — `tools/build_docs.py` stages a copy into a new, gitignored
@@ -785,35 +635,25 @@ loop is already ported and cross-validated) rather than a single push.
   already warmed up) WSCC-9 solve takes ~0.17s.
 - **Every `modal.toolbox` and `timedomain.emt.simulate()` option now
   exercised in both the CIGRE and random-network notebooks**, plus a
-  `RUN_EMT_SECTION`/`RUN_ROA_SECTION` toggle pair (default `False`,
-  matching `tour.ipynb`'s own established convention) gating the slow
-  nonlinear cells in each. `eigenvalue_sensitivity()` was the one
-  `modal.toolbox` function neither notebook had used before (`mode_shape`/
-  `free_response`/`step_response` already were) — added to both.
-  `simulate()`'s full parameter surface (`t_span`, `x0`, `u_exo_fn`,
-  `t_eval`, `method`, `rtol`, `atol`, `first_step`) is now documented in
-  a table and exercised via two demonstrations per notebook: perturbing a
-  **state** (the existing linear-vs-nonlinear comparison) and perturbing
-  an **input** via `u_exo_fn` (a permanent reference step, held from
-  $t=0$ — the same `perturb_kind="input"` path `g2elin_api`'s own EMT
-  endpoint already supported but neither notebook had demonstrated).
-  Every new *gated* code path (state perturbation, input perturbation,
-  ROA) was verified standalone with the toggle forced `True` before
-  shipping with it defaulted `False` — a toggle guard only proves the
-  *unguarded* path still runs; it says nothing about whether the code
-  inside the guard is even correct. That check caught two real problems:
-  a leftover dead-code artifact (`... if False else None`) in the CIGRE
-  notebook's own step-response cell, predating this change, cleaned up
-  while there; and `random_network.ipynb`'s ROA demo, at CIGRE's own
-  `t_final=0.6s`, reporting *zero* recovering grid points for a genuinely
-  stable network — its swing mode is damped at ~13% (weaker than CIGRE's
-  ~22%), so 0.6s simply wasn't enough time to show the shrinkage yet
-  (confirmed by re-running the identical perturbation to `t_final=4.0s`:
-  the same distance metric drops by two orders of magnitude). Fixed by
-  retuning `t_final` to `1.5s` for that network specifically, not by
-  copying CIGRE's own value — a real illustration of why `t_final` has to
-  match a mode's own damping, not be reused across networks, exactly the
-  point `docs/sphinx/modules/stability.md` already makes in the abstract.
+  `RUN_EMT_SECTION` toggle (default `False`, matching `tour.ipynb`'s own
+  established convention) gating the slow nonlinear cells in each.
+  `eigenvalue_sensitivity()` was the one `modal.toolbox` function neither
+  notebook had used before (`mode_shape`/`free_response`/`step_response`
+  already were) — added to both. `simulate()`'s full parameter surface
+  (`t_span`, `x0`, `u_exo_fn`, `t_eval`, `method`, `rtol`, `atol`,
+  `first_step`) is now documented in a table and exercised via two
+  demonstrations per notebook: perturbing a **state** (the existing
+  linear-vs-nonlinear comparison) and perturbing an **input** via
+  `u_exo_fn` (a permanent reference step, held from $t=0$ — the same
+  `perturb_kind="input"` path `g2elin_api`'s own EMT endpoint already
+  supported but neither notebook had demonstrated). Every new *gated*
+  code path (state perturbation, input perturbation) was verified
+  standalone with the toggle forced `True` before shipping with it
+  defaulted `False` — a toggle guard only proves the *unguarded* path
+  still runs; it says nothing about whether the code inside the guard is
+  even correct. That check caught a real problem: a leftover dead-code
+  artifact (`... if False else None`) in the CIGRE notebook's own
+  step-response cell, predating this change, cleaned up while there.
   Also fixed a `myst-nb` structural-linter warning (H1 straight to H3,
   "Non-consecutive header level increase") both new toggle-explanation
   cells introduced now that these notebooks render through Sphinx, not
@@ -847,9 +687,9 @@ loop is already ported and cross-validated) rather than a single push.
   gap to close.
 
 Not yet started: legacy `Y_*` importer, other GFM controller variants,
-detailed EMT models (see P6 above), a GFM slack (see the two WSCC variants
-above), and (once Node.js is available) migrating the frontend to the
-planned React/TypeScript/Vite stack.
+a GFM slack (see the two WSCC variants above), and (once Node.js is
+available) migrating the frontend to the planned React/TypeScript/Vite
+stack.
 
 ## Setup
 
@@ -900,8 +740,8 @@ after that); everything else is fast.
 web UI, no API layer) in the order data actually flows through the tool —
 `network` -> `pu_base` -> `powerflow` -> `network.topology` ->
 `operating_point` -> `components` -> `interconnect` -> `pipeline` ->
-`modal` (`analysis` + `toolbox`) -> `timedomain` (EMT) -> `stability`
-(ROA) -> `timeseries` — plotting each result with matplotlib. Run it with:
+`modal` (`analysis` + `toolbox`) -> `timedomain` (EMT) -> `timeseries` —
+plotting each result with matplotlib. Run it with:
 
 ```powershell
 pip install -e ".[notebook]"
@@ -910,14 +750,11 @@ jupyter lab notebooks/tour.ipynb
 ```
 
 Already executed top-to-bottom (outputs committed) so it's readable
-without running it first. The EMT and ROA sections are the slowest cells
-(full nonlinear coupled-Newton time integration, not just linear algebra)
-and default to **off** via `RUN_EMT_SECTION`/`RUN_ROA_SECTION` toggles in
-a cell near the top, so "Restart Kernel and Run All" finishes quickly;
-flip either to `True` to exercise it. When it does run, the ROA section
-deliberately uses a small 3x3 grid over a short horizon to stay a quick
-illustrative sweep rather than the multi-minute production-size grid the
-web UI's ROA tab allows.
+without running it first. The EMT section is the slowest cell (full
+nonlinear coupled-Newton time integration, not just linear algebra) and
+defaults to **off** via the `RUN_EMT_SECTION` toggle in a cell near the
+top, so "Restart Kernel and Run All" finishes quickly; flip it to `True`
+to exercise it.
 
 A "9b" section traces a root locus of a GFM's inner current-loop tuning
 (`operating_point.gfm_params(..., tr_cl=...)`, transcribed from

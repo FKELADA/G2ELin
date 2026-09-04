@@ -10,7 +10,6 @@ neither caller re-implements request validation or error handling.
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import asdict
 from typing import AsyncIterator, Callable
 
@@ -25,8 +24,7 @@ from g2elin_core.network.validation import validate_network
 from g2elin_core.pipeline import linearize_network
 from g2elin_core.powerflow import run_power_flow
 from g2elin_core.powerflow.pandapower_adapter import PowerFlowResult
-from g2elin_core.stability import RoaAxis, find_state_index, trace_roa_grid
-from g2elin_core.timedomain import NonlinearNetworkModel, build_nonlinear_network, simulate, simulate_steps
+from g2elin_core.timedomain import NonlinearNetworkModel, build_nonlinear_network, find_state_index, simulate, simulate_steps
 from g2elin_core.timeseries import run_time_series, scale_loads
 
 from .schemas import (
@@ -42,8 +40,6 @@ from .schemas import (
     ModeShapeResponse,
     NetworkIssueRow,
     PowerFlowResponse,
-    RoaRequest,
-    RoaResponse,
     SensitivityEntryRow,
     SensitivityRequest,
     SensitivityResponse,
@@ -59,18 +55,14 @@ from .schemas import (
 
 # Bounds on user-controlled simulation cost, enforced server-side rather than
 # just documented -- these endpoints run a real nonlinear DAE integration
-# (or a grid of them, for ROA) synchronously inside one HTTP request, so an
-# unbounded t_final/grid_n directly translates to an unbounded request time.
+# synchronously inside one HTTP request, so an unbounded t_final directly
+# translates to an unbounded request time.
 EMT_MAX_T_FINAL = 3.0
 EMT_MIN_N_POINTS = 10
 EMT_MAX_N_POINTS = 2000  # each extra sample costs one more Newton solve when plot_inputs/plot_outputs is set
 EMT_DEFAULT_N_POINTS = 200  # -> default dt = t_final/199 when req.dt isn't given
 MODAL_MAX_T_FINAL = 20.0  # free/step response are cheap (linear algebra, no ODE solve) -- a looser bound
-ROA_MAX_GRID_N = 5
-ROA_MIN_GRID_N = 2
-ROA_MAX_T_FINAL = 2.0
-EMT_SIMULATE_KWARGS = dict(rtol=1e-4, atol=1e-6, first_step=1e-8)  # see stability/roa.py's DEFAULT_SIMULATE_KWARGS
-ROA_SIMULATE_KWARGS = dict(rtol=1e-3, atol=1e-5, first_step=1e-8)  # matches tests/test_roa.py
+EMT_SIMULATE_KWARGS = dict(rtol=1e-4, atol=1e-6, first_step=1e-8)
 
 
 def bus_rows(result: PowerFlowResult) -> list[BusRow]:
@@ -262,7 +254,7 @@ def find_state_or_422(model: NonlinearNetworkModel, name_contains: str) -> int:
 
 
 def states_response(network: Network) -> StatesResponse:
-    """State/input/output names for the nonlinear (EMT/ROA) model -- lets
+    """State/input/output names for the nonlinear (EMT) model -- lets
     the frontend populate its pickers without hard-coding per-network names
     (which differ: e.g. only synchronous machines have ``dw_r_*`` states,
     and which DER id is the slack varies).
@@ -338,11 +330,9 @@ def emt_response(network: Network, req: EmtRequest) -> EmtResponse:
         sim = simulate(model, (0.0, req.t_final), x0=x0, u_exo_fn=u_exo_fn, t_eval=t_eval, **EMT_SIMULATE_KWARGS)
     except RuntimeError as e:
         # The coupled Newton solve (see timedomain/emt.py) can fail to
-        # converge for a large enough perturbation -- trace_roa_grid tracks
-        # this as a distinct "unknown" outcome for a grid of trajectories,
-        # but a single EMT trajectory that fails mid-integration has no
-        # partial result worth returning, so this surfaces as a clean 422
-        # instead of an unhandled 500.
+        # converge for a large enough perturbation -- a trajectory that
+        # fails mid-integration has no partial result worth returning, so
+        # this surfaces as a clean 422 instead of an unhandled 500.
         raise HTTPException(
             status_code=422,
             detail=f"nonlinear solver did not converge for this perturbation ({e}); try a smaller offset",
@@ -486,38 +476,3 @@ async def emt_live_stream(plan: _EmtLivePlan, perturb_kind: str, request: Reques
         yield json.dumps({"error": f"nonlinear solver did not converge for this perturbation ({e}); try a smaller offset"}) + "\n"
         return
     yield json.dumps({"done": True, "perturbed": plan.perturbed_name, "perturb_kind": perturb_kind, "n_steps": n_steps}) + "\n"
-
-
-def _nan_to_none_grid(arr: np.ndarray) -> list[list[float | None]]:
-    return [[float(v) if math.isfinite(v) else None for v in row] for row in arr]
-
-
-def roa_response(network: Network, req: RoaRequest) -> RoaResponse:
-    if not (ROA_MIN_GRID_N <= req.grid_n <= ROA_MAX_GRID_N):
-        raise HTTPException(status_code=422, detail=f"grid_n must be in [{ROA_MIN_GRID_N}, {ROA_MAX_GRID_N}]")
-    if not (0 < req.t_early < req.t_final <= ROA_MAX_T_FINAL):
-        raise HTTPException(status_code=422, detail=f"need 0 < t_early < t_final <= {ROA_MAX_T_FINAL}")
-
-    model = build_nonlinear_model_from_network(network)
-    idx_x = find_state_or_422(model, req.axis_x_state)
-    idx_y = find_state_or_422(model, req.axis_y_state)
-
-    axis_x = RoaAxis(
-        label=model.state_names[idx_x], state_index=idx_x,
-        offsets=np.linspace(-req.axis_x_range, req.axis_x_range, req.grid_n),
-    )
-    axis_y = RoaAxis(
-        label=model.state_names[idx_y], state_index=idx_y,
-        offsets=np.linspace(-req.axis_y_range, req.axis_y_range, req.grid_n),
-    )
-    result = trace_roa_grid(
-        model, axis_x=axis_x, axis_y=axis_y, t_final=req.t_final, t_early=req.t_early,
-        simulate_kwargs=ROA_SIMULATE_KWARGS,
-    )
-    return RoaResponse(
-        axis_x_label=axis_x.label, axis_x_offsets=axis_x.offsets.tolist(),
-        axis_y_label=axis_y.label, axis_y_offsets=axis_y.offsets.tolist(),
-        in_roa=result.in_roa.tolist(), failed=result.failed.tolist(),
-        early_distance=_nan_to_none_grid(result.early_distance),
-        late_distance=_nan_to_none_grid(result.late_distance),
-    )

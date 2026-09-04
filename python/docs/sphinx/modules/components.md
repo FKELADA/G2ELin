@@ -5,8 +5,8 @@ Ports the pattern used throughout `Functions/sym*.m`: build a full
 (differential equations, algebraic constraints, outputs), then either
 linearize it around an operating point (what every MATLAB `sym*.m` file
 did, and all it did) or keep it nonlinear and lambdify it to a fast numeric
-callable (new — this is what makes {doc}`EMT simulation <timedomain>` and
-{doc}`ROA tracing <stability>` possible without re-deriving any physics).
+callable (new — this is what makes {doc}`EMT simulation <timedomain>`
+possible without re-deriving any physics).
 
 ## The shared machinery (`components.base`)
 

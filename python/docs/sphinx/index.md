@@ -25,7 +25,6 @@ flowchart TD
         MODAL["modal<br/>analysis"]
         TS["timeseries<br/>scenario"]
         TD["timedomain<br/>emt"]
-        STAB["stability<br/>roa"]
     end
     subgraph Surface["g2elin_api + web/"]
         API["g2elin_api<br/>FastAPI"]
@@ -44,7 +43,6 @@ flowchart TD
     IC --> PIPE
     IC --> TD
     PIPE --> MODAL
-    TD --> STAB
 
     NET --> API
     PF --> API
@@ -63,7 +61,6 @@ flowchart TD
     click MODAL "modules/pipeline.html" "modal analysis"
     click TS "modules/timeseries.html" "time-series load flow"
     click TD "modules/timedomain.html" "EMT/nonlinear simulation"
-    click STAB "modules/stability.html" "Lyapunov ROA tracing"
     click API "api_and_web.html" "FastAPI + web UI"
 ```
 
@@ -76,9 +73,8 @@ the {doc}`symbolic component models <modules/components>` (synchronous
 machine, grid-forming/grid-following converters, lines, nodes, loads), which
 {doc}`interconnect <modules/interconnect>` wires into one closed-loop system —
 consumed either by the linear {doc}`pipeline and modal analysis <modules/pipeline>`
-or by the nonlinear
-{doc}`EMT time-domain solver <modules/timedomain>` (→
-{doc}`Lyapunov ROA tracing <modules/stability>`). {doc}`g2elin_api and the
+or by the nonlinear {doc}`EMT time-domain solver <modules/timedomain>`.
+{doc}`g2elin_api and the
 web UI <api_and_web>` sit on top, exposing all of this over HTTP to the
 browser tab you're probably reading this from. For a single worked
 example that runs every one of these modules end to end on one real
@@ -105,12 +101,10 @@ modules/interconnect
 modules/pipeline
 modules/timeseries
 modules/timedomain
-modules/stability
 api_and_web
 cigre_walkthrough
 _notebooks/cigre_1sm_1gfm_1gfl_walkthrough
 _notebooks/random_network
-emt_investigation
 ```
 
 ## Status at a glance
@@ -122,9 +116,7 @@ emt_investigation
 | P2 | Linear small-signal / modal analysis | done — SM, GFM(Droop), GFL, IB slack; full toolbox (sensitivity, mode shape, free/step response) |
 | P3 | Time-series load flow | done |
 | P4 | EMT / nonlinear time-domain simulation | done — analytic Newton Jacobian |
-| P5 | Lyapunov region-of-attraction tracing | done — simulation-based |
-| P6 | Detailed EMT models (switching-level, abc-frame, distributed lines) | planned, not started — see {doc}`emt_investigation` |
-| P7 | Web UI | presets + 6 result tabs (incl. Network) + this doc tab, always-light theme |
+| P7 | Web UI | presets + 5 result tabs (incl. Network) + this doc tab, always-light theme |
 
 This table (and everything linked from it) describes what's implemented and
 tested *in this codebase*, not aspirations — see each module page's own

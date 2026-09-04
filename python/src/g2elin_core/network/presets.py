@@ -202,7 +202,7 @@ def wscc9_1gfm_2gfl() -> Network:
     dispatch to hold, it defines the voltage/frequency reference the rest
     of the network locks to -- and needs real modeling work, not just
     wiring). Power flow works fine (pandapower's slack handling doesn't
-    care about unit type), but modal analysis / EMT / ROA raise
+    care about unit type), but modal analysis / EMT raise
     ``NotImplementedError`` (surfaced as an HTTP 501 by the API), the same
     documented, controlled failure mode as any other unsupported DER
     combination in this codebase.

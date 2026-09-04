@@ -2,9 +2,8 @@
 editor / from-scratch builder layer.
 
 Wraps the real ``g2elin_core`` compute functions (no mocking): static power
-flow, linear modal analysis, time-series load flow, nonlinear EMT
-time-domain simulation, and simulation-based Lyapunov region-of-attraction
-tracing. Two ways to get a ``Network`` to run these on:
+flow, linear modal analysis, time-series load flow, and nonlinear EMT
+time-domain simulation. Two ways to get a ``Network`` to run these on:
 
 - ``/api/presets/{id}/...`` — one of the fixed, named presets in
   ``presets.py``.
@@ -52,8 +51,6 @@ from .schemas import (
     ModeShapeResponse,
     PowerFlowResponse,
     PresetSummary,
-    RoaRequest,
-    RoaResponse,
     SensitivityRequest,
     SensitivityResponse,
     StatesResponse,
@@ -144,7 +141,7 @@ def run_timeseries(preset_id: str) -> TimeSeriesResponse:
 
 @app.get("/api/presets/{preset_id}/states", response_model=StatesResponse)
 def list_states(preset_id: str) -> StatesResponse:
-    """State names for the nonlinear (EMT/ROA) model — lets the frontend
+    """State names for the nonlinear (EMT) model — lets the frontend
     populate its state pickers without hard-coding per-preset names (which
     differ: e.g. only synchronous machines have ``dw_r_*`` states, and
     which DER id is the slack varies by preset).
@@ -169,11 +166,6 @@ def run_emt_live(preset_id: str, req: EmtRequest, request: Request) -> Streaming
     return StreamingResponse(
         analysis.emt_live_stream(plan, req.perturb_kind, request), media_type="application/x-ndjson"
     )
-
-
-@app.post("/api/presets/{preset_id}/roa", response_model=RoaResponse)
-def run_roa(preset_id: str, req: RoaRequest) -> RoaResponse:
-    return analysis.roa_response(_resolve_preset_network(preset_id), req)
 
 
 app.include_router(network_router)

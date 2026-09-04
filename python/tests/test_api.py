@@ -392,39 +392,3 @@ def test_emt_solver_failure_is_a_clean_422_not_a_500(monkeypatch):
     )
     assert r.status_code == 422
     assert "did not converge" in r.json()["detail"]
-
-
-def test_roa_endpoint():
-    r = client.post(
-        "/api/presets/wscc9_3sm/roa",
-        json={
-            "axis_x_state": "theta_{SM_2}", "axis_x_range": 0.3,
-            "axis_y_state": "dw_r_{SM_2}", "axis_y_range": 0.02,
-            "grid_n": 3, "t_final": 0.4, "t_early": 0.1,
-        },
-    )
-    assert r.status_code == 200
-    body = r.json()
-    assert len(body["in_roa"]) == 3 and all(len(row) == 3 for row in body["in_roa"])
-    # The center grid point is the zero-perturbation baseline against itself
-    # -- trivially "trending toward" (distance 0 at both checkpoints), same
-    # sanity check tests/test_roa.py runs directly against the core module.
-    assert body["in_roa"][1][1] is True
-    assert body["failed"][1][1] is False
-    assert body["early_distance"][1][1] == pytest.approx(0.0, abs=1e-9)
-
-
-def test_roa_grid_n_out_of_bounds_422s():
-    r = client.post(
-        "/api/presets/wscc9_3sm/roa",
-        json={"axis_x_state": "theta_{SM_2}", "axis_y_state": "dw_r_{SM_2}", "grid_n": 20, "t_final": 0.4, "t_early": 0.1},
-    )
-    assert r.status_code == 422
-
-
-def test_roa_t_early_not_less_than_t_final_422s():
-    r = client.post(
-        "/api/presets/wscc9_3sm/roa",
-        json={"axis_x_state": "theta_{SM_2}", "axis_y_state": "dw_r_{SM_2}", "grid_n": 3, "t_final": 0.3, "t_early": 0.3},
-    )
-    assert r.status_code == 422

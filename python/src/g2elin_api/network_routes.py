@@ -37,11 +37,9 @@ from .schemas import (
     NetworkFreeResponseRequest,
     NetworkModeShapeRequest,
     NetworkRequest,
-    NetworkRoaRequest,
     NetworkSensitivityRequest,
     NetworkStepResponseRequest,
     PowerFlowResponse,
-    RoaResponse,
     SensitivityResponse,
     StatesResponse,
     StepResponseResponse,
@@ -123,8 +121,3 @@ def network_emt_live(req: NetworkEmtRequest, request: Request) -> StreamingRespo
     return StreamingResponse(
         analysis.emt_live_stream(plan, req.perturb_kind, request), media_type="application/x-ndjson"
     )
-
-
-@router.post("/roa", response_model=RoaResponse)
-def network_roa(req: NetworkRoaRequest) -> RoaResponse:
-    return analysis.roa_response(req.network, req)

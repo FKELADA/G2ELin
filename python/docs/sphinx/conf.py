@@ -40,9 +40,8 @@ source_suffix = {
 myst_enable_extensions = ["colon_fence", "deflist", "dollarmath", "amsmath"]
 # Auto-generate heading anchor ids (so "#mount-layout"-style in-page links
 # resolve) and don't try to resolve plain markdown [text](path) links as
-# internal cross-references — the emt_inventory.md source (also read
-# standalone, outside Sphinx) links to non-.md source files by relative
-# path, which isn't a doc target Sphinx knows about.
+# internal cross-references — a doc source can link to non-.md source
+# files by relative path, which isn't a doc target Sphinx knows about.
 myst_heading_anchors = 3
 myst_all_links_external = True
 
@@ -50,7 +49,7 @@ myst_all_links_external = True
 # executed and verified separately (jupyter nbconvert --execute, checked
 # for zero cell errors) before being staged into this source tree by
 # tools/build_docs.py -- "off" renders exactly those already-baked
-# outputs rather than re-running a multi-minute EMT/ROA simulation on
+# outputs rather than re-running a multi-minute EMT simulation on
 # every docs build.
 nb_execution_mode = "off"
 

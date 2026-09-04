@@ -24,7 +24,6 @@ flowchart LR
         EP5["GET /api/presets/{id}/states"]
         EP6["POST /api/presets/{id}/emt"]
         EP6L["POST .../emt/live<br/>(streamed NDJSON)"]
-        EP7["POST /api/presets/{id}/roa"]
     end
     subgraph UI["web/index.html tabs"]
         T0["Preset picker"]
@@ -33,7 +32,6 @@ flowchart LR
         T3["Time Series"]
         TN["Network"]
         T4["EMT Simulation"]
-        T5["Region of Attraction"]
         T6["Documentation"]
     end
     EP1 --> T0
@@ -47,10 +45,8 @@ flowchart LR
     EP3R --> T2
     EP4 --> T3
     EP5 --> T4
-    EP5 --> T5
     EP6 --> T4
     EP6L --> T4
-    EP7 --> T5
 
     EPT -.-> TOPO["network.compute_topology_layout()"]
     EP2 -.-> PF["powerflow.run_power_flow()"]
@@ -63,7 +59,6 @@ flowchart LR
     EP5 -.-> BNM["timedomain.build_nonlinear_network()"]
     EP6 -.-> EMT["timedomain.simulate()<br/>+ recover_inputs_and_outputs() (opt-in)"]
     EP6L -.-> EMTLIVE["timedomain.simulate_steps()<br/>one solver step per streamed line"]
-    EP7 -.-> ROA["stability.trace_roa_grid()<br/>(a grid of trajectories)"]
 ```
 
 ## `/api/network/*` — arbitrary networks, not just presets
@@ -72,7 +67,7 @@ Every endpoint above also has a counterpart under `/api/network/*`
 (`network_routes.py`) taking a full `Network` JSON body instead of a
 `preset_id` path param — `POST /api/network/powerflow`, `/modal`,
 `/modal/sensitivity`, `/modal/mode_shape`, `/modal/free_response`,
-`/modal/step_response`, `/timeseries`, `/emt`, `/emt/live`, `/roa`, plus `/topology` and
+`/modal/step_response`, `/timeseries`, `/emt`, `/emt/live`, plus `/topology` and
 `/states` as POST (their preset-side counterparts are GET, but a `Network`
 body can't ride a GET request — an intentional divergence). There's no
 preset-side equivalent of `POST /api/network/validate` (a preset is always
@@ -105,15 +100,7 @@ Response models (`g2elin_api/schemas.py`) are deliberately separate from
 `g2elin_core`'s own result types — `PowerFlowResult` wraps a live
 pandapower net, `ModalAnalysisResult` holds numpy arrays, neither is
 JSON-serializable — so the wire format is a considered choice, not
-whatever `dict()` happened to produce. `RoaResponse`'s distance grids use
-`float | None` rather than `float`, specifically because JSON has no `NaN`
-literal — the underlying `RoaGridResult.early_distance`/`late_distance`
-arrays are `NaN` at any grid point where the coupled Newton solve failed
-(see {doc}`stability <modules/stability>`), and `None`/`null` is what
-survives the round trip to the browser instead of either crashing
-`JSON.stringify` server-side (Python's `json` module *would* emit a bare
-`NaN` token, which is invalid JSON and fails `fetch().json()` in the
-browser) or silently coercing a "we don't know" into a number.
+whatever `dict()` happened to produce.
 `PowerFlowResponse`'s `lines`/`transformers`/`loads`/`generators`/
 `static_generators`/`external_grid` fields are loosely typed (`list[dict]`,
 not a row model per table) since each pandapower result table's column set
@@ -124,11 +111,10 @@ programmatically.
 `/states` exists because the nonlinear model's state/input/output names
 are entirely preset-dependent — which DER id is the slack, which unit
 types exist, whether a `dw_r_*` (synchronous-machine speed deviation)
-state exists at all — so the EMT/ROA tabs' pickers are populated from
+state exists at all — so the EMT tab's pickers are populated from
 this endpoint at preset-selection time rather than hard-coded, the same
-problem {doc}`the ROA module itself <modules/stability>` solves with
-`find_state_index()`'s substring matching (which `/roa` and the EMT
-tab's *perturb*-state selection both reuse server-side). `/emt`'s
+problem `find_state_index()`'s substring matching solves (which the EMT
+tab's *perturb*-state selection reuses server-side). `/emt`'s
 `plot_states`/`plot_inputs`/`plot_outputs`, by contrast, take **exact**
 names from that same list (not substrings) — real multi-select pickers
 over the full list, not a text filter — with an unknown name coming back
@@ -185,8 +171,8 @@ python tools/build_docs.py
 
 ## The web UI itself
 
-Seven tabs: **Power Flow**, **Modal Analysis**, **Time Series**,
-**Network**, **EMT Simulation**, **Region of Attraction**, and
+Six tabs: **Power Flow**, **Modal Analysis**, **Time Series**,
+**Network**, **EMT Simulation**, and
 **Documentation** (this Sphinx site, lazily loaded in an `<iframe>` on
 first click so the page's initial load doesn't pay for it). Always light —
 the dark-mode CSS block that used to shadow-follow `prefers-color-scheme`
@@ -205,8 +191,8 @@ bubble, `.panel-intro` for the card); the bubble's tooltip opens on
 closed by a document-level click listener) so it's reachable without a
 mouse. The full underlying physics each summary is a one-line version of
 lives in this Sphinx site itself (mostly {doc}`modules/components`,
-{doc}`modules/operating_point`, {doc}`modules/pipeline`,
-{doc}`modules/timedomain`, and {doc}`modules/stability` — see each for
+{doc}`modules/operating_point`, {doc}`modules/pipeline`, and
+{doc}`modules/timedomain` — see each for
 the real LaTeX equations), which is exactly what the Documentation tab
 embeds.
 
@@ -282,15 +268,6 @@ follows the same validated categorical/sequential/status palette
   solver's own adaptive internal step size — see {doc}`timedomain
   <modules/timedomain>`), bounded server-side (10–2000 samples) since
   each sample costs a Newton solve when inputs/outputs are requested too.
-- **Region of Attraction** renders the grid as an HTML `<table>` (a natural
-  fit for a small labeled matrix — row/column headers give the axis
-  offsets "for free"), each cell colored by status: good (trending toward
-  baseline), critical (trending away), or muted gray (Newton solve failed
-  to converge — a distinct "we don't know," never silently folded into
-  either verdict, matching {doc}`the ROA module's own design decision
-  <modules/stability>`). A native `title` attribute per cell gives the
-  early/late distance on hover, the same lightweight-tooltip precedent the
-  eigenvalue map already set with per-point `<title>` elements.
 
 ### The network editor
 

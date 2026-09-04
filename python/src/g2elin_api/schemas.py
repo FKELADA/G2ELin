@@ -203,27 +203,6 @@ class EmtResponse(BaseModel):
     outputs: dict[str, list[float]]
 
 
-class RoaRequest(BaseModel):
-    axis_x_state: str
-    axis_x_range: float = 0.4
-    axis_y_state: str
-    axis_y_range: float = 0.02
-    grid_n: int = 3
-    t_final: float = 1.0
-    t_early: float = 0.1
-
-
-class RoaResponse(BaseModel):
-    axis_x_label: str
-    axis_x_offsets: list[float]
-    axis_y_label: str
-    axis_y_offsets: list[float]
-    in_roa: list[list[bool]]
-    failed: list[list[bool]]
-    early_distance: list[list[float | None]]  # None where the Newton solve failed (not a real distance)
-    late_distance: list[list[float | None]]
-
-
 class PresetSummary(BaseModel):
     id: str
     name: str
@@ -272,14 +251,10 @@ class NetworkEmtRequest(EmtRequest):
     network: Network
 
 
-class NetworkRoaRequest(RoaRequest):
-    network: Network
-
-
 class NetworkIssueRow(BaseModel):
     severity: str  # "error" | "warning"
     message: str
-    affects: list[str]  # which of "powerflow"/"modal"/"emt"/"roa" this issue affects
+    affects: list[str]  # which of "powerflow"/"modal"/"emt" this issue affects
 
 
 class ValidateResponse(BaseModel):

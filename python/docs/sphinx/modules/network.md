@@ -113,7 +113,7 @@ function supplying just that variant's own DER rows:
   `wscc9_1sm_1gfm_1gfl`, `wscc9_1sm_2gfm`, `wscc9_2sm_1gfm`,
   `wscc9_1gfm_2gfl`, `wscc9_3gfm`. The last two have a **GFM as the
   slack** — power flow works (pandapower's slack handling is agnostic to
-  unit type), but modal/EMT/ROA raise `NotImplementedError` (HTTP 501),
+  unit type), but modal/EMT raise `NotImplementedError` (HTTP 501),
   since {doc}`interconnect <interconnect>` only wires up an SM/IB slack
   so far.
 - `cigre_islanded_1sm_2gfm_1gfl()` and 3 more — CIGRE MV benchmark
@@ -189,8 +189,8 @@ deep inside instead of a clear message when it didn't hold.
 this (plus duplicate bus/DER ids, self-loop lines/transformers, and overall
 graph connectivity) in one pass and returns *every* issue found, not just
 the first — each tagged `"error"` (blocks the affected capability) or
-`"warning"` (e.g. a GFM/GFL slack: power flow still works, modal/EMT/ROA
-don't support it yet) and which of `powerflow`/`modal`/`emt`/`roa` it
+`"warning"` (e.g. a GFM/GFL slack: power flow still works, modal/EMT
+don't support it yet) and which of `powerflow`/`modal`/`emt` it
 affects. `compute_operating_point()` calls this itself and raises one
 combined `ValueError` listing every `"error"`-severity issue if any exist
 (-> HTTP 422, not a 500) — so this validation runs regardless of whether a

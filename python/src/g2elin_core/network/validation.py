@@ -10,7 +10,7 @@ drag-and-drop builder) can easily violate any of them. pydantic's own
 validators on ``Network`` already guarantee two structural properties
 unconditionally (every bus reference resolves, exactly one slack DER) --
 this module covers everything else: things that are *syntactically* valid
-``Network`` JSON but still make power flow, modal analysis, or EMT/ROA
+``Network`` JSON but still make power flow, modal analysis, or EMT
 simulation fail, or silently misbehave, downstream.
 """
 
@@ -24,7 +24,7 @@ from .schema import DerUnit, Network, UnitType
 
 # Only an SM or IB slack is wired up in interconnect/network_assembly.py --
 # power flow doesn't care (pandapower's ext_grid is agnostic to unit
-# type), so this is a *warning* for modal/EMT/ROA, not a power flow error.
+# type), so this is a *warning* for modal/EMT, not a power flow error.
 _SUPPORTED_SLACK_UNIT_TYPES = {"sm", "infinite_bus"}
 # Unit types operating_point.py actually derives a dynamics operating point
 # for -- these are the ones that need their own transformer.
@@ -35,18 +35,18 @@ _DYNAMICS_UNIT_TYPES = {"sm", "gfm", "gfl", "infinite_bus"}
 class NetworkIssue:
     severity: str  # "error" (blocks the affected capabilities) | "warning" (a heads-up, not blocking)
     message: str
-    affects: tuple[str, ...]  # which of "powerflow"/"modal"/"emt"/"roa" this issue affects
+    affects: tuple[str, ...]  # which of "powerflow"/"modal"/"emt" this issue affects
 
 
 def validate_network(network: Network) -> list[NetworkIssue]:
     """Every structural problem found, not just the first. An empty list
-    means the network is safe to run power flow, modal analysis, and EMT/
-    ROA simulation on -- modulo the actual numerics still converging for a
+    means the network is safe to run power flow, modal analysis, and EMT
+    simulation on -- modulo the actual numerics still converging for a
     given operating point, which no static check can guarantee.
     """
     issues: list[NetworkIssue] = []
-    all_caps = ("powerflow", "modal", "emt", "roa")
-    dynamics_caps = ("modal", "emt", "roa")
+    all_caps = ("powerflow", "modal", "emt")
+    dynamics_caps = ("modal", "emt")
 
     bus_ids_seen: set[int] = set()
     for bus in network.buses:
@@ -147,7 +147,7 @@ def validate_network(network: Network) -> list[NetworkIssue]:
         issues.append(NetworkIssue(
             "warning",
             f"the slack unit (id={slack.id}) is a {slack.unit_type.value}, not a synchronous machine or "
-            f"infinite bus -- power flow works, but modal analysis/EMT/ROA don't support a "
+            f"infinite bus -- power flow works, but modal analysis/EMT don't support a "
             f"{slack.unit_type.value} slack yet",
             dynamics_caps,
         ))

@@ -66,7 +66,7 @@ _PRESET_SPECS: list[tuple[str, str, str, Callable[[], Network]]] = [
      wscc9_2sm_1gfm),
     ("wscc9_1gfm_2gfl", "WSCC 9-bus (1 GFM + 2 GFL)",
      "WSCC 9-bus, 1 grid-forming (Droop, slack) + 2 grid-following converters. Power flow only -- a GFM "
-     "slack isn't wired up for modal/EMT/ROA yet (see the preset's own docstring).",
+     "slack isn't wired up for modal/EMT yet (see the preset's own docstring).",
      wscc9_1gfm_2gfl),
     ("wscc9_3gfm", "WSCC 9-bus (3 GFM)",
      "WSCC 9-bus, 3 grid-forming (Droop) converters, one as slack. Power flow only -- see wscc9_1gfm_2gfl.",

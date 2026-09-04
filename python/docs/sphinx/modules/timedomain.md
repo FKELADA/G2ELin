@@ -15,10 +15,7 @@ small-signal approximation — which is the property that makes this "EMT
 simulation" for this project's purposes. It's a dq-frame, averaged-
 converter, single-rotating-reference-frame formulation, so it doesn't
 capture switching-level converter physics, abc-frame/unbalanced faults, or
-distributed/traveling-wave line effects; a richer extension covering those
-is tracked separately as future work (see {doc}`../emt_investigation`,
-"detailed EMT models") rather than being a prerequisite for this module
-counting as EMT simulation.
+distributed/traveling-wave line effects.
 
 ## Why a single *global* Newton solve, not one per component
 

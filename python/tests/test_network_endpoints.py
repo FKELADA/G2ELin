@@ -91,21 +91,6 @@ def test_network_emt_live():
     assert lines[-1] == {"done": True, "perturbed": perturb, "perturb_kind": "state", "n_steps": len(lines) - 1}
 
 
-def test_network_roa():
-    states = client.post("/api/network/states", json={"network": _wscc_body()}).json()
-    x_state = next(n for n in states["state_names"] if n.startswith("theta"))
-    y_state = next(n for n in states["state_names"] if "dw_r" in n)
-    r = client.post(
-        "/api/network/roa",
-        json={
-            "network": _wscc_body(), "axis_x_state": x_state, "axis_y_state": y_state,
-            "grid_n": 2, "t_final": 0.3, "t_early": 0.1,
-        },
-    )
-    assert r.status_code == 200
-    assert len(r.json()["in_roa"]) == 2
-
-
 def test_network_invalid_body_is_422_with_field_detail():
     # A negative x_pu -- Line.x_pu has Field(gt=0) -- should 422 with
     # pydantic's per-field detail list (not a hand-written HTTPException),
@@ -242,7 +227,7 @@ def test_network_validate_reports_every_issue_at_once():
 
 
 def test_network_validate_unsupported_slack_is_a_warning_not_an_error():
-    # A GFM/GFL slack: power flow works, modal/EMT/ROA don't support it
+    # A GFM/GFL slack: power flow works, modal/EMT don't support it
     # yet -- validate() should flag it as a warning, not block "ok".
     r = client.post("/api/network/validate", json={"network": wscc9_1gfm_2gfl().model_dump()})
     assert r.status_code == 200

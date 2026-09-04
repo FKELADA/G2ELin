@@ -115,8 +115,8 @@ table:
 1. **Mode #127, 0.000 Hz, $-100\%$ "damping" — not a real instability.**
    Its real part is $\sim\!10^{-10}$ rad/s (a centuries-long time
    constant) and its top participants, `theta_{GFM_1}`/`theta_{SM_1}` at
-   almost exactly 50/50, are exactly the {doc}`modules/stability`
-   "theta problem": an absolute angle has no restoring force, only angle
+   almost exactly 50/50, are exactly the "theta problem": an absolute
+   angle has no restoring force, only angle
    *differences* do, so every closed-loop network built by this codebase
    has exactly one structurally-zero eigenvalue in this direction. The
    `damping_pct` formula divides by a near-zero $|\lambda|$ here, which
@@ -167,25 +167,7 @@ kind of state diverges by construction — not a sign of instability,
 just the wrong quantity to compare. `dw_r_{SM_1}` is a bounded deviation
 state, which is what makes the comparison above meaningful.
 
-## 8. Region of attraction
-
-A small $3\times3$ grid perturbing `dw_r_{SM_1}` and the GFM's own
-`p_m_{GFM_1}`, each nonlinearly simulated and classified as trending
-back toward equilibrium or away from it:
-
-```{image} _static/cigre_walkthrough/roa_grid.png
-:alt: 3x3 region-of-attraction grid, all cells green (recovers)
-:width: 420px
-:align: center
-```
-
-Every sampled point in this small a neighborhood recovers — consistent
-with every genuinely dynamic mode being stable in Section 6. A real
-instability would show red cells creeping in from one edge of a wider
-grid as the perturbation grows, the same signature {doc}`modules/stability`
-describes.
-
-## 9. Time-series load sweep
+## 8. Time-series load sweep
 
 Re-solving power flow at 70% / 100% / 130% of the base network's loads
 (no dynamics — see {doc}`modules/timeseries`):
@@ -215,7 +197,6 @@ been asking.
 | `modal` | One structurally-zero reference-angle mode (not real instability); the genuine SM swing mode at ~2.2 Hz, ~22% damping |
 | `modal.toolbox` | Mode shape, closed-form free response, and step response — all from the same eigendecomposition, no extra solve |
 | {doc}`timedomain <modules/timedomain>` (EMT) | The actual nonlinear transient the linearization is only ever a small-signal approximation of — and how good that approximation is here |
-| {doc}`stability <modules/stability>` (ROA) | A local neighborhood of stable recovery around the operating point, consistent with the modal result |
 | {doc}`timeseries <modules/timeseries>` | Which bus's voltage is most exposed to load swings, and why |
 
 See `notebooks/tour.ipynb` for the same modules exercised more briefly

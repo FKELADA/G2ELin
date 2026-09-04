@@ -4,6 +4,7 @@ from .emt import (
     NonlinearBlockComp,
     NonlinearNetworkModel,
     build_nonlinear_network,
+    find_state_index,
     simulate,
     simulate_steps,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "NonlinearBlockComp",
     "NonlinearNetworkModel",
     "build_nonlinear_network",
+    "find_state_index",
     "simulate",
     "simulate_steps",
 ]

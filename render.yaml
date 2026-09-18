@@ -1,0 +1,17 @@
+# Render blueprint for the G2ELin web app (python/Dockerfile).
+# In the Render dashboard: New -> Blueprint -> pick this repository.
+services:
+  - type: web
+    name: g2elin
+    runtime: docker
+    dockerContext: ./python
+    dockerfilePath: ./python/Dockerfile
+    # starter = 0.5 CPU / 512 MB (the app peaks at ~350 MB); standard =
+    # 1 CPU / 2 GB runs EMT simulations about twice as fast.
+    plan: starter
+    region: frankfurt
+    healthCheckPath: /api/powerflow/algorithms
+    autoDeploy: true
+    envVars:
+      - key: G2ELIN_WARMUP
+        value: "1"

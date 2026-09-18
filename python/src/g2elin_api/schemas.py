@@ -20,6 +20,23 @@ class BusRow(BaseModel):
     q_net_gen_mvar: float
 
 
+class PowerFlowOptions(BaseModel):
+    """Solver settings forwarded to ``pandapower.runpp`` -- see
+    ``analysis.POWERFLOW_ALGORITHMS`` for the accepted ``algorithm`` values.
+    Every field's default is pandapower's own default, so an empty
+    ``PowerFlowOptions()`` solves exactly as before these options existed.
+    """
+
+    algorithm: str = "nr"
+    max_iteration: int | str = "auto"
+    tolerance_mva: float = 1e-8
+    init: str = "auto"
+
+
+class PowerFlowRequest(BaseModel):
+    options: PowerFlowOptions = PowerFlowOptions()
+
+
 class PowerFlowResponse(BaseModel):
     converged: bool
     buses: list[BusRow]
@@ -36,6 +53,11 @@ class PowerFlowResponse(BaseModel):
     generators: list[dict]
     static_generators: list[dict]
     external_grid: list[dict]
+    # Solver diagnostics, when pandapower reports them (None otherwise, e.g.
+    # on non-convergence or an algorithm that doesn't record them).
+    algorithm: str = "nr"
+    iterations: int | None = None
+    solve_time_s: float | None = None
 
 
 class ModeRow(BaseModel):
@@ -96,6 +118,9 @@ class FreeResponseRequest(BaseModel):
     offset: float = 0.05
     t_final: float = 2.0
     state_filter: str = "dw_r"
+    # Exact state names to return -- when non-empty this replaces
+    # state_filter (the web UI's per-subplot pickers send exact names).
+    plot_states: list[str] = []
 
 
 class FreeResponseResponse(BaseModel):
@@ -106,14 +131,18 @@ class FreeResponseResponse(BaseModel):
 
 class StepResponseRequest(BaseModel):
     input_name: str
-    output_name: str
+    # One output (output_name) or several (output_names) -- the latter is a
+    # single SIMO step response, one simulation for every output at once.
+    output_name: str | None = None
+    output_names: list[str] = []
     amplitude: float = 0.1
     t_final: float = 2.0
 
 
 class StepResponseResponse(BaseModel):
     t: list[float]
-    y: list[float]
+    y: list[float]  # the first requested output, kept for single-output callers
+    series: dict[str, list[float]] = {}  # every requested output, by name
 
 
 class TimeSeriesSnapshot(BaseModel):
@@ -134,6 +163,30 @@ class TimeSeriesSnapshot(BaseModel):
 
 class TimeSeriesResponse(BaseModel):
     snapshots: list[TimeSeriesSnapshot]
+
+
+class BatchPowerFlowRequest(PowerFlowRequest):
+    """A ramp of power-flow snapshots from the base operating point (every
+    factor 1.0) to the target scale factors below, ``steps`` equal
+    increments, base point included -- ``steps + 1`` snapshots in total.
+    ``der_scale`` is keyed by DER unit type (``"sm"``/``"gfm"``/``"gfl"``)
+    and scales that type's P *and* Q setpoints; a type left out stays at 1.0.
+    """
+
+    load_p_scale: float = 1.0
+    load_q_scale: float = 1.0
+    der_scale: dict[str, float] = {}
+    steps: int = 10
+
+
+class BatchSnapshot(TimeSeriesSnapshot):
+    load_p_scale: float
+    load_q_scale: float
+    der_scale: dict[str, float]
+
+
+class BatchPowerFlowResponse(BaseModel):
+    snapshots: list[BatchSnapshot]
 
 
 class StatesResponse(BaseModel):
@@ -190,6 +243,20 @@ class EmtRequest(BaseModel):
     plot_states: list[str] = []
     plot_inputs: list[str] = []
     plot_outputs: list[str] = []
+    # Seconds of undisturbed equilibrium prepended before the disturbance at
+    # t=0 (samples at t=-t_pre and t=0-), so a plot shows x0 before the
+    # jump/step. 0 keeps the trajectory starting at t=0 exactly.
+    t_pre: float = 0.0
+    # Also return the linearized model's response to the same disturbance
+    # (same equilibrium, same state/input/output names), for overlaying.
+    linear_overlay: bool = False
+
+
+class LinearOverlay(BaseModel):
+    t: list[float]
+    series: dict[str, list[float]]
+    inputs: dict[str, list[float]]
+    outputs: dict[str, list[float]]
 
 
 class EmtResponse(BaseModel):
@@ -201,6 +268,7 @@ class EmtResponse(BaseModel):
     series: dict[str, list[float]]
     inputs: dict[str, list[float]]
     outputs: dict[str, list[float]]
+    linear: LinearOverlay | None = None
 
 
 class PresetSummary(BaseModel):
@@ -228,6 +296,14 @@ class NetworkRequest(BaseModel):
     """Body for the network-based endpoints that take no other input today
     (topology, powerflow, modal, timeseries, states)."""
 
+    network: Network
+
+
+class NetworkPowerFlowRequest(PowerFlowRequest):
+    network: Network
+
+
+class NetworkBatchPowerFlowRequest(BatchPowerFlowRequest):
     network: Network
 
 

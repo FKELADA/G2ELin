@@ -10,10 +10,12 @@ neither caller re-implements request validation or error handling.
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from dataclasses import asdict
 from typing import AsyncIterator, Callable
 
 import numpy as np
+import scipy.signal
 from fastapi import HTTPException, Request
 
 from g2elin_core.interconnect import AssembledSystem
@@ -25,20 +27,25 @@ from g2elin_core.pipeline import linearize_network
 from g2elin_core.powerflow import run_power_flow
 from g2elin_core.powerflow.pandapower_adapter import PowerFlowResult
 from g2elin_core.timedomain import NonlinearNetworkModel, build_nonlinear_network, find_state_index, simulate, simulate_steps
-from g2elin_core.timeseries import run_time_series, scale_loads
+from g2elin_core.timeseries import Snapshot, apply_snapshot, run_time_series, scale_loads
 
 from .schemas import (
+    BatchPowerFlowRequest,
+    BatchPowerFlowResponse,
+    BatchSnapshot,
     BusNodeRow,
     BusRow,
     EmtRequest,
     EmtResponse,
     FreeResponseRequest,
     FreeResponseResponse,
+    LinearOverlay,
     ModalResponse,
     ModeRow,
     ModeShapeRequest,
     ModeShapeResponse,
     NetworkIssueRow,
+    PowerFlowOptions,
     PowerFlowResponse,
     SensitivityEntryRow,
     SensitivityRequest,
@@ -63,6 +70,44 @@ EMT_MAX_N_POINTS = 2000  # each extra sample costs one more Newton solve when pl
 EMT_DEFAULT_N_POINTS = 200  # -> default dt = t_final/199 when req.dt isn't given
 MODAL_MAX_T_FINAL = 20.0  # free/step response are cheap (linear algebra, no ODE solve) -- a looser bound
 EMT_SIMULATE_KWARGS = dict(rtol=1e-4, atol=1e-6, first_step=1e-8)
+EMT_MAX_T_PRE = 1.0
+BATCH_MAX_STEPS = 100
+BATCH_MAX_SCALE = 5.0
+
+# pandapower.runpp's ``algorithm`` values this API exposes -- id -> label
+# (the label is what the web UI shows in its solver picker).
+POWERFLOW_ALGORITHMS = {
+    "nr": "Newton-Raphson",
+    "iwamoto_nr": "Newton-Raphson with Iwamoto multiplier",
+    "fdbx": "Fast-decoupled (BX)",
+    "fdxb": "Fast-decoupled (XB)",
+    "gs": "Gauss-Seidel",
+    "bfsw": "Backward/forward sweep (radial networks)",
+}
+POWERFLOW_INITS = ("auto", "flat", "dc")
+
+
+# --- Model cache -------------------------------------------------------------
+# Every modal view (sensitivity, mode shape, free/step response...) and every
+# EMT run re-derives the same model from the same Network -- a power flow plus
+# a full linearization/nonlinear build each time. The web UI fires several of
+# these per page, so memoize the last few models per network content. Keyed by
+# the Network's own JSON: an edited network is a different key, never a stale
+# hit. Both model types are only ever read after construction.
+_MODEL_CACHE_SIZE = 8
+_model_cache: "OrderedDict[tuple[str, str], object]" = OrderedDict()
+
+
+def _cached(kind: str, network: Network, build: Callable[[], object]) -> object:
+    key = (kind, network.model_dump_json())
+    if key in _model_cache:
+        _model_cache.move_to_end(key)
+        return _model_cache[key]
+    value = build()
+    _model_cache[key] = value
+    if len(_model_cache) > _MODEL_CACHE_SIZE:
+        _model_cache.popitem(last=False)
+    return value
 
 
 def bus_rows(result: PowerFlowResult) -> list[BusRow]:
@@ -108,23 +153,127 @@ def validate_network_response(network: Network) -> ValidateResponse:
     )
 
 
-def powerflow_response(network: Network) -> PowerFlowResponse:
-    result = run_power_flow(network)
+def runpp_kwargs(options: PowerFlowOptions | None) -> dict:
+    """Validates ``options`` and maps them to ``pandapower.runpp`` keyword
+    arguments (422 on anything out of range, before any solve runs).
+    """
+    if options is None:
+        return {}
+    if options.algorithm not in POWERFLOW_ALGORITHMS:
+        raise HTTPException(status_code=422, detail=f"algorithm must be one of {sorted(POWERFLOW_ALGORITHMS)}")
+    if options.init not in POWERFLOW_INITS:
+        raise HTTPException(status_code=422, detail=f"init must be one of {list(POWERFLOW_INITS)}")
+    if not (0 < options.tolerance_mva <= 1.0):
+        raise HTTPException(status_code=422, detail="tolerance_mva must be in (0, 1]")
+    max_iteration = options.max_iteration
+    if max_iteration != "auto":
+        try:
+            max_iteration = int(max_iteration)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="max_iteration must be 'auto' or an integer") from None
+        if not (1 <= max_iteration <= 10000):
+            raise HTTPException(status_code=422, detail="max_iteration must be in [1, 10000]")
+    return dict(
+        algorithm=options.algorithm, max_iteration=max_iteration,
+        tolerance_mva=options.tolerance_mva, init=options.init,
+    )
+
+
+def solve_powerflow_or_422(network: Network, kwargs: dict) -> PowerFlowResult:
+    """``run_power_flow`` already maps non-convergence to ``converged=False``;
+    anything else pandapower raises here is a solver/network mismatch (e.g.
+    backward/forward sweep on a meshed network), reported as a 422 with the
+    solver's own reason instead of a bare 500.
+    """
+    try:
+        return run_power_flow(network, **kwargs)
+    except Exception as e:  # noqa: BLE001 -- pandapower raises many unrelated types here
+        algo = POWERFLOW_ALGORITHMS.get(kwargs.get("algorithm", "nr"), "power flow")
+        raise HTTPException(status_code=422, detail=f"{algo} solver failed: {type(e).__name__}: {e}") from e
+
+
+def _solver_diagnostics(result: PowerFlowResult) -> dict:
+    ppc = getattr(result.net, "_ppc", None)
+    if not isinstance(ppc, dict):
+        return dict(iterations=None, solve_time_s=None)
+    iterations, et = ppc.get("iterations"), ppc.get("et")
+    return dict(
+        iterations=int(iterations) if iterations is not None else None,
+        solve_time_s=float(et) if et is not None else None,
+    )
+
+
+def powerflow_response(network: Network, options: PowerFlowOptions | None = None) -> PowerFlowResponse:
+    kwargs = runpp_kwargs(options)
+    result = solve_powerflow_or_422(network, kwargs)
+    algorithm = kwargs.get("algorithm", "nr")
     if not result.converged:
         return PowerFlowResponse(
             converged=False, buses=[], total_losses_mw=0.0,
             lines=[], transformers=[], loads=[], generators=[], static_generators=[], external_grid=[],
+            algorithm=algorithm,
         )
     return PowerFlowResponse(
         converged=True, buses=bus_rows(result), total_losses_mw=result.total_losses_mw(),
-        **powerflow_tables(result),
+        **powerflow_tables(result), algorithm=algorithm, **_solver_diagnostics(result),
     )
+
+
+def batch_powerflow_response(network: Network, req: BatchPowerFlowRequest) -> BatchPowerFlowResponse:
+    """A ramp of ``req.steps + 1`` power flows from the base operating point
+    (every scale factor 1.0) to the requested targets, in equal increments --
+    each snapshot an independent steady-state solve (no dynamics between
+    them), like ``timeseries_response`` but with user-chosen load and DER
+    setpoint scaling instead of a fixed load-only sweep.
+    """
+    kwargs = runpp_kwargs(req.options)
+    if not (1 <= req.steps <= BATCH_MAX_STEPS):
+        raise HTTPException(status_code=422, detail=f"steps must be in [1, {BATCH_MAX_STEPS}]")
+    factors = [req.load_p_scale, req.load_q_scale, *req.der_scale.values()]
+    if any(not (0.0 <= f <= BATCH_MAX_SCALE) for f in factors):
+        raise HTTPException(status_code=422, detail=f"scale factors must be in [0, {BATCH_MAX_SCALE}]")
+    unknown = set(req.der_scale) - {"sm", "gfm", "gfl", "infinite_bus"}
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"unknown DER unit type(s) in der_scale: {sorted(unknown)}")
+
+    snapshots: list[BatchSnapshot] = []
+    for k in range(req.steps + 1):
+        frac = k / req.steps
+        lp = 1.0 + (req.load_p_scale - 1.0) * frac
+        lq = 1.0 + (req.load_q_scale - 1.0) * frac
+        ds = {typ: 1.0 + (f - 1.0) * frac for typ, f in req.der_scale.items()}
+        scaled = [d for d in network.der_units if d.unit_type.value in ds]
+        snap = Snapshot(
+            label=f"step {k}",
+            load_p_mw={i: ld.p_mw * lp for i, ld in enumerate(network.loads)},
+            load_q_mvar={i: ld.q_mvar * lq for i, ld in enumerate(network.loads)},
+            der_p_mw={d.id: d.p_set_mw * ds[d.unit_type.value] for d in scaled},
+            der_q_mvar={d.id: d.q_set_mvar * ds[d.unit_type.value] for d in scaled},
+        )
+        result = solve_powerflow_or_422(apply_snapshot(network, snap), kwargs)
+        common = dict(label=snap.label, load_p_scale=lp, load_q_scale=lq, der_scale=ds)
+        if not result.converged:
+            snapshots.append(BatchSnapshot(
+                converged=False, buses=[], total_losses_mw=0.0,
+                lines=[], transformers=[], loads=[], generators=[], static_generators=[], external_grid=[], **common,
+            ))
+        else:
+            snapshots.append(BatchSnapshot(
+                converged=True, buses=bus_rows(result), total_losses_mw=result.total_losses_mw(),
+                **powerflow_tables(result), **common,
+            ))
+    return BatchPowerFlowResponse(snapshots=snapshots)
 
 
 def build_modal_from_network(network: Network) -> tuple[AssembledSystem, ModalAnalysisResult]:
     """Shared by every modal-analysis response below -- all of them are
     different views over the same (system, modal) pair, not separate models.
+    Memoized per network content (see ``_cached``).
     """
+    return _cached("modal", network, lambda: _build_modal_uncached(network))
+
+
+def _build_modal_uncached(network: Network) -> tuple[AssembledSystem, ModalAnalysisResult]:
     result = run_power_flow(network)
     if not result.converged:
         raise HTTPException(status_code=422, detail="power flow did not converge; can't run modal analysis")
@@ -195,7 +344,10 @@ def modal_free_response_response(network: Network, req: FreeResponseRequest) -> 
     idx = named_index_or_422(modal.state_names, req.perturb_state, "state")
     t = np.linspace(0.0, req.t_final, 200)
     x_t = free_response(modal, idx, req.offset, t)
-    matches = [i for i, n in enumerate(modal.state_names) if req.state_filter in n]
+    if req.plot_states:
+        matches = [named_index_or_422(modal.state_names, n, "state") for n in req.plot_states]
+    else:
+        matches = [i for i, n in enumerate(modal.state_names) if req.state_filter in n]
     if not matches:
         raise HTTPException(status_code=422, detail=f"state_filter {req.state_filter!r} matches no state names")
     series = {modal.state_names[i]: x_t[i, :].tolist() for i in matches}
@@ -205,12 +357,16 @@ def modal_free_response_response(network: Network, req: FreeResponseRequest) -> 
 def modal_step_response_response(network: Network, req: StepResponseRequest) -> StepResponseResponse:
     if not (0 < req.t_final <= MODAL_MAX_T_FINAL):
         raise HTTPException(status_code=422, detail=f"t_final must be in (0, {MODAL_MAX_T_FINAL}]")
+    output_names = list(req.output_names) or ([req.output_name] if req.output_name else [])
+    if not output_names:
+        raise HTTPException(status_code=422, detail="give output_name or a non-empty output_names")
     system, _ = build_modal_from_network(network)
     named_index_or_422(system.input_names, req.input_name, "input")
-    named_index_or_422(system.output_names, req.output_name, "output")
+    for name in output_names:
+        named_index_or_422(system.output_names, name, "output")
     t = np.linspace(0.0, req.t_final, 200)
-    y = step_response(system, req.input_name, req.output_name, req.amplitude, t)
-    return StepResponseResponse(t=t.tolist(), y=y.tolist())
+    series = {name: step_response(system, req.input_name, name, req.amplitude, t).tolist() for name in output_names}
+    return StepResponseResponse(t=t.tolist(), y=series[output_names[0]], series=series)
 
 
 def timeseries_response(network: Network) -> TimeSeriesResponse:
@@ -233,6 +389,11 @@ def timeseries_response(network: Network) -> TimeSeriesResponse:
 
 
 def build_nonlinear_model_from_network(network: Network) -> NonlinearNetworkModel:
+    """Memoized per network content (see ``_cached``)."""
+    return _cached("nonlinear", network, lambda: _build_nonlinear_uncached(network))
+
+
+def _build_nonlinear_uncached(network: Network) -> NonlinearNetworkModel:
     result = run_power_flow(network)
     if not result.converged:
         raise HTTPException(status_code=422, detail="power flow did not converge; can't build a time-domain model")
@@ -305,6 +466,8 @@ def _validate_emt_t_final_and_n_points(req: EmtRequest) -> int:
     """
     if not (0 < req.t_final <= EMT_MAX_T_FINAL):
         raise HTTPException(status_code=422, detail=f"t_final must be in (0, {EMT_MAX_T_FINAL}]")
+    if not (0 <= req.t_pre <= EMT_MAX_T_PRE):
+        raise HTTPException(status_code=422, detail=f"t_pre must be in [0, {EMT_MAX_T_PRE}]")
 
     if req.dt is None:
         return EMT_DEFAULT_N_POINTS
@@ -318,6 +481,90 @@ def _validate_emt_t_final_and_n_points(req: EmtRequest) -> int:
             f"need between {EMT_MIN_N_POINTS} and {EMT_MAX_N_POINTS}",
         )
     return n_points
+
+
+def _equilibrium_signals(model: NonlinearNetworkModel) -> tuple[np.ndarray, dict[str, float], dict[str, float]]:
+    """``(x_eq, inputs_eq, outputs_eq)`` at the undisturbed operating point --
+    what every signal reads before the disturbance at t=0.
+    """
+    x_eq = model.initial_state()
+    z_eq, u_eq = model.solve_algebraic(x_eq, model.default_u_exo())
+    inputs_eq, outputs_eq = model._inputs_and_outputs(x_eq, z_eq, u_eq)
+    return x_eq, inputs_eq, outputs_eq
+
+
+PreSamples = tuple[list[float], dict[str, list[float]], dict[str, list[float]], dict[str, list[float]]]
+
+
+def _pre_disturbance_samples(
+    model: NonlinearNetworkModel, t_pre: float, plot_states: list[str], plot_inputs: list[str], plot_outputs: list[str]
+) -> PreSamples:
+    """Two equilibrium samples, at ``t=-t_pre`` and ``t=0`` (the instant just
+    before the disturbance), for prepending to a trajectory: a plot then shows
+    the flat pre-disturbance x0 and a vertical jump/step at t=0.
+    """
+    x_eq, inputs_eq, outputs_eq = _equilibrium_signals(model)
+    t = [-t_pre, 0.0]
+    states = {n: [float(x_eq[model.state_names.index(n)])] * 2 for n in plot_states}
+    inputs = {n: [inputs_eq[n]] * 2 for n in plot_inputs}
+    outputs = {n: [outputs_eq[n]] * 2 for n in plot_outputs}
+    return t, states, inputs, outputs
+
+
+def _prepend(pre: PreSamples, t: list[float], series: dict, inputs: dict, outputs: dict) -> PreSamples:
+    pre_t, pre_s, pre_i, pre_o = pre
+    return (
+        pre_t + list(t),
+        {n: pre_s.get(n, []) + list(v) for n, v in series.items()},
+        {n: pre_i.get(n, []) + list(v) for n, v in inputs.items()},
+        {n: pre_o.get(n, []) + list(v) for n, v in outputs.items()},
+    )
+
+
+def linear_overlay(
+    network: Network, model: NonlinearNetworkModel, req: EmtRequest, t: np.ndarray,
+    plot_states: list[str], plot_inputs: list[str], plot_outputs: list[str],
+) -> LinearOverlay:
+    """The linearized model's response to the same disturbance the EMT run
+    applied, around the same equilibrium, in absolute (not deviation) units so
+    it overlays the nonlinear trajectories directly: ``x = x_eq + dx``,
+    ``y = y_eq + C dx + D du``. A state perturbation is an initial condition
+    ``dx(0)``; an input perturbation is a step ``du`` held from t=0 -- both
+    one ``lsim`` of the full ``(A, B, C, D)``.
+
+    Relies on the linear and nonlinear models sharing their state/input/
+    output naming and ordering (both are assembled from the same blocks by
+    the same interconnection code) -- checked, not assumed; outputs missing
+    from the linear model are left out rather than guessed.
+    """
+    system, _ = build_modal_from_network(network)
+    x_eq, inputs_eq, outputs_eq = _equilibrium_signals(model)
+    n_x, n_u = system.A.shape[0], system.B.shape[1]
+    if len(x_eq) != n_x or list(system.state_names) != list(model.state_names):
+        raise HTTPException(
+            status_code=501, detail="linearized and nonlinear models don't share a state vector for this network"
+        )
+
+    t = np.asarray(t, dtype=float)
+    dx0 = np.zeros(n_x)
+    du = np.zeros(n_u)
+    if req.perturb_kind == "state":
+        dx0[model.state_names.index(req.perturb_name)] = req.perturb_offset
+    else:
+        du[named_index_or_422(list(system.input_names), req.perturb_name, "input")] = req.perturb_offset
+
+    sys = scipy.signal.StateSpace(system.A, system.B, system.C, system.D)
+    U = np.tile(du, (len(t), 1))
+    _, dy, dx = scipy.signal.lsim(sys, U=U, T=t - t[0], X0=dx0, interp=False)
+    dx = np.asarray(dx).reshape(len(t), n_x)
+    dy = np.asarray(dy).reshape(len(t), -1)
+
+    out_names = list(system.output_names)
+    in_names = list(system.input_names)
+    series = {n: (x_eq[model.state_names.index(n)] + dx[:, model.state_names.index(n)]).tolist() for n in plot_states}
+    inputs = {n: [inputs_eq[n] + (du[in_names.index(n)] if n in in_names else 0.0)] * len(t) for n in plot_inputs}
+    outputs = {n: (outputs_eq[n] + dy[:, out_names.index(n)]).tolist() for n in plot_outputs if n in out_names}
+    return LinearOverlay(t=t.tolist(), series=series, inputs=inputs, outputs=outputs)
 
 
 def emt_response(network: Network, req: EmtRequest) -> EmtResponse:
@@ -372,9 +619,19 @@ def emt_response(network: Network, req: EmtRequest) -> EmtResponse:
             outputs = {n: all_outputs[n].tolist() for n in req.plot_outputs}
 
     actual_dt = float(sim.t[1] - sim.t[0]) if len(sim.t) > 1 else req.t_final
+    linear = None
+    if req.linear_overlay:
+        linear = linear_overlay(network, model, req, sim.t, list(series), list(inputs), list(outputs))
+    t_out = sim.t.tolist()
+    if req.t_pre > 0:
+        pre = _pre_disturbance_samples(model, req.t_pre, list(series), list(inputs), list(outputs))
+        t_out, series, inputs, outputs = _prepend(pre, t_out, series, inputs, outputs)
+        if linear is not None:
+            lt, ls, li, lo = _prepend(pre, linear.t, linear.series, linear.inputs, linear.outputs)
+            linear = LinearOverlay(t=lt, series=ls, inputs=li, outputs=lo)
     return EmtResponse(
         perturbed=perturbed_name, perturb_kind=req.perturb_kind, dt=actual_dt,
-        state_names=list(series.keys()), t=sim.t.tolist(), series=series, inputs=inputs, outputs=outputs,
+        state_names=list(series.keys()), t=t_out, series=series, inputs=inputs, outputs=outputs, linear=linear,
     )
 
 
@@ -390,12 +647,13 @@ class _EmtLivePlan:
     def __init__(
         self, model: NonlinearNetworkModel, x0: np.ndarray, u_exo_fn: Callable[[float], np.ndarray] | None,
         perturbed_name: str, plot_states: list[str], plot_inputs: list[str], plot_outputs: list[str],
-        max_step: float, t_final: float,
+        max_step: float, t_final: float, network: Network | None = None, req: EmtRequest | None = None,
     ) -> None:
         self.model, self.x0, self.u_exo_fn = model, x0, u_exo_fn
         self.perturbed_name = perturbed_name
         self.plot_states, self.plot_inputs, self.plot_outputs = plot_states, plot_inputs, plot_outputs
         self.max_step, self.t_final = max_step, t_final
+        self.network, self.req = network, req
 
 
 def prepare_emt_live(network: Network, req: EmtRequest) -> _EmtLivePlan:
@@ -436,7 +694,10 @@ def prepare_emt_live(network: Network, req: EmtRequest) -> _EmtLivePlan:
         plot_outputs = req.plot_outputs
 
     max_step = req.dt if req.dt else req.t_final / EMT_DEFAULT_N_POINTS
-    return _EmtLivePlan(model, x0, u_exo_fn, perturbed_name, plot_states, plot_inputs, plot_outputs, max_step, req.t_final)
+    return _EmtLivePlan(
+        model, x0, u_exo_fn, perturbed_name, plot_states, plot_inputs, plot_outputs, max_step, req.t_final,
+        network=network, req=req,
+    )
 
 
 async def emt_live_stream(plan: _EmtLivePlan, perturb_kind: str, request: Request) -> AsyncIterator[str]:
@@ -453,6 +714,21 @@ async def emt_live_stream(plan: _EmtLivePlan, perturb_kind: str, request: Reques
     # Resolved once, not per step: state_names.index() is an O(n) scan and
     # this loop can run thousands of times.
     state_idx = [plan.model.state_names.index(n) for n in plan.plot_states]
+
+    # Pre-disturbance equilibrium samples (t_pre > 0), streamed first -- same
+    # line shape as a solver step, so the client plots them like any other.
+    t_pre = plan.req.t_pre if plan.req is not None else 0.0
+    pre = None
+    if t_pre > 0:
+        pre = _pre_disturbance_samples(plan.model, t_pre, plan.plot_states, plan.plot_inputs, plan.plot_outputs)
+        pre_t, pre_s, pre_i, pre_o = pre
+        for k, t_k in enumerate(pre_t):
+            yield json.dumps({
+                "t": t_k,
+                "states": {n: v[k] for n, v in pre_s.items()},
+                "inputs": {n: v[k] for n, v in pre_i.items()},
+                "outputs": {n: v[k] for n, v in pre_o.items()},
+            }) + "\n"
 
     n_steps = 0
     try:
@@ -475,4 +751,20 @@ async def emt_live_stream(plan: _EmtLivePlan, perturb_kind: str, request: Reques
     except RuntimeError as e:
         yield json.dumps({"error": f"nonlinear solver did not converge for this perturbation ({e}); try a smaller offset"}) + "\n"
         return
-    yield json.dumps({"done": True, "perturbed": plan.perturbed_name, "perturb_kind": perturb_kind, "n_steps": n_steps}) + "\n"
+    done: dict = {"done": True, "perturbed": plan.perturbed_name, "perturb_kind": perturb_kind, "n_steps": n_steps}
+    if plan.req is not None and plan.req.linear_overlay and plan.network is not None:
+        # Computed once the nonlinear run has finished, on an even grid over
+        # the same span (the solver's own adaptive step times are too
+        # irregular to be worth reproducing for a linear overlay).
+        try:
+            grid = np.linspace(0.0, plan.t_final, EMT_DEFAULT_N_POINTS)
+            lin = linear_overlay(
+                plan.network, plan.model, plan.req, grid, plan.plot_states, plan.plot_inputs, plan.plot_outputs
+            )
+            if pre is not None:
+                lt, ls, li, lo = _prepend(pre, lin.t, lin.series, lin.inputs, lin.outputs)
+                lin = LinearOverlay(t=lt, series=ls, inputs=li, outputs=lo)
+            done["linear"] = lin.model_dump()
+        except HTTPException as e:
+            done["linear_error"] = str(e.detail)
+    yield json.dumps(done) + "\n"

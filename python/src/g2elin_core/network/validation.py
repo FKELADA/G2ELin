@@ -110,6 +110,37 @@ def validate_network(network: Network) -> list[NetworkIssue]:
                 "fields), not as a separate Load on its private bus",
                 dynamics_caps,
             ))
+        if ld.q_mvar == 0:
+            # Power flow treats this as a no-op or purely-resistive bus (both
+            # perfectly valid), but operating_point.compute_operating_point()'s
+            # constant-impedance equivalent reactance x_pu = z_pu*sin(acos(PF))
+            # is exactly zero whenever q_mvar=0 -- regardless of p_mw -- and
+            # components/load.py's own dynamic model divides by that reactance
+            # (subsumes the old p_mw=q_mvar=0 "zero apparent power" case too,
+            # which is undefined for the same underlying reason).
+            issues.append(NetworkIssue(
+                "error",
+                f"load #{idx} (bus {ld.bus}) has zero reactive power (q_mvar=0) -- give it a small "
+                "nonzero q_mvar (positive for inductive, negative for capacitive)",
+                dynamics_caps,
+            ))
+
+    if not network.lines and network.der_units:
+        # pipeline.linearize_network()'s "node quirk": every bus's own dynamic
+        # model borrows its shunt (line-charging) capacitance from the *first*
+        # Line's b_pu -- with zero Lines in the network there's nothing to
+        # borrow, and the 0.0 fallback isn't actually safe: it makes every
+        # node's own state equation (dv/dt = (wb/Cl)*(...)) divide by zero.
+        # A transformer-only network (e.g. one DER + one transformer + one
+        # load bus, no feeder) hits this even though power flow is fine with it.
+        issues.append(NetworkIssue(
+            "error",
+            "this network has no Line elements -- every bus's own dynamic model needs a line-charging "
+            "susceptance (b_pu) to linearize around, which this codebase always borrows from the first "
+            "Line in the network; a network built entirely from transformers has no such source and "
+            "can't run modal analysis or EMT. Add at least one Line (even a short one with a small b_pu)",
+            dynamics_caps,
+        ))
 
     if not network.transformers:
         if network.der_units:
@@ -121,17 +152,33 @@ def validate_network(network: Network) -> list[NetworkIssue]:
             ))
     else:
         transformer_by_lv_bus = {tr.lv_bus: tr for tr in network.transformers}
+        transformer_by_hv_bus = {tr.hv_bus: tr for tr in network.transformers}
         for der in network.der_units:
             if der.unit_type.value not in _DYNAMICS_UNIT_TYPES:
                 continue
             tr = transformer_by_lv_bus.get(der.bus)
             if tr is None:
-                issues.append(NetworkIssue(
-                    "error",
-                    f"DER unit id={der.id} ({der.unit_type.value}) at bus {der.bus} has no transformer "
-                    f"connecting it to the rest of the network (no Transformer has lv_bus={der.bus})",
-                    dynamics_caps,
-                ))
+                swapped = transformer_by_hv_bus.get(der.bus)
+                if swapped is not None:
+                    # The user did add a transformer between this DER and the rest of
+                    # the network -- it's just wired backward. hv_bus/lv_bus direction
+                    # matters here (see interconnect/network_assembly.py's own
+                    # transformer_by_lv_bus lookup), not just a label: the DER's own
+                    # bus must be lv_bus, the network-side bus must be hv_bus.
+                    issues.append(NetworkIssue(
+                        "error",
+                        f"DER unit id={der.id} ({der.unit_type.value})'s transformer to bus {der.bus} has "
+                        f"hv_bus/lv_bus swapped (currently hv_bus={swapped.hv_bus}, lv_bus={swapped.lv_bus}) "
+                        f"-- a DER's own bus must be the transformer's lv_bus, not its hv_bus; swap the two",
+                        dynamics_caps,
+                    ))
+                else:
+                    issues.append(NetworkIssue(
+                        "error",
+                        f"DER unit id={der.id} ({der.unit_type.value}) at bus {der.bus} has no transformer "
+                        f"connecting it to the rest of the network (no Transformer has lv_bus={der.bus})",
+                        dynamics_caps,
+                    ))
             elif tr.hv_bus in der_by_bus and der_by_bus[tr.hv_bus].id != der.id:
                 other = der_by_bus[tr.hv_bus]
                 issues.append(NetworkIssue(

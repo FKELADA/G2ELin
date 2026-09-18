@@ -46,6 +46,53 @@ def test_network_modal():
     assert len(body["modes"]) == body["n_states"]
 
 
+def test_network_modal_zero_q_load_is_422_not_500():
+    # A load left at the web UI editor's own old "+ Add load" default
+    # (p_mw=0, q_mvar=0) -- power flow treats it as a no-op bus and
+    # converges, but its constant-impedance equivalent divides by its own
+    # apparent power. Must come back as an actionable 422, not a bare
+    # unhandled-exception 500.
+    net = _wscc_body()
+    net["loads"].append({"bus": net["buses"][0]["id"], "p_mw": 0.0, "q_mvar": 0.0, "name": ""})
+
+    r = client.post("/api/network/powerflow", json={"network": net})
+    assert r.status_code == 200
+    assert r.json()["converged"] is True
+
+    r = client.post("/api/network/modal", json={"network": net})
+    assert r.status_code == 422
+    assert "zero reactive power" in r.json()["detail"]
+
+
+def test_network_modal_purely_resistive_load_is_422_not_500():
+    # A load with real, nonzero p_mw but q_mvar=0 exactly (purely resistive)
+    # -- *not* the "zero apparent power" case. Power flow is fine with it,
+    # but components/load.py's own dynamic model uses this load's reactance
+    # x_pu = z_pu*sin(acos(p_pu/s_pu)) as a divisor, and sin(acos(+-1)) = 0
+    # whenever q_mvar=0 regardless of how large p_mw is.
+    net = _wscc_body()
+    net["loads"].append({"bus": net["buses"][0]["id"], "p_mw": 5.0, "q_mvar": 0.0, "name": ""})
+
+    r = client.post("/api/network/powerflow", json={"network": net})
+    assert r.status_code == 200
+    assert r.json()["converged"] is True
+
+    r = client.post("/api/network/modal", json={"network": net})
+    assert r.status_code == 422
+    assert "zero reactive power" in r.json()["detail"]
+
+
+def test_network_validate_zero_q_load_is_flagged():
+    net = _wscc_body()
+    net["loads"].append({"bus": net["buses"][0]["id"], "p_mw": 0.0, "q_mvar": 0.0, "name": ""})
+
+    r = client.post("/api/network/validate", json={"network": net})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert any(i["severity"] == "error" and "zero reactive power" in i["message"] for i in body["issues"])
+
+
 def test_network_modal_sensitivity():
     r = client.post("/api/network/modal/sensitivity", json={"network": _wscc_body(), "mode": 0})
     assert r.status_code == 200
@@ -148,6 +195,57 @@ def test_network_der_not_behind_a_transformer_is_422_not_500():
     detail = r.json()["detail"]
     assert "no transformer connecting" in detail
     assert "id=1" in detail  # the slack SM's own DER id
+
+
+def test_network_der_transformer_hv_lv_swapped_is_422_with_actionable_message():
+    # A transformer *does* connect this DER to the rest of the network, but
+    # hv_bus/lv_bus are backward (the DER's own bus is hv_bus instead of
+    # lv_bus) -- the natural mistake when drawing the connection in the
+    # builder canvas starting *from* the DER. Must be diagnosed specifically
+    # ("swapped") rather than reported as "no transformer at all".
+    net = wscc9_3sm().model_dump()
+    tr = net["transformers"][0]
+    tr["hv_bus"], tr["lv_bus"] = tr["lv_bus"], tr["hv_bus"]
+
+    r = client.post("/api/network/modal", json={"network": net})
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert "swapped" in detail
+    assert "id=1" in detail  # the slack SM's own DER id
+
+
+def test_network_modal_no_lines_is_422_not_500():
+    # A network built from a DER + its own transformer + a load bus, with no
+    # Line elements at all (e.g. a single generator behind a transformer
+    # serving one local load, no separate feeder). Power flow doesn't care,
+    # but every bus's own dynamic model borrows its line-charging
+    # susceptance from "line #1" -- with zero lines there's nothing to
+    # borrow and the old 0.0 fallback was a real division by zero deep in
+    # sympy (TypeError: Cannot convert complex to float), not a clean error.
+    net = {
+        "name": "no_lines", "f_hz": 60.0, "sn_mva": 100.0,
+        "buses": [{"id": 1, "name": "der_bus", "vn_kv": 10.0}, {"id": 2, "name": "grid_bus", "vn_kv": 20.0}],
+        "lines": [],
+        "transformers": [{"hv_bus": 2, "lv_bus": 1, "r_pu": 0.0, "x_pu": 0.05, "sn_mva": 100.0, "name": ""}],
+        "loads": [{"bus": 2, "p_mw": 5.0, "q_mvar": 1.0, "name": ""}],
+        "der_units": [
+            {"id": 1, "bus": 1, "unit_type": "infinite_bus", "bus_type": "slack", "v_set_pu": 1.0,
+             "p_set_mw": 0.0, "q_set_mvar": 0.0, "p_cons_mw": 0.0, "q_cons_mvar": 0.0,
+             "controller": None, "xd_pu": None},
+        ],
+    }
+    r = client.post("/api/network/validate", json={"network": net})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert any(i["severity"] == "error" and "no Line elements" in i["message"] for i in body["issues"])
+
+    pf = client.post("/api/network/powerflow", json={"network": net})
+    assert pf.status_code == 200 and pf.json()["converged"]
+
+    r = client.post("/api/network/modal", json={"network": net})
+    assert r.status_code == 422
+    assert "no Line elements" in r.json()["detail"]
 
 
 def _minimal_2der_network(bad_transformer_hv_bus: int) -> dict:

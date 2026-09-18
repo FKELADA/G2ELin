@@ -29,6 +29,9 @@ routes/mounts before the catch-all ``/``).
 
 from __future__ import annotations
 
+import logging
+import os
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -42,6 +45,8 @@ from . import analysis
 from .network_routes import router as network_router
 from .presets import PRESETS, get_preset
 from .schemas import (
+    BatchPowerFlowRequest,
+    BatchPowerFlowResponse,
     EmtRequest,
     EmtResponse,
     FreeResponseRequest,
@@ -49,6 +54,7 @@ from .schemas import (
     ModalResponse,
     ModeShapeRequest,
     ModeShapeResponse,
+    PowerFlowRequest,
     PowerFlowResponse,
     PresetSummary,
     SensitivityRequest,
@@ -60,7 +66,46 @@ from .schemas import (
     TopologyResponse,
 )
 
+logger = logging.getLogger("g2elin_api")
+
 app = FastAPI(title="G2ELin API", description="Power-system analysis over G2ELin's ported presets.")
+
+
+@app.middleware("http")
+async def _revalidate_static(request: Request, call_next):
+    """The web UI's HTML/CSS/JS are served without a cache lifetime, so
+    browsers may reuse a stale copy after an update. ``no-cache`` makes them
+    revalidate each load (a cheap 304 via StaticFiles' ETag when unchanged).
+    """
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response
+
+
+# Presets whose models are pre-built at startup when G2ELIN_WARMUP=1 (set in
+# the Docker image): between them they cover every unit type (SM, GFM, GFL,
+# infinite bus), so the one-off symbolic derivation per type happens before
+# the first visitor asks for a modal analysis or an EMT run, not during it.
+_WARMUP_PRESETS = ("wscc9_3sm", "wscc9_1sm_1gfm_1gfl", "sm_smib")
+
+
+@app.on_event("startup")
+def _warm_up_models() -> None:
+    if os.environ.get("G2ELIN_WARMUP") != "1":
+        return
+
+    def run() -> None:
+        for preset_id in _WARMUP_PRESETS:
+            try:
+                net = get_preset(preset_id).build()
+                analysis.build_modal_from_network(net)
+                analysis.build_nonlinear_model_from_network(net)
+                logger.info("warm-up: built models for %s", preset_id)
+            except Exception:  # noqa: BLE001 -- best effort; a real request reports the error properly
+                logger.exception("warm-up failed for %s", preset_id)
+
+    threading.Thread(target=run, name="g2elin-warmup", daemon=True).start()
 
 
 def _resolve_preset_network(preset_id: str) -> Network:
@@ -104,9 +149,21 @@ def get_topology(preset_id: str) -> TopologyResponse:
     return analysis.topology_response(_resolve_preset_network(preset_id))
 
 
+@app.get("/api/powerflow/algorithms")
+def list_powerflow_algorithms() -> dict[str, str]:
+    """Solver ids accepted by ``PowerFlowOptions.algorithm`` -> display label."""
+    return analysis.POWERFLOW_ALGORITHMS
+
+
 @app.post("/api/presets/{preset_id}/powerflow", response_model=PowerFlowResponse)
-def run_powerflow(preset_id: str) -> PowerFlowResponse:
-    return analysis.powerflow_response(_resolve_preset_network(preset_id))
+def run_powerflow(preset_id: str, req: PowerFlowRequest | None = None) -> PowerFlowResponse:
+    # The body is optional: a bare POST solves with pandapower's defaults.
+    return analysis.powerflow_response(_resolve_preset_network(preset_id), req.options if req else None)
+
+
+@app.post("/api/presets/{preset_id}/powerflow/batch", response_model=BatchPowerFlowResponse)
+def run_powerflow_batch(preset_id: str, req: BatchPowerFlowRequest) -> BatchPowerFlowResponse:
+    return analysis.batch_powerflow_response(_resolve_preset_network(preset_id), req)
 
 
 @app.post("/api/presets/{preset_id}/modal", response_model=ModalResponse)

@@ -1,64 +1,59 @@
 # `g2elin_api` and the web UI
 
 `g2elin_api` is a thin FastAPI layer wrapping the real `g2elin_core`
-functions (no mocking) over the two validated presets. `web/index.html`
-is a build-free, vanilla-JS single-page app that calls it. This page (the
-one you're reading, if you got here through the **Documentation** tab) is
-itself served as part of that same app — see [Mount layout](#mount-layout)
-below.
+functions (no mocking). `web/` is a build-free, vanilla-JS single-page app
+that calls it (`index.html` + `app.css` + one script per page under
+`web/js/`). This page (the one you're reading, if you got here through the
+**Documentation** page) is itself served as part of that same app — see
+[Mount layout](#mount-layout) below.
 
-## Endpoints → tabs
+## Endpoints → pages
+
+The UI loads a preset's `Network` once (`GET /api/presets/{id}/network`)
+and from then on calls only the `/api/network/*` endpoints with that
+(possibly edited) network. The preset-id endpoints below are kept for
+scripts and tests; both sets share the same `analysis.py` functions.
 
 ```{mermaid}
 flowchart LR
     subgraph API["g2elin_api (FastAPI)"]
-        EP1["GET /api/presets"]
-        EPT["GET /api/presets/{id}/topology"]
-        EP2["POST /api/presets/{id}/powerflow"]
-        EP3["POST /api/presets/{id}/modal"]
-        EP3S["POST .../modal/sensitivity"]
-        EP3M["POST .../modal/mode_shape"]
-        EP3F["POST .../modal/free_response"]
-        EP3R["POST .../modal/step_response"]
-        EP4["POST /api/presets/{id}/timeseries"]
-        EP5["GET /api/presets/{id}/states"]
-        EP6["POST /api/presets/{id}/emt"]
+        EP1["GET /api/presets<br/>GET /api/presets/{id}/network"]
+        EPT["POST /api/network/topology<br/>POST /api/network/validate"]
+        EP2["POST .../powerflow<br/>(solver options)"]
+        EP2B["POST .../powerflow/batch"]
+        EP3["POST .../modal"]
+        EP3X["POST .../modal/sensitivity, mode_shape,<br/>free_response, step_response"]
+        EP5["POST .../states"]
+        EP6["POST .../emt<br/>(t_pre, linear_overlay)"]
         EP6L["POST .../emt/live<br/>(streamed NDJSON)"]
     end
-    subgraph UI["web/index.html tabs"]
-        T0["Preset picker"]
-        T1["Power Flow"]
-        T2["Modal Analysis"]
-        T3["Time Series"]
+    subgraph UI["web/ pages (left navigation)"]
+        T0["Home"]
         TN["Network"]
+        T1["Power Flow"]
+        T2["Modal Analysis<br/>(7 sub-pages)"]
         T4["EMT Simulation"]
         T6["Documentation"]
     end
     EP1 --> T0
+    EP1 --> TN
     EPT --> TN
-    EPT --> T1
     EP2 --> T1
+    EP2B --> T1
     EP3 --> T2
-    EP3S --> T2
-    EP3M --> T2
-    EP3F --> T2
-    EP3R --> T2
-    EP4 --> T3
+    EP3X --> T2
     EP5 --> T4
     EP6 --> T4
     EP6L --> T4
 
-    EPT -.-> TOPO["network.compute_topology_layout()"]
-    EP2 -.-> PF["powerflow.run_power_flow()"]
+    EPT -.-> TOPO["network.compute_topology_layout()<br/>network.validate_network()"]
+    EP2 -.-> PF["powerflow.run_power_flow(**runpp options)"]
+    EP2B -.-> TS["timeseries.apply_snapshot() per ramp step"]
     EP3 -.-> PIPE["pipeline.linearize_network()<br/>+ modal.analyze()"]
-    EP3S -.-> SENS["modal.eigenvalue_sensitivity()"]
-    EP3M -.-> MSH["modal.mode_shape()"]
-    EP3F -.-> FREE["modal.free_response()"]
-    EP3R -.-> STEP["modal.step_response()"]
-    EP4 -.-> TS["timeseries.run_time_series()"]
+    EP3X -.-> TOOL["modal toolbox"]
     EP5 -.-> BNM["timedomain.build_nonlinear_network()"]
-    EP6 -.-> EMT["timedomain.simulate()<br/>+ recover_inputs_and_outputs() (opt-in)"]
-    EP6L -.-> EMTLIVE["timedomain.simulate_steps()<br/>one solver step per streamed line"]
+    EP6 -.-> EMT["timedomain.simulate()<br/>+ scipy.signal.lsim on (A, B, C, D) for the overlay"]
+    EP6L -.-> EMTLIVE["timedomain.simulate_steps()"]
 ```
 
 ## `/api/network/*` — arbitrary networks, not just presets
@@ -171,153 +166,62 @@ python tools/build_docs.py
 
 ## The web UI itself
 
-Six tabs: **Power Flow**, **Modal Analysis**, **Time Series**,
-**Network**, **EMT Simulation**, and
-**Documentation** (this Sphinx site, lazily loaded in an `<iframe>` on
-first click so the page's initial load doesn't pay for it). Always light —
-the dark-mode CSS block that used to shadow-follow `prefers-color-scheme`
-was removed outright rather than kept as an unused branch, so every chart's
-color logic only has to reason about one palette.
+A fixed left navigation panel with six pages, routed by URL hash
+(`#/home`, `#/docs/<page>`, `#/network`, `#/powerflow`,
+`#/modal/<view>`, `#/emt`). Every page works on the same client-held
+`Network` (`state.network` in `web/js/core.js`); editing it bumps a version
+counter that invalidates every cached result, and nothing is ever
+persisted server-side. Always light-themed.
 
-Every tab now carries a short `.panel-intro` card right below its
-controls — what the tab computes, the underlying method in one line, and
-a concrete "useful for" case, written for someone learning the physics
-rather than already knowing it — and a small hoverable/tappable "(i)"
-bubble next to each tab's own label in the nav bar with a one-sentence
-version of the same, so the summary is visible before a tab is even
-opened. Both are self-contained CSS/JS (`.info-icon`/`.tooltip` for the
-bubble, `.panel-intro` for the card); the bubble's tooltip opens on
-`:hover`/`:focus-visible` and also toggles on click/tap (`.open` class,
-closed by a document-level click listener) so it's reachable without a
-mouse. The full underlying physics each summary is a one-line version of
-lives in this Sphinx site itself (mostly {doc}`modules/components`,
-{doc}`modules/operating_point`, {doc}`modules/pipeline`, and
-{doc}`modules/timedomain` — see each for
-the real LaTeX equations), which is exactly what the Documentation tab
-embeds.
-
-The eigenvalue map (SVG, symlog-scaled since eigenvalues here span ~15
-orders of magnitude) uses the dataviz skill's status-palette convention for
-stable/marginal/unstable points, now with the constant-damping-ratio guide
-lines (5%, 70.7%) `Functions/modal_analysis.m` also draws — straight lines
-in linear (real, freq) space, sampled log-spaced in `|real|` and
-symlog-transformed like every other point on the chart, so they render as
-curves here. It's also zoomable/pannable (`attachSvgZoomPan()`, a small
-reusable viewBox-manipulation helper — mouse wheel zooms centered on the
-cursor, drag pans, a "Reset zoom" button restores the original view) with a
-full x-y gridline set (`eigenGridLines()`, not just the origin crosshair),
-tick labels inverse-transformed back to physical real-part/Hz units since
-that's what a reader actually wants to read off the axis. The mode summary
-table lists each mode's top **three** participating states (`state1..3`/
-`part1_pct..3`, already computed by `modal.summary_table()`), matching
-`modal_analysis.m`'s own table layout. Every other chart on these tabs
-follows the same validated categorical/sequential/status palette
-(`references/palette.md`, already used as this file's `--series-*`/
-`--good`/`--critical`/sequential-blue CSS custom properties):
-
-- **Network** (and the **Power Flow** tab, reusing the same function)
-  render `network.compute_topology_layout()`'s bus/line/transformer graph
-  as an SVG diagram — buses as circles (colored by unit type on the
-  Network tab: fixed categorical order SM/GFM/GFL/IB; colored by voltage
-  magnitude on the Power Flow tab: sequential blue, fixed [0.9, 1.1] pu
-  domain so a color is comparable across presets, not just within one),
-  transformers as a small square marker on their edge, loads as a
-  triangle marker. Every bus/line/transformer is also clickable (not just
-  hoverable) — the topology response now carries each line's `r_pu`/
-  `x_pu`/`b_pu`/`length_km`, each transformer's `r_pu`/`x_pu`/`sn_mva`, and
-  each DER-hosting bus's own dispatch fields plus its *derived*
-  electrical/control-parameter dict (`sm_params()`/`gfm_params()`/
-  `gfl_params()`'s actual output — the same values used to build that
-  unit's dynamic model, not just the static schema fields), rendered into
-  a detail panel below the diagram on click. Power Flow also gained a
-  dropdown over pandapower's other result tables (lines/transformers/
-  loads/generators/static generators/external grid), reusing a
-  generalized version of the existing bus-table renderer rather than one
-  function per table shape. **Time Series** got the identical
-  diagram-plus-dropdown-plus-click-detail treatment, once per snapshot —
-  the network's topology doesn't change across load-scaling snapshots
-  (only P/Q values do), so the layout is fetched once and just recolored
-  per snapshot's own bus results, not refetched.
-- **Modal Analysis** gained a "View" dropdown covering the rest of
-  `modal_analysis.m`'s toolbox: participation heatmap, single-mode
-  participation bar chart, sensitivity heatmap (capped to state counts
-  ≤30 — a 87×87 HTML table isn't a readable heatmap, the top-8 list from
-  the API is the useful output past that size), mode shape (polar plot,
-  phase angle of the top-5 participating states), free motion response
-  and step response (both reuse the EMT tab's line-chart renderer, since
-  they're the same "value vs time" form).
-- **EMT Simulation** plots the perturbed trajectory as up to three
-  separate multi-series line charts — states, inputs, outputs — rather
-  than one shared axis: they're physically different kinds of quantity
-  (per-unit dynamics, fixed exogenous references, named physical outputs
-  like P/Q/V), so combining them on one y-axis would risk exactly the
-  "two measures of different scale" dual-axis problem the dataviz skill
-  rules out. The chart itself is built directly via the SVG DOM API (not
-  string templates, since it needs live `mousemove` listeners for a real
-  crosshair+tooltip) rather than the `innerHTML` string-building most of
-  the rest of this file uses; the three state/input/output pickers are
-  genuine `<select multiple>` elements over the full list from `/states`,
-  not a text filter, per the explicit ask this round. What can be
-  perturbed was later widened from states-only to states *or* inputs — a
-  single merged `<select>` (grouped by `<optgroup>`, kind read off the
-  chosen `<option>`'s `data-kind`) — since an input step (a permanent
-  change to an exogenous reference like `P_ref`, held from t=0) is the
-  more standard disturbance test and `timedomain.simulate()`'s `u_exo_fn`
-  parameter already existed for exactly this, just unused until now. A
-  "Timestep" field controls the output sampling grid (`dt`, not the
-  solver's own adaptive internal step size — see {doc}`timedomain
-  <modules/timedomain>`), bounded server-side (10–2000 samples) since
-  each sample costs a Newton solve when inputs/outputs are requested too.
-
-### The network editor
-
-An "Edit this network" button next to the preset picker clones the
-selected preset's `Network` (via `GET .../network`) into `state.customNetwork`
-and shows a slide-down `#network-editor` panel — not a dedicated tab, since
-editing has to affect every existing tab identically, which a tab would
-only awkwardly achieve. Two dispatcher functions, `runAnalysis()` and
-`fetchTopologyActive()`, route every analysis trigger in the file to
-`/api/network/*` with `state.customNetwork` as the body whenever it's set,
-falling back to the ordinary preset-id endpoints otherwise — every tab's
-own button/spinner/error handling is unchanged, only *where the request
-goes* differs.
-
-The editor itself is table-per-element-kind (buses/lines/transformers/
-loads/DER units) with inline-editable `<input>`/`<select>` cells, reusing
-the same `.tablewrap`/`table` CSS every other data table in this file
-uses — bulk-editing dozens of fields across 5 element kinds is a CRUD
-table's job, not the click-in-diagram detail panel's (built for
-inspecting one clicked element, not editing many). The same debounce also
-POSTs to `POST /api/network/validate` (see {doc}`network
-<modules/network>`'s "Validation" section) and renders every issue it
-finds into its own panel — every structural problem at once (a DER not
-behind a transformer, a Line/Load on a DER's own bus, an unsupported
-slack unit type, ...), not discovered one crash at a time by actually
-running an analysis. Separately, a debounced (~400ms) preview re-POSTs
-the in-progress network to `/api/network/topology` and re-renders
-`renderNetworkDiagram()`; a network that's momentarily invalid mid-edit
-(e.g. a line still referencing a just-deleted bus) shows as a plain "not
-valid yet" message there, not an error — the validation panel above
-already explains what's wrong in detail. A "Recalculate" button
-re-clicks whichever analysis tab is currently active, reusing its existing
-run button entirely (see `recalculateActiveTab()`). "Reset to preset"
-clears `state.customNetwork` and restores the ordinary preset flow —
-nothing is ever saved, so there's no discard confirmation, and picking a
-different preset from the dropdown while editing exits edit mode the same
-way.
-
-FastAPI's automatic 422 for an invalid `Network` body has `detail` as a
-*list* of `{loc, msg, type}` objects (pydantic v2's shape), unlike every
-hand-written `HTTPException` elsewhere in this app (a plain string) — the
-`api()` helper's `formatDetail()` renders that list as one readable
-message instead of stringifying it to `"[object Object],..."`.
-
-**Deliberately plain JS, not React** — the migration plan's original
-target stack is React/TypeScript via Vite, but this environment has no
-Node.js/npm, so there's no way to install or build one. This ships as a
-build-free page FastAPI serves directly as a static file — real, working,
-and swappable for a proper Vite+React+TS app later without touching the
-API contract it calls.
+- **Home** — what the tool is, its features and workflow, the component
+  models, and the preset list (click one to load it).
+- **Documentation** — this Sphinx site in an `<iframe>`. Its table of
+  contents is read from the built `index.html` and listed as sub-items
+  of *Documentation* in the app's own navigation (with the active page's
+  sections underneath); Furo's own sidebars are hidden inside the frame so
+  the pages read as part of the app. In-frame navigation is mirrored into
+  the app URL.
+- **Network** — preset picker (the network is plotted immediately), a
+  drag-and-drop canvas (palette of Bus / Load / SM / GFM / GFL / IB; a unit
+  dropped on or near a bus gets its own terminal bus and transformer;
+  *Draw line* / *Draw transformer* modes), and an inspector that opens on
+  the right when an element is clicked, listing **every** editable
+  `Network` field for it (bus, its loads and its unit; line; transformer;
+  network-level settings) plus the unit's derived control parameters
+  (read-only). Live validation (`/validate`), a bulk table view, and JSON
+  import/export (network + diagram positions).
+- **Power Flow** — solver (`nr`, `iwamoto_nr`, `fdbx`, `fdxb`, `gs`,
+  `bfsw`), max iterations, tolerance and initialisation, passed to
+  `pandapower.runpp`. The network diagram is shown before any run;
+  results colour it as a heatmap (buses on a blue→red diverging scale
+  centred on 1 pu or 0°, lines/transformers light→dark by |P|, |Q|,
+  losses or current) and every element's own results appear on hover.
+  **Batch power flow** opens sliders (0–200 %, default 100 %) for load
+  P, load Q and each unit type's P/Q setpoints; it solves a ramp of
+  independent power flows from the base point to those targets, with a
+  snapshot scrubber (and *Play*) over the diagram and overview charts.
+  The **Show** selector sits directly above the results table; clicking
+  an element on the diagram jumps to its row.
+- **Modal Analysis** — one linearisation per network version (cached
+  server-side too, see `analysis._cached`), seven sub-pages: eigenvalue
+  map (+ mode table, click to select a mode), participation heatmap,
+  single-mode participation, sensitivity heatmap, mode shape, free-motion
+  response and step response. The last two hold *channels* — one
+  perturbation (free motion) or one input step (step response) each —
+  and every channel has any number of *subplots*, each with its own set of
+  signals; crosshairs are synced across a channel's subplots.
+- **EMT Simulation** — state offset or input step at T0 = 0, integrated
+  with the nonlinear model; plots start 0.01 s before T0 (`t_pre`) so the
+  initial point x0 is visible. *Overlay the equivalent linearised
+  response* adds the linear model's response to the same disturbance
+  (`linear_overlay`: `lsim` of the full `(A, B, C, D)` around the same
+  operating point, in absolute units) as dotted lines in the same colours.
+  The nonlinear model's initial point is not an exact equilibrium (see
+  {doc}`modules/timedomain`), so the EMT traces include a small initial
+  transient the linear response doesn't have — the difference
+  EMT(disturbed) − EMT(undisturbed) is what matches the linear response
+  (checked in `tests/test_analysis_options.py`). *Trace live* streams the
+  solver steps as before.
 
 ## Reference
 

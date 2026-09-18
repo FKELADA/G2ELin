@@ -340,6 +340,17 @@ def compute_operating_point(network: Network, result: PowerFlowResult) -> Networ
     load_rx: dict[int, tuple[float, float]] = {}
     for idx, load in enumerate(network.loads):
         p_pu, q_pu = load.p_mw / network.sn_mva, load.q_mvar / network.sn_mva
+        if q_pu == 0.0:
+            # Not just the p=q=0 case (undefined apparent power, division by
+            # zero right below): components/load.py's own dynamic model uses
+            # this load's reactance x_pu = z_pu*sin(acos(p_pu/s_pu)) as Lc in
+            # (wb/Lc)*(...) -- a purely resistive load (q_mvar=0, any p_mw)
+            # makes sin(acos(+-1))=0, so x_pu=0 and that division is zero too.
+            raise ValueError(
+                f"load #{idx} (bus {load.bus}) has zero reactive power (q_mvar=0) -- its constant-"
+                "impedance equivalent reactance would be exactly zero (division by zero downstream); "
+                "give it a small nonzero q_mvar (positive for inductive, negative for capacitive)"
+            )
         s_pu = math.hypot(p_pu, q_pu)
         v_pu, _ = bus_vm_va(load.bus)
         z_pu = v_pu**2 / s_pu

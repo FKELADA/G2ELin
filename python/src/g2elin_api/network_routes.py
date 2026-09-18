@@ -29,13 +29,16 @@ from fastapi.responses import StreamingResponse
 
 from . import analysis
 from .schemas import (
+    BatchPowerFlowResponse,
     EmtResponse,
     FreeResponseResponse,
     ModalResponse,
     ModeShapeResponse,
+    NetworkBatchPowerFlowRequest,
     NetworkEmtRequest,
     NetworkFreeResponseRequest,
     NetworkModeShapeRequest,
+    NetworkPowerFlowRequest,
     NetworkRequest,
     NetworkSensitivityRequest,
     NetworkStepResponseRequest,
@@ -67,8 +70,13 @@ def network_topology(req: NetworkRequest) -> TopologyResponse:
 
 
 @router.post("/powerflow", response_model=PowerFlowResponse)
-def network_powerflow(req: NetworkRequest) -> PowerFlowResponse:
-    return analysis.powerflow_response(req.network)
+def network_powerflow(req: NetworkPowerFlowRequest) -> PowerFlowResponse:
+    return analysis.powerflow_response(req.network, req.options)
+
+
+@router.post("/powerflow/batch", response_model=BatchPowerFlowResponse)
+def network_powerflow_batch(req: NetworkBatchPowerFlowRequest) -> BatchPowerFlowResponse:
+    return analysis.batch_powerflow_response(req.network, req)
 
 
 @router.post("/modal", response_model=ModalResponse)

@@ -42,11 +42,21 @@ def linearize_network(network: Network, result: PowerFlowResult) -> AssembledSys
         raise NotImplementedError(f"unsupported DER unit type(s) for ids {sorted(missing)}")
 
     # Node quirk: every node uses the *first* line's susceptance (see
-    # g2elin_core.components.sm module docstring). Falls back to 0 for a
-    # network with no lines at all (e.g. hand-built with only transformers)
-    # -- there's no "line #1" to borrow a value from, and this only matters
-    # below if a plain (non-DER) node actually exists to apply it to.
-    b_pu_quirk = network.lines[0].b_pu if network.lines else 0.0
+    # g2elin_core.components.sm module docstring) -- every bus's own dynamic
+    # model (components/node.py) needs this as a nonzero denominator
+    # (dv/dt = (wb/Cl)*(...)); a network with no lines at all (e.g.
+    # hand-built with only transformers) has no "line #1" to borrow a value
+    # from, and 0.0 isn't a safe fallback -- it's a real division by zero,
+    # not just an unrealistic approximation. validate_network() already
+    # catches this before it reaches here; this is the defensive backstop.
+    if not network.lines:
+        raise ValueError(
+            "this network has no Line elements -- every bus's own dynamic model needs a line-charging "
+            "susceptance (b_pu) to linearize around, which this codebase always borrows from the first "
+            "Line in the network; a network built entirely from transformers has no such source and "
+            "can't run modal analysis or EMT. Add at least one Line (even a short one with a small b_pu)"
+        )
+    b_pu_quirk = network.lines[0].b_pu
     node_components = {
         bus_id: linearize_node(wb_val=wb_val, b_pu=b_pu_quirk, wg0=1.0, vgd_g0=vgd, vgq_g0=vgq)
         for bus_id, (vgd, vgq) in op.node_vg.items()

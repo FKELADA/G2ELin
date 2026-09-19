@@ -189,6 +189,36 @@ def validate_network(network: Network) -> list[NetworkIssue]:
                     dynamics_caps,
                 ))
 
+    # Parameter overrides must name a real parameter of that unit type -- a
+    # typo would otherwise be silently ignored by the model.
+    from g2elin_core.operating_point import overridable_param_keys  # lazy: operating_point imports this module
+
+    for der in network.der_units:
+        if not der.params:
+            continue
+        unknown = sorted(set(der.params) - overridable_param_keys(der.unit_type.value))
+        if unknown:
+            issues.append(NetworkIssue(
+                "error",
+                f"unit id={der.id} ({der.unit_type.value}) overrides parameter(s) it doesn't have: {unknown}",
+                dynamics_caps,
+            ))
+
+    # Outside the MATLAB-compatible mode, a unit's Rt/Lt *are* its transformer
+    # (see operating_point.unit_transformer_rx); an override would make the
+    # dynamic model use a different impedance from the power flow's.
+    if not network.units_use_first_transformer:
+        for der in network.der_units:
+            clash = sorted({"Rt", "Lt"} & set(der.params))
+            if clash:
+                issues.append(NetworkIssue(
+                    "warning",
+                    f"unit id={der.id} overrides {'/'.join(clash)}, which normally follow its own transformer -- "
+                    "the power flow still uses the transformer's impedance, so the operating point and the "
+                    "dynamic model disagree. Edit the transformer instead (or remove the override)",
+                    dynamics_caps,
+                ))
+
     slack = next((d for d in network.der_units if d.bus_type.value == "slack"), None)
     if slack is not None and slack.unit_type.value not in _SUPPORTED_SLACK_UNIT_TYPES:
         issues.append(NetworkIssue(
@@ -214,5 +244,26 @@ def validate_network(network: Network) -> list[NetworkIssue]:
             "-- every bus must be reachable from the slack through lines/transformers",
             all_caps,
         ))
+
+    # Breakers (network.breakers): the slack can't be switched out, and
+    # whatever open breakers cut off is reported, so a result that ignores
+    # it is never a surprise.
+    from .breakers import out_of_service_summary  # local: keeps this module's imports minimal
+
+    if slack is not None and not slack.closed:
+        issues.append(NetworkIssue(
+            "error",
+            f"the slack unit (id={slack.id})'s breaker is open -- it is the reference of the power flow and "
+            "the dynamic models; close it, or make another unit the slack",
+            all_caps,
+        ))
+    else:
+        summary = out_of_service_summary(network)
+        if summary:
+            issues.append(NetworkIssue(
+                "warning",
+                "open breakers: " + "; ".join(summary) + " -- every analysis runs without them",
+                all_caps,
+            ))
 
     return issues

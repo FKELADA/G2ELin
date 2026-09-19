@@ -190,6 +190,52 @@ persisted server-side. Always light-themed.
   network-level settings) plus the unit's derived control parameters
   (read-only). Live validation (`/validate`), a bulk table view, and JSON
   import/export (network + diagram positions).
+  A unit's control & electrical parameters are editable: changed values are
+  stored as overrides in `DerUnit.params` (only what differs from the
+  default) and applied on top of `sm_params()`/`gfm_params()`/`gfl_params()`
+  by `operating_point.compute_operating_point`, so modal analysis and EMT
+  both use them; an unknown parameter name is a validation error. Defaults
+  come from `POST /api/units/defaults` (unit type + base values only), so
+  they're available before the unit is connected. For GFM/GFL units a
+  **loop tuner** converts response time t_r and damping ζ to Kp/Ki and back
+  with the same pole-placement formulas as the defaults (ωn = 3/(ζ·t_r)).
+  Changing a plant value a loop was tuned against (Rf, Lf, Cf, Cdc, Gdc)
+  does not retune its gains; the tuner flags the affected loops and can
+  re-apply the default t_r/ζ to the new plant.
+  Every per-unit value is shown next to its SI equivalent, and either can
+  be edited (per unit stays the stored value; SI is derived from it with
+  the current base values, so changing a bus voltage or the base power
+  changes the SI figures, not the per-unit ones). Lines show R/X in Ω and
+  B in µS, both for the whole line and per km; transformers in Ω referred
+  to the HV side on their rating; a unit's R/L/C in Ω/mH/µF on its own
+  base (DC link in mF and µS on the DC base, `pu_base.py`). A line's
+  R, X and B are whole-line values, so its length has no effect on the
+  results by itself: editing the length rescales them at constant per-km
+  values (the root-locus sweep of a length does the same).
+  A unit's Rt/Lt are its own transformer -- the element the power flow
+  uses -- converted from the transformer's rating to the system base
+  (`operating_point.unit_transformer_rx`), and the editor links the two:
+  editing Rt/Lt edits the transformer and vice versa. The network setting
+  *MATLAB-compatible transformers* (`Network.units_use_first_transformer`)
+  restores the MATLAB tool's convention of every unit using the first
+  transformer, to reproduce its results.
+  **Breakers** (`g2elin_core.network.breakers`): every line and transformer
+  has one at each end (`from_closed`/`to_closed`, `hv_closed`/`lv_closed`),
+  every load and unit one at its bus (`closed`); all closed by default. They
+  are drawn on the diagram (filled square = closed, hollow red = open) and
+  toggle on click — on the Network and Power Flow pages — or from the
+  inspector/table checkboxes. A line or transformer with either breaker
+  open, and a load or unit with its own open, is out of service; so is
+  anything cut off from the slack's bus (a de-energized island). The slack
+  unit's breaker can't be opened. Out-of-service elements are drawn dashed /
+  faded, validation lists them, and every analysis leaves them out: the
+  power flow keeps them as pandapower `in_service=False` elements (so result
+  tables keep their numbering; de-energized buses read null), and modal
+  analysis, root locus and EMT are built from
+  `breakers.energized_network()` — the network without them — whose model
+  names keep the full network's numbers (line #3 is always `Ln_4`, the
+  second SM always `SM_2`; `breakers.BlockLabels`). A unit that is out of
+  service takes its own transformer and terminal bus with it.
 - **Power Flow** — solver (`nr`, `iwamoto_nr`, `fdbx`, `fdxb`, `gs`,
   `bfsw`), max iterations, tolerance and initialisation, passed to
   `pandapower.runpp`. The network diagram is shown before any run;
@@ -210,7 +256,26 @@ persisted server-side. Always light-themed.
   perturbation (free motion) or one input step (step response) each —
   and every channel has any number of *subplots*, each with its own set of
   signals; crosshairs are synced across a channel's subplots.
-- **EMT Simulation** — state offset or input step at T0 = 0, integrated
+  **Root locus** sweeps any one parameter (network, bus, line,
+  transformer, load, unit setpoint or any `params.*` value) over a range
+  and step: `POST /api/network/modal/sweep` re-solves the power flow and the
+  eigenvalues at each value (at most 201 values), streaming one NDJSON line
+  per value. Eigenvalues are reordered step to step by a minimum-cost
+  assignment (`g2elin_api/sweep.py`), so each mode draws as one locus,
+  coloured by the parameter value, on symlog or linear axes; a table ranks
+  the modes the parameter moves most. A value that doesn't solve is
+  reported for that step and the sweep continues.
+  For GFM/GFL units the sweepable quantities also include each control
+  loop's response time t_r and damping ζ (and the droop loop's inertia H
+  and power-filter time constant), as `tune.<loop>.<quantity>` targets:
+  at each value `g2elin_core.tuning` re-derives that loop's Kp/Ki with the
+  same pole-placement formulas as the defaults, holding the loop's other
+  quantity at its current value.
+  Several parameters can be swept together (`extra` in the request):
+  each moves from its own start to its stop in lockstep with the main
+  parameter, so every step is their combined effect.
+- **EMT Simulation** — state offset, input step or **network event** at
+  T0 = 0, integrated
   with the nonlinear model; plots start 0.01 s before T0 (`t_pre`) so the
   initial point x0 is visible. *Overlay the equivalent linearised
   response* adds the linear model's response to the same disturbance
@@ -222,6 +287,35 @@ persisted server-side. Always light-themed.
   EMT(disturbed) − EMT(undisturbed) is what matches the linear response
   (checked in `tests/test_analysis_options.py`). *Trace live* streams the
   solver steps as before.
+  **Measurements** (`g2elin_core.timedomain.measurements`, requested with
+  `plot_measurements`, listed by `.../states`) are computed from each
+  element's own model variables at every sample: bus voltage magnitude
+  (pu), angle (deg, equal to the power flow's at t = 0), frequency (Hz --
+  instantaneous, from the analytic derivative of the voltage angle, and
+  "measured", through a one-cycle first-order filter) and instantaneous
+  3-phase voltages (pu); P and Q (pu on the network base) at both ends of
+  each line (π-line terminal flows, charging included), consumed by each
+  load, and injected by each unit at its grid-side bus (which is also its
+  transformer's HV-side flow); and each unit's own frequency (rotor, droop
+  or PLL). At the operating point they reproduce the power flow
+  (`tests/test_measurements.py`). A unit's LV terminal bus is not a node of
+  the dynamic model, so it has no bus measurements. When 3-phase voltages
+  are plotted the page picks a timestep of about 40 samples per cycle.
+  **Network events** (`perturb_kind: "event"`, `event: {...}`;
+  `g2elin_core.timedomain.events`): a *breaker opening* on a line, a unit
+  transformer (trips its unit), a load or a unit; a *load step* (ΔP/ΔQ in %
+  of the load, as a constant impedance at the operating-point voltage); or
+  a *phase jump* at a bus (rotates that bus's voltage phasor) or of the
+  infinite-bus source (the grid-code phase-jump test). A breaker opening or
+  load step integrates a *post-event model* built from the pre-event
+  model's own component instances — same parameters and setpoints, no new
+  power flow — rewired without the element or with the new load impedance,
+  starting from the pre-event state block by block; whatever the opening
+  islands keeps running on its own. Signals of removed elements read null
+  after T0 (power flows read 0). The slack can't be tripped. Those two
+  events change the model, so they have no linear overlay (the response
+  says why in `linear_note`); a phase jump only moves the initial state, so
+  it has one. Tested in `tests/test_breakers.py`.
 
 ## Reference
 

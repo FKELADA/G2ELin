@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 import networkx as nx
 
-from g2elin_core.operating_point import gfl_params, gfm_params, sm_params
+from g2elin_core.operating_point import gfl_params, gfm_params, overridable_param_keys, sm_params, unit_transformer_rx
 
 from .schema import DerUnit, Network
 
@@ -69,17 +69,21 @@ def _der_info(der: DerUnit, network: Network) -> dict:
     }
     if not network.transformers:
         return info
-    first_tr = network.transformers[0]
+    rt, lt = unit_transformer_rx(network, der)
     if der.unit_type.value == "sm":
-        info["control_params"] = sm_params(
-            sn_mva=network.sn_mva, f_hz=network.f_hz, rt_pu=first_tr.r_pu, lt_pu=first_tr.x_pu
-        )
+        defaults = sm_params(sn_mva=network.sn_mva, f_hz=network.f_hz, rt_pu=rt, lt_pu=lt)
     elif der.unit_type.value in ("gfm", "gfl"):
         un_kv = network.bus(der.bus).vn_kv
         fn = gfm_params if der.unit_type.value == "gfm" else gfl_params
-        info["control_params"] = fn(
-            sn_mva=network.sn_mva, f_hz=network.f_hz, un_kv=un_kv, rt_pu=first_tr.r_pu, lt_pu=first_tr.x_pu
-        )
+        defaults = fn(sn_mva=network.sn_mva, f_hz=network.f_hz, un_kv=un_kv, rt_pu=rt, lt_pu=lt)
+    else:
+        return info
+    # control_params: what the model actually uses (defaults + this unit's
+    # valid overrides); control_params_default: the defaults alone, so the
+    # UI can show which values were changed and restore them.
+    valid = overridable_param_keys(der.unit_type.value)
+    info["control_params"] = {**defaults, **{k: v for k, v in der.params.items() if k in valid}}
+    info["control_params_default"] = defaults
     return info
 
 

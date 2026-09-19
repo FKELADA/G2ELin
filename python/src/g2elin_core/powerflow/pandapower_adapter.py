@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import pandapower as pp
 import pandas as pd
 
+from g2elin_core.network.breakers import SlackDisconnected, service_state
 from g2elin_core.network.schema import BusType, Network, UnitType
 
 _LARGE_Q_LIMIT_MVAR = 9999.0  # matches Power_Fl.m's default qg_max/qg_min when unspecified
@@ -27,15 +28,27 @@ def build_pandapower_net(network: Network) -> tuple[pp.pandapowerNet, dict[int, 
     Returns the net and a mapping from ``Network`` bus ids to pandapower's
     internal bus indices (pandapower reindexes on its own, so this mapping
     is needed to translate results back).
+
+    Elements switched out by open breakers (see ``network.breakers``) are
+    created but marked out of service, and de-energized buses too, so every
+    result table keeps the network's own element order.
     """
+    st = service_state(network)
+    if not st.slack_connected:
+        raise SlackDisconnected(
+            "the slack unit's breaker is open -- the power flow has no reference; close it, or make "
+            "another unit the slack"
+        )
     net = pp.create_empty_network(name=network.name, f_hz=network.f_hz, sn_mva=network.sn_mva)
 
     bus_index: dict[int, int] = {
-        bus.id: pp.create_bus(net, vn_kv=bus.vn_kv, name=bus.name or str(bus.id))
+        bus.id: pp.create_bus(
+            net, vn_kv=bus.vn_kv, name=bus.name or str(bus.id), in_service=bus.id in st.energized_buses,
+        )
         for bus in network.buses
     }
 
-    for line in network.lines:
+    for li, line in enumerate(network.lines):
         vn_kv = network.bus(line.from_bus).vn_kv
         if vn_kv != network.bus(line.to_bus).vn_kv:
             raise ValueError(
@@ -57,9 +70,10 @@ def build_pandapower_net(network: Network) -> tuple[pp.pandapowerNet, dict[int, 
             c_nf_per_km=(c_farad_total / line.length_km) * 1e9,
             max_i_ka=_PLACEHOLDER_MAX_I_KA,
             name=line.name,
+            in_service=st.lines[li],
         )
 
-    for tr in network.transformers:
+    for ti, tr in enumerate(network.transformers):
         vk_percent = math.hypot(tr.r_pu, tr.x_pu) * 100.0
         vkr_percent = tr.r_pu * 100.0
         pp.create_transformer_from_parameters(
@@ -74,14 +88,19 @@ def build_pandapower_net(network: Network) -> tuple[pp.pandapowerNet, dict[int, 
             pfe_kw=0.0,
             i0_percent=0.0,
             name=tr.name,
+            in_service=st.transformers[ti],
         )
 
-    for load in network.loads:
-        pp.create_load(net, bus=bus_index[load.bus], p_mw=load.p_mw, q_mvar=load.q_mvar, name=load.name)
+    for li, load in enumerate(network.loads):
+        pp.create_load(
+            net, bus=bus_index[load.bus], p_mw=load.p_mw, q_mvar=load.q_mvar, name=load.name,
+            in_service=st.loads[li],
+        )
 
     for der in network.der_units:
         b = bus_index[der.bus]
         name = f"der{der.id}"
+        on = st.der_units[der.id]
         if der.bus_type is BusType.SLACK:
             pp.create_ext_grid(net, bus=b, vm_pu=der.v_set_pu, va_degree=0.0, name=name)
         elif der.bus_type is BusType.PV:
@@ -93,12 +112,15 @@ def build_pandapower_net(network: Network) -> tuple[pp.pandapowerNet, dict[int, 
                 min_q_mvar=-_LARGE_Q_LIMIT_MVAR,
                 max_q_mvar=_LARGE_Q_LIMIT_MVAR,
                 name=name,
+                in_service=on,
             )
         else:  # PQ-dispatched DER (e.g. a GFL unit not under voltage control)
-            pp.create_sgen(net, bus=b, p_mw=der.p_set_mw, q_mvar=der.q_set_mvar, name=name)
+            pp.create_sgen(net, bus=b, p_mw=der.p_set_mw, q_mvar=der.q_set_mvar, name=name, in_service=on)
 
         if der.p_cons_mw or der.q_cons_mvar:
-            pp.create_load(net, bus=b, p_mw=der.p_cons_mw, q_mvar=der.q_cons_mvar, name=f"{name}_aux_load")
+            pp.create_load(
+                net, bus=b, p_mw=der.p_cons_mw, q_mvar=der.q_cons_mvar, name=f"{name}_aux_load", in_service=on,
+            )
 
     return net, bus_index
 
@@ -132,7 +154,7 @@ class PowerFlowResult:
         return pd.DataFrame(rows).sort_values("bus").reset_index(drop=True)
 
     def total_losses_mw(self) -> float:
-        return float(self.net.res_line.pl_mw.sum() + self.net.res_trafo.pl_mw.sum())
+        return float(self.net.res_line.pl_mw.fillna(0).sum() + self.net.res_trafo.pl_mw.fillna(0).sum())
 
     def _element_rows(self, res_df: pd.DataFrame, element_df: pd.DataFrame, bus_cols: list[str]) -> list[dict]:
         """Joins a pandapower ``res_*`` table with its element table's
@@ -144,7 +166,7 @@ class PowerFlowResult:
         inv_index = {v: k for k, v in self.bus_index.items()}
         rows = []
         for idx in res_df.index:
-            row = {"name": element_df.at[idx, "name"]}
+            row = {"name": element_df.at[idx, "name"], "in_service": bool(element_df.at[idx, "in_service"])}
             for col in bus_cols:
                 row[col] = inv_index[int(element_df.at[idx, col])]
             row.update(res_df.loc[idx].to_dict())

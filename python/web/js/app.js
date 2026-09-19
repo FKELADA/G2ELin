@@ -11,6 +11,7 @@ const PAGES = {
 };
 
 function route() {
+  hideTooltip();  // a hover tooltip must not outlive its page
   const raw = location.hash.replace(/^#\/?/, "") || "home";
   const slash = raw.indexOf("/");
   const name = slash < 0 ? raw : raw.slice(0, slash);

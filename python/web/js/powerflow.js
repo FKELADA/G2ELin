@@ -79,6 +79,8 @@ const PowerFlowPage = {
       editable: false,
       tooltip: sel => this.tooltip(sel),
       onSelect: sel => this.onSelect(sel),
+      // Breakers toggle here too, for quick what-ifs (the result then goes stale).
+      onBreaker: br => { if (toggleBreaker(br)) this.view.render(); },
     });
     this.fillAlgorithms();
     $("#pf-run").addEventListener("click", () => this.runSingle());
@@ -211,7 +213,7 @@ const PowerFlowPage = {
     const bm = BUS_METRICS[$("#pf-bus-metric").value], em = EDGE_METRICS[$("#pf-edge-metric").value];
     let dev = 0, emax = 0;
     all.forEach(s => {
-      s.buses.forEach(b => { dev = Math.max(dev, Math.abs(bm.get(b) - bm.center)); });
+      s.buses.forEach(b => { const v = bm.get(b); if (v != null) dev = Math.max(dev, Math.abs(v - bm.center)); });
       s.lines.forEach(l => { emax = Math.max(emax, em.line(l) || 0); });
       s.transformers.forEach(t => { emax = Math.max(emax, em.trafo(t) || 0); });
     });
@@ -232,7 +234,8 @@ const PowerFlowPage = {
     const d = this.domains();
     const byBus = Object.fromEntries(cur.buses.map(b => [b.bus, b]));
     this.view.setStyle({
-      bus: b => byBus[b.id] ? { fill: divergingColor((d.bm.get(byBus[b.id]) - d.lo) / (d.hi - d.lo)) } : {},
+      // A de-energized bus has no result (null): it keeps its plain, faded look.
+      bus: b => byBus[b.id] && d.bm.get(byBus[b.id]) != null ? { fill: divergingColor((d.bm.get(byBus[b.id]) - d.lo) / (d.hi - d.lo)) } : {},
       edge: (kind, i) => {
         const row = kind === "line" ? cur.lines[i] : cur.transformers[i];
         if (!row) return {};
@@ -359,21 +362,24 @@ const PowerFlowPage = {
       const b = net.buses.find(x => x.id === sel.id);
       const r = cur.buses.find(x => x.bus === sel.id);
       if (!b || !r) return elementTooltip(sel);
+      if (r.vm_pu == null) return `<div class="tt-title">${esc(b.name || `bus${b.id}`)} <span class="muted">· bus ${b.id}</span></div>` + ttTable([["State", "de-energized — cut off from the slack by open breakers"]]);
       const rows = [["Voltage", `${fmt(r.vm_pu, 4)} pu`], ["Angle", `${fmt(r.va_degree, 3)}°`], ["P net generation", `${fmt(r.p_net_gen_mw, 3)} MW`], ["Q net generation", `${fmt(r.q_net_gen_mvar, 3)} MVAr`]];
       const der = net.der_units.find(d => d.bus === sel.id);
       if (der) {
         const name = `der${der.id}`;
         const gen = [...cur.external_grid, ...cur.generators, ...cur.static_generators].find(g => g.name === name);
         rows.push({ sep: `${UNIT_NAME[der.unit_type] || der.unit_type} (${der.bus_type})` });
-        if (gen) rows.push(["P output", `${fmt(gen.p_mw, 3)} MW`], ["Q output", `${fmt(gen.q_mvar, 3)} MVAr`]);
+        if (gen && gen.in_service === false) rows.push(["State", "disconnected (breaker open)"]);
+        else if (gen) rows.push(["P output", `${fmt(gen.p_mw, 3)} MW`], ["Q output", `${fmt(gen.q_mvar, 3)} MVAr`]);
       }
       const loads = cur.loads.filter(l => l.bus === sel.id);
-      if (loads.length) { rows.push({ sep: "Loads" }); loads.forEach(l => rows.push([l.name || "load", `${fmt(l.p_mw, 3)} MW, ${fmt(l.q_mvar, 3)} MVAr`])); }
+      if (loads.length) { rows.push({ sep: "Loads" }); loads.forEach(l => rows.push([l.name || "load", l.in_service === false ? "disconnected" : `${fmt(l.p_mw, 3)} MW, ${fmt(l.q_mvar, 3)} MVAr`])); }
       return `<div class="tt-title">${esc(b.name || `bus${b.id}`)} <span class="muted">· bus ${b.id}</span></div>` + ttTable(rows);
     }
     const isLine = sel.kind === "line";
     const r = isLine ? cur.lines[sel.index] : cur.transformers[sel.index];
     if (!r) return elementTooltip(sel);
+    if (r.in_service === false) return `<div class="tt-title">${isLine ? "Line" : "Transformer"} ${esc(r.name || `#${sel.index}`)}</div>` + ttTable([["Buses", isLine ? `${r.from_bus} → ${r.to_bus}` : `${r.hv_bus} → ${r.lv_bus}`], ["State", "out of service (open breaker, or de-energized)"]]);
     const rows = isLine
       ? [["Buses", `${r.from_bus} → ${r.to_bus}`], ["P from / to", `${fmt(r.p_from_mw, 3)} / ${fmt(r.p_to_mw, 3)} MW`], ["Q from / to", `${fmt(r.q_from_mvar, 3)} / ${fmt(r.q_to_mvar, 3)} MVAr`],
         ["Losses", `${fmtSmart(r.pl_mw)} MW, ${fmtSmart(r.ql_mvar)} MVAr`], ["Current", `${fmtSmart(r.i_ka)} kA`], ["V from / to", `${fmt(r.vm_from_pu, 4)} / ${fmt(r.vm_to_pu, 4)} pu`]]

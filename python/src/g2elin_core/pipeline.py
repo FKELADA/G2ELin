@@ -15,6 +15,7 @@ from g2elin_core.components.load import linearize_load
 from g2elin_core.components.node import linearize_node
 from g2elin_core.components.sm import linearize_sm
 from g2elin_core.interconnect import AssembledSystem, assemble_network
+from g2elin_core.network.breakers import node_b_pu
 from g2elin_core.network.schema import Network
 from g2elin_core.operating_point import compute_operating_point
 from g2elin_core.powerflow import PowerFlowResult
@@ -49,14 +50,14 @@ def linearize_network(network: Network, result: PowerFlowResult) -> AssembledSys
     # from, and 0.0 isn't a safe fallback -- it's a real division by zero,
     # not just an unrealistic approximation. validate_network() already
     # catches this before it reaches here; this is the defensive backstop.
-    if not network.lines:
+    b_pu_quirk = node_b_pu(network)
+    if b_pu_quirk is None:
         raise ValueError(
             "this network has no Line elements -- every bus's own dynamic model needs a line-charging "
             "susceptance (b_pu) to linearize around, which this codebase always borrows from the first "
             "Line in the network; a network built entirely from transformers has no such source and "
             "can't run modal analysis or EMT. Add at least one Line (even a short one with a small b_pu)"
         )
-    b_pu_quirk = network.lines[0].b_pu
     node_components = {
         bus_id: linearize_node(wb_val=wb_val, b_pu=b_pu_quirk, wg0=1.0, vgd_g0=vgd, vgq_g0=vgq)
         for bus_id, (vgd, vgq) in op.node_vg.items()

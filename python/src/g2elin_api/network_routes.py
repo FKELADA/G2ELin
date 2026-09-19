@@ -27,7 +27,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from . import analysis
+from . import analysis, sweep
 from .schemas import (
     BatchPowerFlowResponse,
     EmtResponse,
@@ -42,6 +42,7 @@ from .schemas import (
     NetworkRequest,
     NetworkSensitivityRequest,
     NetworkStepResponseRequest,
+    NetworkSweepRequest,
     PowerFlowResponse,
     SensitivityResponse,
     StatesResponse,
@@ -129,3 +130,14 @@ def network_emt_live(req: NetworkEmtRequest, request: Request) -> StreamingRespo
     return StreamingResponse(
         analysis.emt_live_stream(plan, req.perturb_kind, request), media_type="application/x-ndjson"
     )
+
+
+@router.post("/modal/sweep")
+async def network_modal_sweep(req: NetworkSweepRequest, request: Request) -> StreamingResponse:
+    """Root locus: eigenvalues while one parameter steps across a range,
+    streamed as NDJSON (see ``sweep.sweep_stream`` for the line shapes).
+    The target and the range are validated here, before streaming starts,
+    so a bad request is a normal 422."""
+    sweep.check_target(req.network, req)
+    sweep.sweep_values(req)
+    return StreamingResponse(sweep.sweep_stream(req.network, req, request), media_type="application/x-ndjson")

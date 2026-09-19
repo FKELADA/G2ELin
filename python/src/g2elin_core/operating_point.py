@@ -165,6 +165,77 @@ def gfl_params(*, sn_mva: float, f_hz: float, un_kv: float, rt_pu: float, lt_pu:
     }
 
 
+# Parameters set by the network itself (the base frequency), never per unit.
+NON_OVERRIDABLE_PARAMS = frozenset({"wb"})
+
+
+def overridable_param_keys(unit_type: str) -> frozenset[str]:
+    """Names a ``DerUnit.params`` override may use for ``unit_type`` (empty for
+    an infinite bus, which has no parameter set of its own). The key set of
+    each ``*_params()`` dict doesn't depend on its arguments, so any values do.
+    """
+    probe = dict(sn_mva=100.0, f_hz=50.0, rt_pu=0.0, lt_pu=0.1)
+    if unit_type == "sm":
+        keys = sm_params(**probe)
+    elif unit_type == "gfm":
+        keys = gfm_params(**probe, un_kv=20.0)
+    elif unit_type == "gfl":
+        keys = gfl_params(**probe, un_kv=20.0)
+    else:
+        return frozenset()
+    return frozenset(keys) - NON_OVERRIDABLE_PARAMS
+
+
+def unit_transformer_rx(network: Network, der) -> tuple[float, float]:
+    """``(Rt, Lt)`` in system per unit for ``der``'s dynamic model.
+
+    By default the unit's *own* transformer (the one whose LV side is the
+    unit's bus) -- the same element the power flow uses -- converted from
+    per unit of the transformer's rating to per unit of the network base
+    (``Z_sys = Z_tr * Sn_sys / Sn_tr``), so power flow and dynamics describe
+    the same impedance. With ``network.units_use_first_transformer`` (the
+    MATLAB tool's convention, kept to reproduce its results), every unit uses
+    the network's *first* transformer's values unconverted. Falls back to the
+    first transformer when the unit has none of its own (such a network
+    fails validation for modal/EMT anyway), and to placeholders when the
+    network has no transformer at all.
+    """
+    own = next((t for t in network.transformers if t.lv_bus == der.bus), None)
+    if network.units_use_first_transformer or own is None:
+        first = network.transformers[0] if network.transformers else None
+        return (first.r_pu, first.x_pu) if first else (0.0, 0.05)
+    k = network.sn_mva / own.sn_mva
+    return own.r_pu * k, own.x_pu * k
+
+
+def unit_params(network: Network, der) -> dict:
+    """The parameter dict ``der``'s model uses in ``network``: its type's
+    defaults (with the models' shared-transformer convention: the network's
+    first transformer) plus ``der.params`` overrides. Empty for an infinite
+    bus."""
+    rt, lt = unit_transformer_rx(network, der)
+    base = dict(sn_mva=network.sn_mva, f_hz=network.f_hz, rt_pu=rt, lt_pu=lt)
+    kind = der.unit_type.value
+    if kind == "sm":
+        defaults = sm_params(**base)
+    elif kind in ("gfm", "gfl"):
+        fn = gfm_params if kind == "gfm" else gfl_params
+        defaults = fn(**base, un_kv=network.bus(der.bus).vn_kv)
+    else:
+        return {}
+    return apply_param_overrides(der, defaults)
+
+
+def apply_param_overrides(der, params: dict) -> dict:
+    """``params`` with ``der.params`` applied on top; raises on an override
+    name this unit type doesn't have (validate_network() reports the same).
+    """
+    unknown = set(der.params) - overridable_param_keys(der.unit_type.value)
+    if unknown:
+        raise ValueError(f"unit id={der.id} ({der.unit_type.value}): unknown parameter override(s) {sorted(unknown)}")
+    return {**params, **der.params}
+
+
 def _rotate_to_global(v_pu: float, angle_rad: float, theta_g_rad: float) -> tuple[float, float]:
     z = v_pu * complex(math.cos(angle_rad), math.sin(angle_rad)) * complex(
         math.cos(-theta_g_rad), math.sin(-theta_g_rad)
@@ -220,18 +291,19 @@ def compute_operating_point(network: Network, result: PowerFlowResult) -> Networ
 
     transformer_by_lv_bus = {tr.lv_bus: tr for tr in network.transformers}
 
-    # DER units, faithfully replicating the "every SM uses DG#1's transformer
-    # impedance" quirk (see g2elin_core.components.sm module docstring). The
-    # slack unit is linearized first: its own theta0 defines the global
+    # DER units. Each unit's transformer impedance comes from
+    # unit_transformer_rx(): its own transformer by default, or DG#1's for
+    # every unit in the MATLAB-compatible mode (see the g2elin_core.components.sm
+    # module docstring). The slack unit is linearized first: its own theta0 defines the global
     # reference angle theta_g_0 that every other unit needs (theta_g_rad is
     # a required constructor argument but is provably unused when
     # is_slack=True, so a placeholder there is harmless — see SmOperatingPoint).
-    first_tr = network.transformers[0]
     ders_by_slack_first = sorted(network.der_units, key=lambda d: d.bus_type.value != "slack")
 
     def build_sm_op(der, theta_g_rad: float) -> SmOperatingPoint:
         tr = transformer_by_lv_bus[der.bus]
-        params = sm_params(sn_mva=network.sn_mva, f_hz=network.f_hz, rt_pu=first_tr.r_pu, lt_pu=first_tr.x_pu)
+        rt, lt = unit_transformer_rx(network, der)
+        params = apply_param_overrides(der, sm_params(sn_mva=network.sn_mva, f_hz=network.f_hz, rt_pu=rt, lt_pu=lt))
         v_t, a_t = bus_vm_va(der.bus)
         p_net, q_net = bus_pq(der.bus)
         p_gross_pu = (p_net + der.p_cons_mw) / network.sn_mva
@@ -275,20 +347,20 @@ def compute_operating_point(network: Network, result: PowerFlowResult) -> Networ
         q_pu = (q_net + der.q_cons_mvar) / network.sn_mva
         v_g, a_g = bus_vm_va(tr.hv_bus)
         if der.unit_type.value == "gfm":
-            params = gfm_params(
-                sn_mva=network.sn_mva, f_hz=network.f_hz, un_kv=un_kv,
-                rt_pu=first_tr.r_pu, lt_pu=first_tr.x_pu,
-            )
+            rt, lt = unit_transformer_rx(network, der)
+            params = apply_param_overrides(der, gfm_params(
+                sn_mva=network.sn_mva, f_hz=network.f_hz, un_kv=un_kv, rt_pu=rt, lt_pu=lt,
+            ))
             gfm_ops[der.id] = GfmOperatingPoint(
                 params=params, v_terminal_pu=v_t, angle_terminal_rad=a_t,
                 p_terminal_pu=p_pu, q_terminal_pu=q_pu,
                 v_grid_pu=v_g, angle_grid_rad=a_g, theta_g_rad=theta_g_rad,
             )
         else:
-            params = gfl_params(
-                sn_mva=network.sn_mva, f_hz=network.f_hz, un_kv=un_kv,
-                rt_pu=first_tr.r_pu, lt_pu=first_tr.x_pu,
-            )
+            rt, lt = unit_transformer_rx(network, der)
+            params = apply_param_overrides(der, gfl_params(
+                sn_mva=network.sn_mva, f_hz=network.f_hz, un_kv=un_kv, rt_pu=rt, lt_pu=lt,
+            ))
             gfl_ops[der.id] = GflOperatingPoint(
                 params=params, v_terminal_pu=v_t, angle_terminal_rad=a_t,
                 p_terminal_pu=p_pu, q_terminal_pu=q_pu,
@@ -308,16 +380,17 @@ def compute_operating_point(network: Network, result: PowerFlowResult) -> Networ
     wb_val = 2 * math.pi * network.f_hz
 
     # IB (always the slack, see components/ib.py) -- unlike SM/GFM/GFL it
-    # has no internal control-loop parameters to derive, just the same
-    # transformer-impedance ("DG#1's transformer") quirk applied uniformly.
+    # has no internal control-loop parameters to derive, only its transformer
+    # impedance (unit_transformer_rx, like every other unit).
     ib_ops: dict[int, dict] = {}
     for der in network.der_units:
         if der.unit_type.value != "infinite_bus":
             continue
         v_t, _ = bus_vm_va(der.bus)
         p_net, q_net = bus_pq(der.bus)
+        rt, lt = unit_transformer_rx(network, der)
         ib_ops[der.id] = dict(
-            wb_val=wb_val, r_pu=first_tr.r_pu, x_pu=first_tr.x_pu, v_pu=v_t,
+            wb_val=wb_val, r_pu=rt, x_pu=lt, v_pu=v_t,
             p_mw=p_net + der.p_cons_mw, q_mvar=q_net + der.q_cons_mvar, sn_mva=network.sn_mva,
         )
 

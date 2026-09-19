@@ -14,10 +14,11 @@ from g2elin_core.network.schema import Network
 
 class BusRow(BaseModel):
     bus: int
-    vm_pu: float
-    va_degree: float
-    p_net_gen_mw: float
-    q_net_gen_mvar: float
+    # None on a bus de-energized by open breakers (see network.breakers)
+    vm_pu: float | None
+    va_degree: float | None
+    p_net_gen_mw: float | None
+    q_net_gen_mvar: float | None
 
 
 class PowerFlowOptions(BaseModel):
@@ -189,10 +190,20 @@ class BatchPowerFlowResponse(BaseModel):
     snapshots: list[BatchSnapshot]
 
 
+class MeasurementInfo(BaseModel):
+    name: str   # e.g. "V_{bus4}"
+    group: str  # the element, e.g. "Bus 4 (bus4)"
+    label: str  # e.g. "Voltage magnitude"
+    unit: str   # e.g. "pu", "deg", "Hz"
+
+
 class StatesResponse(BaseModel):
     state_names: list[str]
     input_names: list[str]
     output_names: list[str]
+    # Measurement outputs (g2elin_core.timedomain.measurements) -- plottable
+    # via EmtRequest.plot_measurements.
+    measurements: list[MeasurementInfo] = []
 
 
 class BusNodeRow(BaseModel):
@@ -219,6 +230,19 @@ class TopologyResponse(BaseModel):
     edges: list[TopologyEdgeRow]
 
 
+class NetworkEventSpec(BaseModel):
+    """A network event applied at t = 0 (timedomain.events): a breaker
+    opening, a load step, or a phase jump."""
+
+    kind: str  # "breaker" | "load_step" | "phase_jump"
+    element: str = ""  # breaker: "line" | "transformer" | "load" | "unit"
+    index: int = 0  # line/transformer/load index, or the unit's id
+    dp_pct: float = 0.0  # load_step: active-power change, % of the load
+    dq_pct: float = 0.0  # load_step: reactive-power change, %
+    bus: int | None = None  # phase_jump: bus id (a network bus, or the infinite bus's own bus)
+    angle_deg: float = 0.0  # phase_jump
+
+
 class EmtRequest(BaseModel):
     # "state": an initial-condition offset (x0[idx] += perturb_offset) --
     # the system starts away from equilibrium and (maybe) settles back.
@@ -228,8 +252,11 @@ class EmtRequest(BaseModel):
     # standard "P_ref step" kind of disturbance test. perturb_name is
     # looked up against state_names or input_names accordingly (exact name
     # from GET .../states, not a substring).
-    perturb_kind: str = "state"  # "state" | "input"
-    perturb_name: str
+    # "event": a network event (``event``) -- breaker opening, load step or
+    # phase jump -- at t=0; perturb_name/perturb_offset are then unused.
+    perturb_kind: str = "state"  # "state" | "input" | "event"
+    perturb_name: str = ""
+    event: NetworkEventSpec | None = None
     perturb_offset: float = 0.02  # the perturbation's amplitude -- larger can push the coupled Newton solve past convergence, see main.py
     t_final: float = 1.0
     dt: float | None = None  # None = 200 samples over [0, t_final] (unchanged default); else t_final/dt (+1) samples, bounded server-side
@@ -243,6 +270,9 @@ class EmtRequest(BaseModel):
     plot_states: list[str] = []
     plot_inputs: list[str] = []
     plot_outputs: list[str] = []
+    # Measurement outputs by name (GET .../states lists them): power flows,
+    # bus voltage/angle/frequency, 3-phase voltages, unit frequencies.
+    plot_measurements: list[str] = []
     # Seconds of undisturbed equilibrium prepended before the disturbance at
     # t=0 (samples at t=-t_pre and t=0-), so a plot shows x0 before the
     # jump/step. 0 keeps the trajectory starting at t=0 exactly.
@@ -265,10 +295,13 @@ class EmtResponse(BaseModel):
     dt: float  # the actual sample spacing used (t[1] - t[0]) -- answers "what's the current timestep"
     state_names: list[str]  # names actually plotted (== plot_states, or the dw_r_* default if it was empty)
     t: list[float]
-    series: dict[str, list[float]]
-    inputs: dict[str, list[float]]
-    outputs: dict[str, list[float]]
+    series: dict[str, list[float | None]]
+    inputs: dict[str, list[float | None]]
+    outputs: dict[str, list[float | None]]
+    # Signals of elements an event removes read null after t=0 (powers read 0).
+    measurements: dict[str, list[float | None]] = {}
     linear: LinearOverlay | None = None
+    linear_note: str | None = None  # why there's no linear overlay (events that change the model)
 
 
 class PresetSummary(BaseModel):
@@ -327,12 +360,77 @@ class NetworkEmtRequest(EmtRequest):
     network: Network
 
 
+class SweepTarget(BaseModel):
+    """One network parameter to sweep. ``element`` is "network", "bus",
+    "line", "transformer", "load" or "unit"; ``key`` identifies the element
+    (bus/unit id, or list index for lines/transformers/loads; unused for
+    "network"); ``field`` is the element's field name, or ``params.<name>``
+    for a unit's control/electrical parameter (see DerUnit.params).
+    """
+
+    element: str
+    key: int | None = None
+    field: str
+
+
+class SweepExtra(BaseModel):
+    """A further parameter varied together with the main one: it goes from
+    ``start`` to ``stop`` in lockstep with the main parameter's progress, so
+    every step of the sweep is the combined effect of all of them."""
+
+    target: SweepTarget
+    start: float
+    stop: float
+
+
+class SweepRequest(BaseModel):
+    target: SweepTarget
+    start: float
+    stop: float
+    step: float
+    extra: list[SweepExtra] = []
+
+
+class NetworkSweepRequest(SweepRequest):
+    network: Network
+
+
+class UnitDefaultsRequest(BaseModel):
+    """Everything a unit's default parameter set depends on -- no network
+    needed, so the editor can show a unit's parameters before it's wired up.
+    ``rt_pu``/``lt_pu`` are the network's first transformer (the models'
+    shared-transformer convention, see operating_point.py)."""
+
+    unit_type: str
+    sn_mva: float
+    f_hz: float
+    un_kv: float
+    rt_pu: float = 0.0
+    lt_pu: float = 0.05
+
+
+class UnitDefaultsResponse(BaseModel):
+    params: dict[str, float]  # empty for a unit type without its own parameter set (infinite bus)
+
+
 class NetworkIssueRow(BaseModel):
     severity: str  # "error" | "warning"
     message: str
     affects: list[str]  # which of "powerflow"/"modal"/"emt" this issue affects
 
 
+class ServiceInfo(BaseModel):
+    """What open breakers leave in service (network.breakers.service_state)."""
+
+    slack_connected: bool
+    energized_buses: list[int]
+    lines: list[bool]
+    transformers: list[bool]
+    loads: list[bool]
+    der_units: dict[int, bool]
+
+
 class ValidateResponse(BaseModel):
     ok: bool  # true iff there are no "error"-severity issues (warnings don't block anything)
     issues: list[NetworkIssueRow]
+    service: ServiceInfo | None = None

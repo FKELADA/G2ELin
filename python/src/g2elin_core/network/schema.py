@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 
 class BusType(str, Enum):
@@ -69,6 +69,8 @@ class Line(BaseModel):
     b_pu: float = Field(ge=0, description="Total shunt susceptance (charging), per unit")
     length_km: float = Field(default=1.0, gt=0)
     name: str = ""
+    from_closed: bool = Field(default=True, description="Breaker at the from-bus end (open = line out of service)")
+    to_closed: bool = Field(default=True, description="Breaker at the to-bus end (open = line out of service)")
 
 
 class Transformer(BaseModel):
@@ -84,6 +86,8 @@ class Transformer(BaseModel):
     x_pu: float = Field(gt=0)
     sn_mva: float = Field(gt=0, description="Rating the r_pu/x_pu are referred to")
     name: str = ""
+    hv_closed: bool = Field(default=True, description="Breaker at the HV end (open = transformer out of service)")
+    lv_closed: bool = Field(default=True, description="Breaker at the LV end (open = transformer out of service)")
 
 
 class Load(BaseModel):
@@ -93,6 +97,7 @@ class Load(BaseModel):
     p_mw: float
     q_mvar: float
     name: str = ""
+    closed: bool = Field(default=True, description="Breaker between the load and its bus")
 
 
 class DerUnit(BaseModel):
@@ -121,6 +126,12 @@ class DerUnit(BaseModel):
     xd_pu: float | None = Field(
         default=None, description="Equivalent transient reactance, used for SCR calculations only"
     )
+    closed: bool = Field(default=True, description="Breaker between the unit and its bus")
+    params: dict[str, float] = Field(
+        default_factory=dict,
+        description="Overrides of this unit's electrical/control parameters (e.g. KpCL, H, Ka), by the "
+        "names sm_params()/gfm_params()/gfl_params() use; anything not listed keeps its default",
+    )
 
     @model_validator(mode="after")
     def _controller_only_for_gfm(self) -> "DerUnit":
@@ -135,11 +146,21 @@ class Network(BaseModel):
     name: str
     f_hz: float = 60.0
     sn_mva: float = 100.0
+    units_use_first_transformer: bool = Field(
+        default=False,
+        description="MATLAB-compatible mode: every unit's dynamic model uses the network's *first* "
+        "transformer impedance (script_generic.m's Y_TR(1,:) convention) instead of its own. Off by "
+        "default, so power flow and the dynamic models see the same transformer.",
+    )
     buses: list[Bus]
     lines: list[Line] = Field(default_factory=list)
     transformers: list[Transformer] = Field(default_factory=list)
     loads: list[Load] = Field(default_factory=list)
     der_units: list[DerUnit] = Field(default_factory=list)
+    # Set only on the reduced networks network.breakers.energized_network()
+    # builds: the element numbering/labels of the network they came from, so
+    # model names ("Ln_3", "SM_2", ...) don't shift when elements drop out.
+    _labels: object = PrivateAttr(default=None)
 
     @model_validator(mode="after")
     def _bus_refs_exist(self) -> "Network":

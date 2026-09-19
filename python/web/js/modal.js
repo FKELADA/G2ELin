@@ -9,6 +9,7 @@ const MODAL_VIEWS = {
   sensitivity: { title: "Sensitivity heatmap", desc: "Sensitivity of one eigenvalue to each entry of the state matrix (masked to structurally non-zero entries) — which couplings move the mode most." },
   shape: { title: "Mode shape", desc: "Relative phase of the most-participating states in one mode: who swings against whom." },
   free: { title: "Free-motion response", desc: "Closed-form (modal-expansion) response of the linearised model to an initial-condition offset in one state. Each channel is one perturbation; split the signals over as many subplots as you like." },
+  root: { title: "Root locus", desc: "Sweep any one network parameter across a range: at every value the power flow and the eigenvalues are recomputed, and each mode's path is drawn coloured by the parameter value. The table ranks the modes the parameter moves most." },
   step: { title: "Step response", desc: "Response of chosen outputs of the linearised model to a step in one input. Each channel is one input step; split its outputs over as many subplots as you like." },
 };
 
@@ -32,7 +33,10 @@ const ModalPage = {
         <p class="status-line" id="modal-status"></p></div></div>
       <div id="modal-body" class="stack" style="margin-top:1rem"></div>`;
     $("#modal-run").addEventListener("click", () => this.load(true));
-    on("network:loaded", () => { this.mode = null; });
+    on("network:loaded", () => {
+      this.mode = null;
+      if ($("#page-modal").classList.contains("active")) this.show(this.view);
+    });
   },
 
   show(view) {
@@ -91,6 +95,7 @@ const ModalPage = {
     const fn = {
       eigenmap: this.viewEigenmap, participation: this.viewParticipation, single: this.viewSingle,
       sensitivity: this.viewSensitivity, shape: this.viewShape, free: () => this.viewChannels("free"), step: () => this.viewChannels("step"),
+      root: () => RootLocus.render($("#modal-body")),
     }[this.view];
     fn.call(this);
   },

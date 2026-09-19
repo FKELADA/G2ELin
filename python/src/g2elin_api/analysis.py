@@ -10,6 +10,7 @@ neither caller re-implements request validation or error handling.
 from __future__ import annotations
 
 import json
+import math
 from collections import OrderedDict
 from dataclasses import asdict
 from typing import AsyncIterator, Callable
@@ -20,6 +21,7 @@ from fastapi import HTTPException, Request
 
 from g2elin_core.interconnect import AssembledSystem
 from g2elin_core.modal import ModalAnalysisResult, analyze, eigenvalue_sensitivity, free_response, mode_shape, step_response
+from g2elin_core.network.breakers import SlackDisconnected, energized_network, service_state
 from g2elin_core.network.schema import Network
 from g2elin_core.network.topology import compute_topology_layout
 from g2elin_core.network.validation import validate_network
@@ -27,6 +29,8 @@ from g2elin_core.pipeline import linearize_network
 from g2elin_core.powerflow import run_power_flow
 from g2elin_core.powerflow.pandapower_adapter import PowerFlowResult
 from g2elin_core.timedomain import NonlinearNetworkModel, build_nonlinear_network, find_state_index, simulate, simulate_steps
+from g2elin_core.timedomain.events import EventError, NetworkEvent, apply_event
+from g2elin_core.timedomain.measurements import MeasurementSet
 from g2elin_core.timeseries import Snapshot, apply_snapshot, run_time_series, scale_loads
 
 from .schemas import (
@@ -40,6 +44,7 @@ from .schemas import (
     FreeResponseRequest,
     FreeResponseResponse,
     LinearOverlay,
+    MeasurementInfo,
     ModalResponse,
     ModeRow,
     ModeShapeRequest,
@@ -50,6 +55,7 @@ from .schemas import (
     SensitivityEntryRow,
     SensitivityRequest,
     SensitivityResponse,
+    ServiceInfo,
     StatesResponse,
     StepResponseRequest,
     StepResponseResponse,
@@ -110,9 +116,16 @@ def _cached(kind: str, network: Network, build: Callable[[], object]) -> object:
     return value
 
 
+def _finite(rows: list[dict]) -> list[dict]:
+    """NaN (pandapower's value on de-energized buses/elements) -> None, which JSON can carry."""
+    return [
+        {k: (None if isinstance(v, float) and not math.isfinite(v) else v) for k, v in row.items()} for row in rows
+    ]
+
+
 def bus_rows(result: PowerFlowResult) -> list[BusRow]:
     table = result.bus_table()
-    return [BusRow(**row) for row in table.to_dict(orient="records")]
+    return [BusRow(**row) for row in _finite(table.to_dict(orient="records"))]
 
 
 def powerflow_tables(result: PowerFlowResult) -> dict:
@@ -121,12 +134,12 @@ def powerflow_tables(result: PowerFlowResult) -> dict:
     snapshot for the latter.
     """
     return dict(
-        lines=result.line_table().to_dict(orient="records"),
-        transformers=result.trafo_table().to_dict(orient="records"),
-        loads=result.load_table().to_dict(orient="records"),
-        generators=result.gen_table().to_dict(orient="records"),
-        static_generators=result.sgen_table().to_dict(orient="records"),
-        external_grid=result.ext_grid_table().to_dict(orient="records"),
+        lines=_finite(result.line_table().to_dict(orient="records")),
+        transformers=_finite(result.trafo_table().to_dict(orient="records")),
+        loads=_finite(result.load_table().to_dict(orient="records")),
+        generators=_finite(result.gen_table().to_dict(orient="records")),
+        static_generators=_finite(result.sgen_table().to_dict(orient="records")),
+        external_grid=_finite(result.ext_grid_table().to_dict(orient="records")),
     )
 
 
@@ -147,10 +160,25 @@ def validate_network_response(network: Network) -> ValidateResponse:
     time. Doesn't run power flow itself, so this is cheap.
     """
     issues = validate_network(network)
+    st = service_state(network)
     return ValidateResponse(
         ok=not any(i.severity == "error" for i in issues),
         issues=[NetworkIssueRow(severity=i.severity, message=i.message, affects=list(i.affects)) for i in issues],
+        service=ServiceInfo(
+            slack_connected=st.slack_connected, energized_buses=sorted(st.energized_buses),
+            lines=list(st.lines), transformers=list(st.transformers), loads=list(st.loads),
+            der_units=st.der_units,
+        ),
     )
+
+
+def energized_or_422(network: Network) -> Network:
+    """The network the dynamic models are built from: without whatever open
+    breakers switch out (network.breakers.energized_network)."""
+    try:
+        return energized_network(network)
+    except SlackDisconnected as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
 
 def runpp_kwargs(options: PowerFlowOptions | None) -> dict:
@@ -274,6 +302,7 @@ def build_modal_from_network(network: Network) -> tuple[AssembledSystem, ModalAn
 
 
 def _build_modal_uncached(network: Network) -> tuple[AssembledSystem, ModalAnalysisResult]:
+    network = energized_or_422(network)
     result = run_power_flow(network)
     if not result.converged:
         raise HTTPException(status_code=422, detail="power flow did not converge; can't run modal analysis")
@@ -394,6 +423,7 @@ def build_nonlinear_model_from_network(network: Network) -> NonlinearNetworkMode
 
 
 def _build_nonlinear_uncached(network: Network) -> NonlinearNetworkModel:
+    network = energized_or_422(network)
     result = run_power_flow(network)
     if not result.converged:
         raise HTTPException(status_code=422, detail="power flow did not converge; can't build a time-domain model")
@@ -422,41 +452,121 @@ def states_response(network: Network) -> StatesResponse:
     """
     model = build_nonlinear_model_from_network(network)
     return StatesResponse(
-        state_names=model.state_names, input_names=model.input_names, output_names=model.output_names
+        state_names=model.state_names, input_names=model.input_names, output_names=model.output_names,
+        measurements=[MeasurementInfo(**vars(m)) for m in measurement_set(network).catalog()],
     )
 
 
-def _resolve_emt_perturbation(
-    model: NonlinearNetworkModel, req: EmtRequest
-) -> tuple[np.ndarray, Callable[[float], np.ndarray] | None, str]:
-    """``(x0, u_exo_fn, perturbed_name)`` for either perturbation kind --
-    shared by :func:`emt_response` and :func:`emt_live_response` so the
-    two never resolve "state" vs. "input" differently.
-    """
+def measurement_set(network: Network) -> MeasurementSet:
+    """The measurement outputs of ``network``'s EMT model (memoized with it)."""
+    return _cached("measurements", network, lambda: MeasurementSet(build_nonlinear_model_from_network(network)))
+
+
+def _check_measurements(network: Network, names: list[str]) -> MeasurementSet | None:
+    if not names:
+        return None
+    ms = measurement_set(network)
+    unknown = set(names) - set(ms.names())
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"unknown measurement name(s): {sorted(unknown)}")
+    return ms
+
+
+class _EmtRun:
+    """A resolved EMT disturbance: what to integrate from t=0, and its
+    linear equivalent. ``model`` is the undisturbed (pre-event) model;
+    ``sim`` is the one integrated -- the same object, except for a network
+    event that changes the model (see timedomain.events)."""
+
+    def __init__(
+        self, model: NonlinearNetworkModel, sim: NonlinearNetworkModel, x0: np.ndarray,
+        u_exo_fn: Callable[[float], np.ndarray] | None, name: str,
+        dx0: np.ndarray | None, du: np.ndarray | None, linear_note: str | None = None,
+    ) -> None:
+        self.model, self.sim, self.x0, self.u_exo_fn, self.name = model, sim, x0, u_exo_fn, name
+        # Linear equivalent: an initial-state offset and/or an input step
+        # (both None when the event has none -- linear_note says why).
+        self.dx0, self.du, self.linear_note = dx0, du, linear_note
+
+    @property
+    def changes_model(self) -> bool:
+        return self.sim is not self.model
+
+
+def _resolve_emt_run(model: NonlinearNetworkModel, req: EmtRequest) -> _EmtRun:
+    """Shared by :func:`emt_response` and :func:`prepare_emt_live` so the two
+    never resolve a disturbance differently."""
     x0 = model.initial_state()
-    u_exo_fn = None
+    n_x, n_u = len(x0), len(model.input_names)
 
     if req.perturb_kind == "state":
         idx = find_state_or_422(model, req.perturb_name)
         x0 = x0.copy()
         x0[idx] += req.perturb_offset
-        perturbed_name = model.state_names[idx]
-    elif req.perturb_kind == "input":
+        dx0 = np.zeros(n_x)
+        dx0[idx] = req.perturb_offset
+        return _EmtRun(model, model, x0, None, model.state_names[idx], dx0, np.zeros(n_u))
+    if req.perturb_kind == "input":
         # A permanent step in one exogenous reference, held from t=0 for the
         # whole run (not just an initial-condition offset) -- the system
         # starts at its own equilibrium and that equilibrium itself moves,
-        # the more standard "P_ref step" kind of disturbance test. See
-        # timedomain/emt.py's simulate()'s own u_exo_fn parameter, built for
-        # exactly this and unused until now.
+        # the more standard "P_ref step" kind of disturbance test.
         idx = named_index_or_422(model.input_names, req.perturb_name, "input")
         perturbed_u_exo = model.default_u_exo()
         perturbed_u_exo[idx] += req.perturb_offset
-        u_exo_fn = lambda t: perturbed_u_exo  # noqa: E731 -- held constant at the stepped value for all t
-        perturbed_name = model.input_names[idx]
-    else:
-        raise HTTPException(status_code=422, detail="perturb_kind must be 'state' or 'input'")
+        du = np.zeros(n_u)
+        du[idx] = req.perturb_offset
+        return _EmtRun(
+            model, model, x0, lambda t: perturbed_u_exo, model.input_names[idx], np.zeros(n_x), du,
+        )
+    if req.perturb_kind == "event":
+        if req.event is None:
+            raise HTTPException(status_code=422, detail="perturb_kind 'event' needs an event")
+        try:
+            applied = apply_event(model, NetworkEvent(**req.event.model_dump()))
+        except EventError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        except RuntimeError as e:
+            raise HTTPException(status_code=422, detail=f"couldn't start from the post-event network ({e})") from e
+        if applied.dx0 is not None:
+            return _EmtRun(model, applied.model, applied.x0, None, applied.description, applied.dx0, np.zeros(n_u))
+        return _EmtRun(
+            model, applied.model, applied.x0, None, applied.description, None, None,
+            linear_note="no linear overlay for this event: it changes the network itself (topology or load), "
+            "which a model linearized around the pre-event point can't represent",
+        )
+    raise HTTPException(status_code=422, detail="perturb_kind must be 'state', 'input' or 'event'")
 
-    return x0, u_exo_fn, perturbed_name
+
+def _plot_state_names(model: NonlinearNetworkModel, req: EmtRequest) -> list[str]:
+    if req.plot_states:
+        unknown = set(req.plot_states) - set(model.state_names)
+        if unknown:
+            raise HTTPException(status_code=422, detail=f"unknown state name(s): {sorted(unknown)}")
+        return list(req.plot_states)
+    return [n for n in model.state_names if "dw_r" in n] or model.state_names
+
+
+def _check_names(names: list[str], known: list[str], what: str) -> list[str]:
+    unknown = set(names) - set(known)
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"unknown {what} name(s): {sorted(unknown)}")
+    return list(names)
+
+
+def _removed_fill(name: str) -> float | None:
+    """What a measurement of an element an event removed reads: no power
+    flows through it; anything else is undefined (a gap in the plot)."""
+    return 0.0 if name.startswith(("P_", "Q_")) else None
+
+
+def _post_measurements(run: _EmtRun, ms: MeasurementSet | None, names: list[str]) -> tuple[MeasurementSet | None, list[str]]:
+    """The measurement set to evaluate after t=0, and which of ``names`` it has."""
+    if ms is None or not names:
+        return None, []
+    post = MeasurementSet(run.sim) if run.changes_model else ms
+    known = set(post.names())
+    return post, [n for n in names if n in known]
 
 
 def _validate_emt_t_final_and_n_points(req: EmtRequest) -> int:
@@ -497,18 +607,27 @@ PreSamples = tuple[list[float], dict[str, list[float]], dict[str, list[float]], 
 
 
 def _pre_disturbance_samples(
-    model: NonlinearNetworkModel, t_pre: float, plot_states: list[str], plot_inputs: list[str], plot_outputs: list[str]
+    model: NonlinearNetworkModel, t_pre: float, plot_states: list[str], plot_inputs: list[str], plot_outputs: list[str],
+    n: int = 2,
 ) -> PreSamples:
-    """Two equilibrium samples, at ``t=-t_pre`` and ``t=0`` (the instant just
+    """Equilibrium samples from ``t=-t_pre`` to ``t=0`` (the instant just
     before the disturbance), for prepending to a trajectory: a plot then shows
-    the flat pre-disturbance x0 and a vertical jump/step at t=0.
+    the flat pre-disturbance x0 and a vertical jump/step at t=0. Two samples
+    are enough for constant signals; ``n`` more are used when measurements
+    need them (3-phase voltages keep oscillating before T0).
     """
     x_eq, inputs_eq, outputs_eq = _equilibrium_signals(model)
-    t = [-t_pre, 0.0]
-    states = {n: [float(x_eq[model.state_names.index(n)])] * 2 for n in plot_states}
-    inputs = {n: [inputs_eq[n]] * 2 for n in plot_inputs}
-    outputs = {n: [outputs_eq[n]] * 2 for n in plot_outputs}
+    t = np.linspace(-t_pre, 0.0, max(2, n)).tolist()
+    states = {name: [float(x_eq[model.state_names.index(name)])] * len(t) for name in plot_states}
+    inputs = {name: [inputs_eq[name]] * len(t) for name in plot_inputs}
+    outputs = {name: [outputs_eq[name]] * len(t) for name in plot_outputs}
     return t, states, inputs, outputs
+
+
+def _pre_points(t_pre: float, dt: float, measurements: list[str]) -> int:
+    """How many pre-disturbance samples: 2, or the trajectory's own spacing
+    when measurements are plotted."""
+    return max(2, int(round(t_pre / dt)) + 1) if measurements and dt > 0 else 2
 
 
 def _prepend(pre: PreSamples, t: list[float], series: dict, inputs: dict, outputs: dict) -> PreSamples:
@@ -522,7 +641,7 @@ def _prepend(pre: PreSamples, t: list[float], series: dict, inputs: dict, output
 
 
 def linear_overlay(
-    network: Network, model: NonlinearNetworkModel, req: EmtRequest, t: np.ndarray,
+    network: Network, run: _EmtRun, t: np.ndarray,
     plot_states: list[str], plot_inputs: list[str], plot_outputs: list[str],
 ) -> LinearOverlay:
     """The linearized model's response to the same disturbance the EMT run
@@ -537,6 +656,9 @@ def linear_overlay(
     the same interconnection code) -- checked, not assumed; outputs missing
     from the linear model are left out rather than guessed.
     """
+    if run.dx0 is None:
+        raise HTTPException(status_code=422, detail=run.linear_note or "no linear equivalent")
+    model = run.model
     system, _ = build_modal_from_network(network)
     x_eq, inputs_eq, outputs_eq = _equilibrium_signals(model)
     n_x, n_u = system.A.shape[0], system.B.shape[1]
@@ -546,12 +668,9 @@ def linear_overlay(
         )
 
     t = np.asarray(t, dtype=float)
-    dx0 = np.zeros(n_x)
-    du = np.zeros(n_u)
-    if req.perturb_kind == "state":
-        dx0[model.state_names.index(req.perturb_name)] = req.perturb_offset
-    else:
-        du[named_index_or_422(list(system.input_names), req.perturb_name, "input")] = req.perturb_offset
+    if list(system.input_names) != list(model.input_names):
+        raise HTTPException(status_code=501, detail="linearized and nonlinear models don't share their inputs")
+    dx0, du = run.dx0, run.du
 
     sys = scipy.signal.StateSpace(system.A, system.B, system.C, system.D)
     U = np.tile(du, (len(t), 1))
@@ -567,14 +686,27 @@ def linear_overlay(
     return LinearOverlay(t=t.tolist(), series=series, inputs=inputs, outputs=outputs)
 
 
+def _trajectories(
+    run: _EmtRun, t: np.ndarray, x: np.ndarray, names: list[str],
+) -> dict[str, list[float | None]]:
+    """State trajectories of ``run.sim`` by name; a state of an element the
+    event removed reads None (a gap) after t=0."""
+    idx = {n: i for i, n in enumerate(run.sim.state_names)}
+    return {n: x[idx[n], :].tolist() if n in idx else [None] * len(t) for n in names}
+
+
 def emt_response(network: Network, req: EmtRequest) -> EmtResponse:
     n_points = _validate_emt_t_final_and_n_points(req)
     model = build_nonlinear_model_from_network(network)
-    x0, u_exo_fn, perturbed_name = _resolve_emt_perturbation(model, req)
+    ms = _check_measurements(network, req.plot_measurements)
+    run = _resolve_emt_run(model, req)
+    plot_states = _plot_state_names(model, req)
+    plot_inputs = _check_names(req.plot_inputs, model.input_names, "input")
+    plot_outputs = _check_names(req.plot_outputs, model.output_names, "output")
 
     t_eval = np.linspace(0.0, req.t_final, n_points)
     try:
-        sim = simulate(model, (0.0, req.t_final), x0=x0, u_exo_fn=u_exo_fn, t_eval=t_eval, **EMT_SIMULATE_KWARGS)
+        sim = simulate(run.sim, (0.0, req.t_final), x0=run.x0, u_exo_fn=run.u_exo_fn, t_eval=t_eval, **EMT_SIMULATE_KWARGS)
     except RuntimeError as e:
         # The coupled Newton solve (see timedomain/emt.py) can fail to
         # converge for a large enough perturbation -- a trajectory that
@@ -584,54 +716,52 @@ def emt_response(network: Network, req: EmtRequest) -> EmtResponse:
             status_code=422,
             detail=f"nonlinear solver did not converge for this perturbation ({e}); try a smaller offset",
         ) from e
-
-    if req.plot_states:
-        unknown = set(req.plot_states) - set(model.state_names)
-        if unknown:
-            raise HTTPException(status_code=422, detail=f"unknown state name(s): {sorted(unknown)}")
-        plot_states = req.plot_states
-    else:
-        plot_states = [n for n in model.state_names if "dw_r" in n] or model.state_names
-    series = {n: sim.x[model.state_names.index(n), :].tolist() for n in plot_states}
+    series = _trajectories(run, sim.t, sim.x, plot_states)
 
     # Inputs/outputs are opt-in (empty list = skip) -- recovering them costs
     # about as much again as the integration itself (see
-    # recover_inputs_and_outputs's docstring), and inputs are held constant
-    # (or, for perturb_kind="input", stepped-then-constant) throughout a
-    # run, so there's no reason to pay for either by default.
-    inputs: dict[str, list[float]] = {}
-    outputs: dict[str, list[float]] = {}
-    if req.plot_inputs or req.plot_outputs:
-        # Reuse the *same* u_exo_fn the trajectory was actually integrated
-        # with -- otherwise a perturb_kind="input" run would recover the
-        # unperturbed exogenous inputs, silently contradicting the
-        # trajectory that was actually simulated.
-        all_inputs, all_outputs = model.recover_inputs_and_outputs(sim.t, sim.x, u_exo_fn=u_exo_fn)
-        if req.plot_inputs:
-            unknown = set(req.plot_inputs) - set(all_inputs)
-            if unknown:
-                raise HTTPException(status_code=422, detail=f"unknown input name(s): {sorted(unknown)}")
-            inputs = {n: all_inputs[n].tolist() for n in req.plot_inputs}
-        if req.plot_outputs:
-            unknown = set(req.plot_outputs) - set(all_outputs)
-            if unknown:
-                raise HTTPException(status_code=422, detail=f"unknown output name(s): {sorted(unknown)}")
-            outputs = {n: all_outputs[n].tolist() for n in req.plot_outputs}
+    # recover_inputs_and_outputs's docstring). They come from the same
+    # u_exo_fn the trajectory was integrated with, and measurements from
+    # the same per-sample algebraic solve.
+    inputs: dict[str, list] = {}
+    outputs: dict[str, list] = {}
+    measurements: dict[str, list] = {}
+    ms_post, meas_present = _post_measurements(run, ms, req.plot_measurements)
+    if plot_inputs or plot_outputs or ms is not None:
+        all_inputs, all_outputs, all_meas = run.sim.recover_signals(
+            sim.t, sim.x, u_exo_fn=run.u_exo_fn, measure=ms_post.evaluator(meas_present) if ms_post else None,
+        )
+        n = len(sim.t)
+        if ms is not None:
+            smoothed = ms_post.smooth(sim.t, all_meas) if meas_present else {}
+            measurements = {
+                m: smoothed[m].tolist() if m in smoothed else [_removed_fill(m)] * n for m in req.plot_measurements
+            }
+        inputs = {m: all_inputs[m].tolist() if m in all_inputs else [None] * n for m in plot_inputs}
+        outputs = {m: all_outputs[m].tolist() if m in all_outputs else [None] * n for m in plot_outputs}
 
     actual_dt = float(sim.t[1] - sim.t[0]) if len(sim.t) > 1 else req.t_final
-    linear = None
+    linear, linear_note = None, None
     if req.linear_overlay:
-        linear = linear_overlay(network, model, req, sim.t, list(series), list(inputs), list(outputs))
+        if run.dx0 is None:
+            linear_note = run.linear_note
+        else:
+            linear = linear_overlay(network, run, sim.t, list(series), list(inputs), list(outputs))
     t_out = sim.t.tolist()
     if req.t_pre > 0:
-        pre = _pre_disturbance_samples(model, req.t_pre, list(series), list(inputs), list(outputs))
+        n_pre = _pre_points(req.t_pre, actual_dt, req.plot_measurements)
+        pre = _pre_disturbance_samples(model, req.t_pre, list(series), list(inputs), list(outputs), n=n_pre)
+        if ms is not None:
+            pre_meas = ms.before_disturbance(req.plot_measurements, np.array(pre[0]))
+            measurements = {n: pre_meas[n].tolist() + v for n, v in measurements.items()}
         t_out, series, inputs, outputs = _prepend(pre, t_out, series, inputs, outputs)
         if linear is not None:
             lt, ls, li, lo = _prepend(pre, linear.t, linear.series, linear.inputs, linear.outputs)
             linear = LinearOverlay(t=lt, series=ls, inputs=li, outputs=lo)
     return EmtResponse(
-        perturbed=perturbed_name, perturb_kind=req.perturb_kind, dt=actual_dt,
-        state_names=list(series.keys()), t=t_out, series=series, inputs=inputs, outputs=outputs, linear=linear,
+        perturbed=run.name, perturb_kind=req.perturb_kind, dt=actual_dt,
+        state_names=list(series.keys()), t=t_out, series=series, inputs=inputs, outputs=outputs,
+        measurements=measurements, linear=linear, linear_note=linear_note,
     )
 
 
@@ -645,15 +775,15 @@ class _EmtLivePlan:
     """
 
     def __init__(
-        self, model: NonlinearNetworkModel, x0: np.ndarray, u_exo_fn: Callable[[float], np.ndarray] | None,
-        perturbed_name: str, plot_states: list[str], plot_inputs: list[str], plot_outputs: list[str],
-        max_step: float, t_final: float, network: Network | None = None, req: EmtRequest | None = None,
+        self, run: _EmtRun, plot_states: list[str], plot_inputs: list[str], plot_outputs: list[str],
+        max_step: float, t_final: float, network: Network, req: EmtRequest,
+        measurements: MeasurementSet | None = None,
     ) -> None:
-        self.model, self.x0, self.u_exo_fn = model, x0, u_exo_fn
-        self.perturbed_name = perturbed_name
+        self.run, self.model = run, run.model
         self.plot_states, self.plot_inputs, self.plot_outputs = plot_states, plot_inputs, plot_outputs
         self.max_step, self.t_final = max_step, t_final
         self.network, self.req = network, req
+        self.measurements = measurements
 
 
 def prepare_emt_live(network: Network, req: EmtRequest) -> _EmtLivePlan:
@@ -669,34 +799,14 @@ def prepare_emt_live(network: Network, req: EmtRequest) -> _EmtLivePlan:
     """
     _validate_emt_t_final_and_n_points(req)  # same bounds check; the resolved n_points isn't used here
     model = build_nonlinear_model_from_network(network)
-    x0, u_exo_fn, perturbed_name = _resolve_emt_perturbation(model, req)
-
-    if req.plot_states:
-        unknown = set(req.plot_states) - set(model.state_names)
-        if unknown:
-            raise HTTPException(status_code=422, detail=f"unknown state name(s): {sorted(unknown)}")
-        plot_states = req.plot_states
-    else:
-        plot_states = [n for n in model.state_names if "dw_r" in n] or model.state_names
-
-    plot_inputs: list[str] = []
-    if req.plot_inputs:
-        unknown = set(req.plot_inputs) - set(model.input_names)
-        if unknown:
-            raise HTTPException(status_code=422, detail=f"unknown input name(s): {sorted(unknown)}")
-        plot_inputs = req.plot_inputs
-
-    plot_outputs: list[str] = []
-    if req.plot_outputs:
-        unknown = set(req.plot_outputs) - set(model.output_names)
-        if unknown:
-            raise HTTPException(status_code=422, detail=f"unknown output name(s): {sorted(unknown)}")
-        plot_outputs = req.plot_outputs
-
+    ms = _check_measurements(network, req.plot_measurements)
+    run = _resolve_emt_run(model, req)
     max_step = req.dt if req.dt else req.t_final / EMT_DEFAULT_N_POINTS
     return _EmtLivePlan(
-        model, x0, u_exo_fn, perturbed_name, plot_states, plot_inputs, plot_outputs, max_step, req.t_final,
-        network=network, req=req,
+        run, _plot_state_names(model, req),
+        _check_names(req.plot_inputs, model.input_names, "input"),
+        _check_names(req.plot_outputs, model.output_names, "output"),
+        max_step, req.t_final, network=network, req=req, measurements=ms,
     )
 
 
@@ -711,29 +821,41 @@ async def emt_live_stream(plan: _EmtLivePlan, perturb_kind: str, request: Reques
     HTTP error status any more, so this is the best it can signal that
     over the wire.
     """
+    run = plan.run
     # Resolved once, not per step: state_names.index() is an O(n) scan and
-    # this loop can run thousands of times.
-    state_idx = [plan.model.state_names.index(n) for n in plan.plot_states]
+    # this loop can run thousands of times. A state the event removed is None.
+    sim_idx = {n: i for i, n in enumerate(run.sim.state_names)}
+    state_idx = [sim_idx.get(n) for n in plan.plot_states]
 
     # Pre-disturbance equilibrium samples (t_pre > 0), streamed first -- same
     # line shape as a solver step, so the client plots them like any other.
-    t_pre = plan.req.t_pre if plan.req is not None else 0.0
+    t_pre = plan.req.t_pre
+    meas_names = list(plan.req.plot_measurements) if plan.measurements is not None else []
     pre = None
     if t_pre > 0:
-        pre = _pre_disturbance_samples(plan.model, t_pre, plan.plot_states, plan.plot_inputs, plan.plot_outputs)
+        pre = _pre_disturbance_samples(
+            plan.model, t_pre, plan.plot_states, plan.plot_inputs, plan.plot_outputs,
+            n=_pre_points(t_pre, plan.max_step, meas_names),
+        )
         pre_t, pre_s, pre_i, pre_o = pre
+        pre_m = plan.measurements.before_disturbance(meas_names, np.array(pre_t)) if meas_names else {}
         for k, t_k in enumerate(pre_t):
             yield json.dumps({
                 "t": t_k,
                 "states": {n: v[k] for n, v in pre_s.items()},
                 "inputs": {n: v[k] for n, v in pre_i.items()},
                 "outputs": {n: v[k] for n, v in pre_o.items()},
+                "measurements": {n: float(v[k]) for n, v in pre_m.items()},
             }) + "\n"
+    ms_post, present = _post_measurements(run, plan.measurements, meas_names)
+    measure = ms_post.evaluator(present) if present else None
+    smooth = ms_post.smoother(present) if present else None
+    fill = {n: _removed_fill(n) for n in meas_names if n not in present}
 
     n_steps = 0
     try:
         for step in simulate_steps(
-            plan.model, (0.0, plan.t_final), x0=plan.x0, u_exo_fn=plan.u_exo_fn,
+            run.sim, (0.0, plan.t_final), x0=run.x0, u_exo_fn=run.u_exo_fn,
             max_step=plan.max_step, **EMT_SIMULATE_KWARGS,
         ):
             if await request.is_disconnected():
@@ -742,29 +864,34 @@ async def emt_live_stream(plan: _EmtLivePlan, perturb_kind: str, request: Reques
             if n_steps > EMT_MAX_N_POINTS:
                 yield json.dumps({"error": f"exceeded {EMT_MAX_N_POINTS} steps; raise dt to see fewer, coarser updates"}) + "\n"
                 return
+            meas = dict(fill)
+            if measure is not None:
+                meas.update(smooth(step.t, measure(step.x, step.z, step.u)))
             yield json.dumps({
                 "t": step.t,
-                "states": dict(zip(plan.plot_states, (float(step.x[i]) for i in state_idx))),
-                "inputs": {n: step.inputs[n] for n in plan.plot_inputs},
-                "outputs": {n: step.outputs[n] for n in plan.plot_outputs},
+                "states": {n: (float(step.x[i]) if i is not None else None) for n, i in zip(plan.plot_states, state_idx)},
+                "inputs": {n: step.inputs.get(n) for n in plan.plot_inputs},
+                "outputs": {n: step.outputs.get(n) for n in plan.plot_outputs},
+                "measurements": meas,
             }) + "\n"
     except RuntimeError as e:
         yield json.dumps({"error": f"nonlinear solver did not converge for this perturbation ({e}); try a smaller offset"}) + "\n"
         return
-    done: dict = {"done": True, "perturbed": plan.perturbed_name, "perturb_kind": perturb_kind, "n_steps": n_steps}
-    if plan.req is not None and plan.req.linear_overlay and plan.network is not None:
+    done: dict = {"done": True, "perturbed": run.name, "perturb_kind": perturb_kind, "n_steps": n_steps}
+    if plan.req.linear_overlay:
         # Computed once the nonlinear run has finished, on an even grid over
         # the same span (the solver's own adaptive step times are too
         # irregular to be worth reproducing for a linear overlay).
-        try:
-            grid = np.linspace(0.0, plan.t_final, EMT_DEFAULT_N_POINTS)
-            lin = linear_overlay(
-                plan.network, plan.model, plan.req, grid, plan.plot_states, plan.plot_inputs, plan.plot_outputs
-            )
-            if pre is not None:
-                lt, ls, li, lo = _prepend(pre, lin.t, lin.series, lin.inputs, lin.outputs)
-                lin = LinearOverlay(t=lt, series=ls, inputs=li, outputs=lo)
-            done["linear"] = lin.model_dump()
-        except HTTPException as e:
-            done["linear_error"] = str(e.detail)
+        if run.dx0 is None:
+            done["linear_error"] = run.linear_note
+        else:
+            try:
+                grid = np.linspace(0.0, plan.t_final, EMT_DEFAULT_N_POINTS)
+                lin = linear_overlay(plan.network, run, grid, plan.plot_states, plan.plot_inputs, plan.plot_outputs)
+                if pre is not None:
+                    lt, ls, li, lo = _prepend(pre, lin.t, lin.series, lin.inputs, lin.outputs)
+                    lin = LinearOverlay(t=lt, series=ls, inputs=li, outputs=lo)
+                done["linear"] = lin.model_dump()
+            except HTTPException as e:
+                done["linear_error"] = str(e.detail)
     yield json.dumps(done) + "\n"

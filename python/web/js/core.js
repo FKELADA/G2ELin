@@ -80,6 +80,65 @@ function networkChanged() {
   refreshDerivedNetworkInfo(false);
 }
 
+// Which elements open breakers leave in service -- the same rules as the
+// server's network.breakers.service_state: a line/transformer with either
+// breaker open, a load/unit with its breaker open, and anything cut off from
+// the slack's bus are out of service.
+function serviceState(net) {
+  const out = { slackConnected: true, energized: new Set(), lines: [], transformers: [], loads: [], units: {} };
+  if (!net) return out;
+  const slack = net.der_units.find(d => d.bus_type === "slack");
+  const adj = new Map(net.buses.map(b => [b.id, []]));
+  const link = (a, b) => { adj.get(a)?.push(b); adj.get(b)?.push(a); };
+  net.lines.forEach(l => { if (l.from_closed !== false && l.to_closed !== false) link(l.from_bus, l.to_bus); });
+  net.transformers.forEach(t => { if (t.hv_closed !== false && t.lv_closed !== false) link(t.hv_bus, t.lv_bus); });
+  out.slackConnected = !slack || slack.closed !== false;
+  if (slack && out.slackConnected && adj.has(slack.bus)) {
+    const queue = [slack.bus];
+    out.energized.add(slack.bus);
+    while (queue.length) for (const n of adj.get(queue.shift()) || []) if (!out.energized.has(n)) { out.energized.add(n); queue.push(n); }
+  } else if (!slack) net.buses.forEach(b => out.energized.add(b.id));  // no slack yet: nothing to grey out
+  const on = b => out.energized.has(b);
+  out.lines = net.lines.map(l => l.from_closed !== false && l.to_closed !== false && on(l.from_bus));
+  out.transformers = net.transformers.map(t => t.hv_closed !== false && t.lv_closed !== false && on(t.hv_bus));
+  out.loads = net.loads.map(l => l.closed !== false && on(l.bus));
+  net.der_units.forEach(d => { out.units[d.id] = d.closed !== false && on(d.bus); });
+  return out;
+}
+
+// Breakers: {kind: "line"|"transformer", index, end: "from"|"to"|"hv"|"lv"} |
+// {kind: "load", index} | {kind: "unit", id}. Field holding its state:
+function breakerField(br) {
+  return br.kind === "load" || br.kind === "unit" ? "closed" : `${br.end}_closed`;
+}
+function breakerTarget(net, br) {
+  if (br.kind === "line") return net.lines[br.index];
+  if (br.kind === "transformer") return net.transformers[br.index];
+  if (br.kind === "load") return net.loads[br.index];
+  return net.der_units.find(d => d.id === br.id);
+}
+function breakerLabel(net, br) {
+  const o = breakerTarget(net, br);
+  if (!o) return "";
+  if (br.kind === "line") return `Line #${br.index} (${o.from_bus} → ${o.to_bus}), ${br.end === "from" ? `from-bus end (bus ${o.from_bus})` : `to-bus end (bus ${o.to_bus})`}`;
+  if (br.kind === "transformer") return `Transformer #${br.index} (${o.hv_bus} → ${o.lv_bus}), ${br.end === "hv" ? `HV end (bus ${o.hv_bus})` : `LV end (bus ${o.lv_bus})`}`;
+  if (br.kind === "load") return `Load #${br.index} at bus ${o.bus}`;
+  return `${UNIT_NAME[o.unit_type] || "Unit"} ${o.id} at bus ${o.bus}`;
+}
+// Toggles a breaker (refusing to open the slack's); returns false if refused.
+function toggleBreaker(br) {
+  const net = state.network, o = breakerTarget(net, br);
+  if (!o) return false;
+  const f = breakerField(br), closed = o[f] !== false;
+  if (closed && br.kind === "unit" && o.bus_type === "slack") {
+    alert("The slack unit's breaker can't be opened: it is the reference of the power flow and of the dynamic models. Make another unit the slack first.");
+    return false;
+  }
+  o[f] = !closed;
+  networkChanged();
+  return true;
+}
+
 function isModified() {
   return state.presetBaseline !== null && JSON.stringify(state.network) !== state.presetBaseline;
 }
@@ -211,12 +270,13 @@ function ttTable(rows) {
 // names -- replaces native <select multiple>, which is unusable for the
 // 50-200 state/output names these models have.
 class SignalPicker {
-  constructor(host, { options = [], selected = [], placeholder = "add signal", colors = false, onChange = null } = {}) {
+  constructor(host, { options = [], selected = [], placeholder = "add signal", colors = false, onChange = null, display = null } = {}) {
     this.host = host;
     this.options = options;      // [{name, group?}] or [name]
     this.selected = [...selected];
     this.placeholder = placeholder;
     this.colors = colors;
+    this.display = display || (n => n);  // how a selected name reads on its chip
     this.onChange = onChange;
     this.render();
   }
@@ -234,7 +294,7 @@ class SignalPicker {
     this.host.innerHTML = "";
     const box = el(`<div class="picker"></div>`);
     this.selected.forEach((n, i) => {
-      const chip = el(`<span class="pchip">${this.colors ? `<span class="sw" style="background:${seriesColor(i)}"></span>` : ""}${esc(n)}<button type="button" aria-label="Remove ${esc(n)}">&times;</button></span>`);
+      const chip = el(`<span class="pchip">${this.colors ? `<span class="sw" style="background:${seriesColor(i)}"></span>` : ""}${esc(this.display(n))}<button type="button" aria-label="Remove ${esc(n)}">&times;</button></span>`);
       chip.querySelector("button").addEventListener("click", ev => {
         ev.stopPropagation();
         this.selected = this.selected.filter(x => x !== n);
@@ -258,14 +318,14 @@ class SignalPicker {
     const input = pop.querySelector("input");
     const shown = () => {
       const q = input.value.trim().toLowerCase();
-      return this.options.map(o => typeof o === "string" ? { name: o } : o).filter(o => !q || o.name.toLowerCase().includes(q));
+      return this.options.map(o => typeof o === "string" ? { name: o } : o).filter(o => !q || o.name.toLowerCase().includes(q) || (o.label || "").toLowerCase().includes(q) || (o.group || "").toLowerCase().includes(q));
     };
     const draw = () => {
       let lastGroup = null, html = "";
       const items = shown();
       items.slice(0, 400).forEach(o => {
         if (o.group && o.group !== lastGroup) { html += `<div class="pgroup">${esc(o.group)}</div>`; lastGroup = o.group; }
-        html += `<label class="popt"><input type="checkbox" value="${esc(o.name)}"${this.selected.includes(o.name) ? " checked" : ""}>${esc(o.name)}</label>`;
+        html += `<label class="popt"><input type="checkbox" value="${esc(o.name)}"${this.selected.includes(o.name) ? " checked" : ""}>${o.label ? `<span>${esc(o.label)} <span class="muted">${esc(this.display(o.name))}</span></span>` : esc(this.display(o.name))}</label>`;
       });
       if (items.length > 400) html += `<div class="pgroup">${items.length - 400} more — refine the filter</div>`;
       if (!items.length) html = `<p class="empty">No match.</p>`;
@@ -314,9 +374,13 @@ function networkContextHtml() {
     return `<div class="notice warn-bg"><span>No network loaded yet — <a href="#/network">choose a preset or build one</a> on the Network page.</span></div>`;
   }
   const n = state.network;
+  const sv = serviceState(n);
+  const out = sv.lines.filter(x => !x).length + sv.transformers.filter(x => !x).length + sv.loads.filter(x => !x).length
+    + Object.values(sv.units).filter(x => !x).length;
   return `<div class="card" style="padding:0.7rem 1rem"><div class="controls" style="align-items:center">
     <span class="field-label">Network</span><b style="font-size:0.9rem">${esc(state.networkLabel)}</b>
     ${isModified() ? '<span class="badge warn">modified</span>' : ""}
+    ${out ? `<span class="badge crit" title="Open breakers: these elements (and anything they cut off from the slack) are left out of every analysis">${out} element${out > 1 ? "s" : ""} out of service</span>` : ""}
     <span class="muted" style="font-size:0.8rem;font-family:var(--font-mono)">${n.buses.length} buses · ${n.lines.length} lines · ${n.transformers.length} trafos · ${n.loads.length} loads · ${n.der_units.length} DER</span>
     <span style="flex:1"></span><a href="#/network" style="font-size:0.8rem">Change / edit →</a></div></div>`;
 }

@@ -14,13 +14,14 @@ connects to which) doesn't care whether a block is linear or not.
 
 from __future__ import annotations
 
+from g2elin_core.network.breakers import TYPE_LABEL, block_labels
 from g2elin_core.network.schema import Network
 
 from .assemble import AssembledSystem, Block, PortSpec, Wiring, assemble
 
 _KIND_BY_UNIT_TYPE = {"sm": "sm", "gfm": "gfm", "gfl": "gfl"}
 _SLACK_KIND_BY_UNIT_TYPE = {"sm": "sm_slack", "infinite_bus": "ib_slack"}
-_TYPE_LABEL = {"sm": "SM", "gfm": "GFM", "gfl": "GFL", "infinite_bus": "IB"}
+_TYPE_LABEL = TYPE_LABEL
 
 
 def build_blocks_and_wiring(
@@ -49,25 +50,24 @@ def build_blocks_and_wiring(
     # "GFM_2", "GFL_1" -- not the DER's raw (type-agnostic) id, so a name
     # says what kind of unit it is without having to cross-reference the
     # network definition. Counted in `network.der_units` declaration order,
-    # which every preset already lists in ascending id order.
+    # which every preset already lists in ascending id order. Line/load
+    # numbers likewise come from network.breakers.block_labels(), so a
+    # network with elements switched out keeps the full network's names.
+    labels = block_labels(network)
     der_blocks: dict[int, Block] = {}
-    type_counters: dict[str, int] = {}
     for der in network.der_units:
         kind = slack_kind if der.id == slack_der.id else _KIND_BY_UNIT_TYPE[der.unit_type.value]
-        label = _TYPE_LABEL[der.unit_type.value]
-        type_counters[label] = type_counters.get(label, 0) + 1
-        block_name = f"{label}_{type_counters[label]}"
-        der_blocks[der.id] = Block(name=block_name, kind=kind, comp=der_components[der.id])
+        der_blocks[der.id] = Block(name=labels.der[der.id], kind=kind, comp=der_components[der.id])
 
     node_blocks: dict[int, Block] = {
         bus_id: Block(name=f"Nd_{bus_id}", kind="node", comp=comp)
         for bus_id, comp in node_components.items()
     }
     line_blocks = [
-        Block(name=f"Ln_{i + 1}", kind="line", comp=comp) for i, comp in enumerate(line_components)
+        Block(name=f"Ln_{labels.line[i] + 1}", kind="line", comp=comp) for i, comp in enumerate(line_components)
     ]
     load_blocks = [
-        Block(name=f"Ld_{i + 1}", kind="load", comp=comp) for i, comp in enumerate(load_components)
+        Block(name=f"Ld_{labels.load[i] + 1}", kind="load", comp=comp) for i, comp in enumerate(load_components)
     ]
 
     # Order matches script_generic.m's concatenation order: slack, other DGs,

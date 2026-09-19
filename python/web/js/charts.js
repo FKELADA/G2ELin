@@ -132,12 +132,13 @@ function lineChart(series, opts = {}) {
   // Downsample very long series for drawing (hover still reads full data).
   live.forEach(s => {
     const n = s.t.length, stride = Math.max(1, Math.floor(n / 2500));
-    let d = "";
+    let d = "", gap = true;  // a missing value (null/NaN) breaks the line
     for (let j = 0; j < n; j += stride) {
-      if (!Number.isFinite(s.y[j])) continue;
-      d += `${d ? "L" : "M"}${sx(s.t[j]).toFixed(1)},${sy(s.y[j]).toFixed(1)}`;
+      if (!Number.isFinite(s.y[j])) { gap = true; continue; }
+      d += `${gap ? "M" : "L"}${sx(s.t[j]).toFixed(1)},${sy(s.y[j]).toFixed(1)}`;
+      gap = false;
     }
-    if (stride > 1 && n) d += `L${sx(s.t[n - 1]).toFixed(1)},${sy(s.y[n - 1]).toFixed(1)}`;
+    if (stride > 1 && n && Number.isFinite(s.y[n - 1]) && !gap) d += `L${sx(s.t[n - 1]).toFixed(1)},${sy(s.y[n - 1]).toFixed(1)}`;
     svg.appendChild(svgEl("path", {
       d, fill: "none", stroke: s.color, "stroke-width": s.width || (s.dash ? 2.2 : 1.8), "stroke-linejoin": "round",
       "stroke-linecap": "round", ...(s.dash ? { "stroke-dasharray": "1.5 4" } : {}),

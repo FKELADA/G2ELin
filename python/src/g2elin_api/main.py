@@ -40,6 +40,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from g2elin_core.network.schema import Network
+from g2elin_core.operating_point import gfl_params, gfm_params, sm_params
 
 from . import analysis
 from .network_routes import router as network_router
@@ -64,6 +65,8 @@ from .schemas import (
     StepResponseResponse,
     TimeSeriesResponse,
     TopologyResponse,
+    UnitDefaultsRequest,
+    UnitDefaultsResponse,
 )
 
 logger = logging.getLogger("g2elin_api")
@@ -153,6 +156,27 @@ def get_topology(preset_id: str) -> TopologyResponse:
 def list_powerflow_algorithms() -> dict[str, str]:
     """Solver ids accepted by ``PowerFlowOptions.algorithm`` -> display label."""
     return analysis.POWERFLOW_ALGORITHMS
+
+
+@app.post("/api/units/defaults", response_model=UnitDefaultsResponse)
+def unit_defaults(req: UnitDefaultsRequest) -> UnitDefaultsResponse:
+    """A unit type's default electrical/control parameters for given base
+    values -- no network needed, so the editor can show and edit a unit's
+    parameters before it's connected (or while the network is incomplete)."""
+    if not (req.sn_mva > 0 and req.f_hz > 0 and req.un_kv > 0):
+        raise HTTPException(status_code=422, detail="sn_mva, f_hz and un_kv must be positive")
+    base = dict(sn_mva=req.sn_mva, f_hz=req.f_hz, rt_pu=req.rt_pu, lt_pu=req.lt_pu)
+    if req.unit_type == "sm":
+        params = sm_params(**base)
+    elif req.unit_type == "gfm":
+        params = gfm_params(**base, un_kv=req.un_kv)
+    elif req.unit_type == "gfl":
+        params = gfl_params(**base, un_kv=req.un_kv)
+    elif req.unit_type == "infinite_bus":
+        params = {}
+    else:
+        raise HTTPException(status_code=422, detail=f"unknown unit type {req.unit_type!r}")
+    return UnitDefaultsResponse(params=params)
 
 
 @app.post("/api/presets/{preset_id}/powerflow", response_model=PowerFlowResponse)

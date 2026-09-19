@@ -14,13 +14,17 @@ from dataclasses import dataclass
 from typing import Callable
 
 from g2elin_core.network.presets import (
+    cigre_interconnected_1sm_1gfm_1gfl,
     cigre_islanded_1sm_1gfm_1gfl,
     cigre_islanded_1sm_2gfm_1gfl,
     cigre_islanded_1sm_3gfm_1gfl,
     cigre_islanded_2sm_2gfm_2gfl,
     gfl_smib,
+    gfl_smsm,
     gfm_smib,
+    gfm_smsm,
     sm_smib,
+    sm_smsm,
     wscc9_1gfm_2gfl,
     wscc9_1sm_1gfm_1gfl,
     wscc9_1sm_2gfl,
@@ -87,6 +91,11 @@ _PRESET_SPECS: list[tuple[str, str, str, Callable[[], Network]]] = [
      "CIGRE MV benchmark feeder, islanded, 2 SM + 2 GFM + 2 GFL. "
      "CIGRE_raw.m + CIGRE_Islanded.m case 'CIGRE_Islanded_2SM_2GFM_2GFL'.",
      cigre_islanded_2sm_2gfm_2gfl),
+    ("cigre_interconnected_1sm_1gfm_1gfl", "CIGRE interconnected (1 SM + 1 GFM + 1 GFL)",
+     "CIGRE MV benchmark feeder connected to the upstream grid (an infinite bus behind a transformer "
+     "at node 1, identical to the unit transformers), 1 SM + 1 GFM + 1 GFL. Topology/loads from CIGRE_raw.m (S0=1); "
+     "grid attachment reconstructed -- preset_networks.m names the case but never defines it.",
+     cigre_interconnected_1sm_1gfm_1gfl),
     ("sm_smib", "SMIB (SM)",
      "Single synchronous machine against an infinite bus. Topology/line/load from "
      "SMIB_raw.m; DER attachment reconstructed (the driving MATLAB script was never "
@@ -98,6 +107,17 @@ _PRESET_SPECS: list[tuple[str, str, str, Callable[[], Network]]] = [
     ("gfl_smib", "SMIB (GFL)",
      "Single grid-following converter against an infinite bus. See sm_smib for provenance.",
      gfl_smib),
+    ("sm_smsm", "SMSM (SM vs SM)",
+     "Single synchronous machine against a synchronous machine acting as the grid (slack), on the "
+     "SMIB line and load. Reconstruction, like the SMIB presets.",
+     sm_smsm),
+    ("gfm_smsm", "SMSM (GFM vs SM)",
+     "Single grid-forming converter (Droop) against a synchronous machine acting as the grid. See sm_smsm.",
+     gfm_smsm),
+    ("gfl_smsm", "SMSM (GFL vs SM)",
+     "Single grid-following converter against a synchronous machine acting as the grid. The GFL absorbs "
+     "0.9 MVAr of the line charging -- at Q = 0 the under-excited grid machine is unstable (see gfl_smsm).",
+     gfl_smsm),
 ]
 
 PRESETS: dict[str, PresetInfo] = {

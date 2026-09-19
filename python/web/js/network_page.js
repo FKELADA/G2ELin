@@ -7,6 +7,8 @@ const FIELD_DEFS = {
     { key: "name", label: "Network name", type: "text", full: true },
     { key: "f_hz", label: "Frequency", unit: "Hz", type: "number" },
     { key: "sn_mva", label: "Base power", unit: "MVA", type: "number", help: "All per-unit values are on this base." },
+    { key: "units_use_first_transformer", label: "MATLAB-compatible transformers", type: "bool", full: true,
+      help: "Off (default): each unit's dynamic model uses its own transformer — the one the power flow uses. On: every unit uses the network's first transformer, as the MATLAB tool does (to reproduce its results)." },
   ],
   bus: [
     { key: "id", label: "Bus id", type: "readonly" },
@@ -19,21 +21,26 @@ const FIELD_DEFS = {
     { key: "r_pu", label: "Resistance R", unit: "pu", type: "number" },
     { key: "x_pu", label: "Reactance X", unit: "pu", type: "number" },
     { key: "b_pu", label: "Shunt susceptance B", unit: "pu", type: "number", help: "Total line charging." },
-    { key: "length_km", label: "Length", unit: "km", type: "number" },
+    { key: "length_km", label: "Length", unit: "km", type: "number", help: "R, X and B are the whole line's; changing the length rescales them at constant Ω/km. It has no other effect on the results." },
     { key: "name", label: "Name", type: "text", full: true },
+    { key: "from_closed", label: "Breaker at from-bus closed", type: "bool", breaker: true },
+    { key: "to_closed", label: "Breaker at to-bus closed", type: "bool", breaker: true, help: "Either breaker open takes the line out of service." },
   ],
   transformer: [
     { key: "hv_bus", label: "HV bus", type: "bus" },
     { key: "lv_bus", label: "LV bus", type: "bus", help: "A unit's own terminal bus must be the LV side." },
-    { key: "r_pu", label: "Resistance R", unit: "pu", type: "number" },
-    { key: "x_pu", label: "Reactance X", unit: "pu", type: "number" },
+    { key: "r_pu", label: "Resistance R", unit: "pu", type: "number", help: "Per unit of the transformer's rating. Also the Rt of the unit on its LV side (modal analysis & EMT)." },
+    { key: "x_pu", label: "Reactance X", unit: "pu", type: "number", help: "Also the Lt of the unit on its LV side (modal analysis & EMT)." },
     { key: "sn_mva", label: "Rating", unit: "MVA", type: "number" },
     { key: "name", label: "Name", type: "text" },
+    { key: "hv_closed", label: "Breaker at HV side closed", type: "bool", breaker: true },
+    { key: "lv_closed", label: "Breaker at LV side closed", type: "bool", breaker: true, help: "Either breaker open takes the transformer out of service — for a unit's transformer, the unit too." },
   ],
   load: [
     { key: "p_mw", label: "Active power P", unit: "MW", type: "number" },
     { key: "q_mvar", label: "Reactive power Q", unit: "MVAr", type: "number" },
     { key: "name", label: "Name", type: "text", full: true },
+    { key: "closed", label: "Breaker closed", type: "bool", breaker: true, full: true, help: "Open = the load is disconnected from its bus." },
   ],
   der: [
     { key: "id", label: "Unit id", type: "readonly" },
@@ -46,6 +53,7 @@ const FIELD_DEFS = {
     { key: "q_cons_mvar", label: "Auxiliary load Q", unit: "MVAr", type: "number" },
     { key: "controller", label: "GFM outer control", type: "select", options: ["", "droop", "droop_filtered", "dvoc", "vsm", "matching"], gfmOnly: true },
     { key: "xd_pu", label: "Transient reactance Xd", unit: "pu", type: "number", nullable: true, help: "Used for SCR calculations only." },
+    { key: "closed", label: "Unit breaker closed", type: "bool", breaker: true, full: true, help: "Open = the unit is disconnected (with its transformer). The slack unit's breaker can't be opened." },
   ],
 };
 
@@ -57,6 +65,8 @@ const TABLE_KINDS = {
   loads: { label: "Loads", defs: [{ key: "bus", label: "Bus", type: "bus" }, ...FIELD_DEFS.load] },
   der_units: { label: "DER units", defs: [FIELD_DEFS.der[0], { key: "bus", label: "Bus", type: "bus" }, ...FIELD_DEFS.der.slice(1)] },
 };
+
+const TARGET_KIND = { net: "network", bus: "bus", der: "der", load: "load", line: "line", transformer: "transformer" };
 
 const NetworkPage = {
   view: null,
@@ -116,6 +126,12 @@ const NetworkPage = {
       tooltip: elementTooltip,
       onSelect: sel => this.openInspector(sel),
       onWire: (mode, a, b) => this.commitWire(mode, a, b),
+      onBreaker: br => {
+        if (!toggleBreaker(br)) return;
+        this.view.render();
+        if (this.selected) this.openInspector(this.selected);
+        if ($("#net-tables").open) this.renderTables();
+      },
     });
     $$("#page-network [data-mode]").forEach(btn => btn.addEventListener("click", () => this.setMode(btn.dataset.mode)));
     this.setMode("select");
@@ -141,6 +157,7 @@ const NetworkPage = {
     on("network:layout", () => { this.view.render(); this.view.fit(); });
     on("network:changed", () => { this.renderSummary(); this.scheduleValidation(); });
     on("network:derived", () => this.refreshControlParams());
+    on("network:changed", () => this.refreshControlParams());
     this.refreshAll();
   },
 
@@ -188,7 +205,7 @@ const NetworkPage = {
         <div class="stat"><span class="n">${n.loads.length}</span><span class="l">Loads</span></div>
         <div class="stat"><span class="n">${n.der_units.length}</span><span class="l">Units (${esc(types)})</span></div>
         <div class="stat"><span class="n">${fmt(n.f_hz, 0)} Hz</span><span class="l">Frequency</span></div>
-        <div class="stat"><span class="n">${fmt(n.sn_mva, 0)} MVA</span><span class="l">Base power</span></div>
+        <div class="stat"><span class="n">${fmtSmart(n.sn_mva)} MVA</span><span class="l">Base power</span></div>
       </div>${p ? `<p class="muted" style="margin:0.7rem 0 0;font-size:0.85rem;max-width:90ch">${esc(p.description)}</p>` : ""}`;
     updateSidebarNetwork();
   },
@@ -197,7 +214,7 @@ const NetworkPage = {
     this.view.setMode(mode);
     $$("#page-network [data-mode]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
     $("#net-mode-hint").textContent = mode === "select"
-      ? "Click an element to edit it · drag a bus to move it · drag the background to pan · scroll to zoom."
+      ? "Click an element to edit it · click a breaker (■) to open/close it · drag a bus to move it · drag the background to pan · scroll to zoom."
       : `Drag from one bus to another to add a ${mode === "wire-line" ? "line" : "transformer"}.`;
   },
 
@@ -350,12 +367,24 @@ const NetworkPage = {
       const cls = `field${f.full ? " full" : ""}`;
       const data = `data-target="${target}" data-field="${f.key}"`;
       if (f.type === "readonly") return `<div class="${cls}">${lab}<input id="${id}" type="text" value="${esc(v)}" disabled></div>`;
+      if (f.type === "bool") {
+        const on = f.breaker ? v !== false : !!v;
+        return `<div class="${cls}${f.breaker ? " brk-field" : ""}"><label class="check" style="font-size:0.84rem"><input id="${id}" type="checkbox" ${data} data-type="bool"${on ? " checked" : ""}> ${esc(f.label)}${f.breaker && !on ? ' <span class="badge crit">open</span>' : ""}</label>${help}</div>`;
+      }
       if (f.type === "bus") return `<div class="${cls}">${lab}<select id="${id}" ${data} data-type="int">${busOpts(v)}</select>${help}</div>`;
       if (f.type === "select") {
         const disabled = f.gfmOnly && obj.unit_type !== "gfm" ? " disabled" : "";
         return `<div class="${cls}">${lab}<select id="${id}" ${data}${disabled}>${f.options.map(o => `<option value="${o}"${o === (v ?? "") ? " selected" : ""}>${o === "" ? "(none)" : o}</option>`).join("")}</select>${help}</div>`;
       }
       const type = f.type === "number" ? "number" : "text";
+      const si = f.type === "number" ? siSpecs(defsKey, obj, f.key) : [];
+      if (si.length) {
+        // Per unit (stored) next to its SI equivalent(s); editing one updates the other.
+        return `<div class="field full dual">${lab}<div class="dual-row">
+          <span class="dual-in"><input id="${id}" type="number" step="any" ${data}${f.nullable ? ' data-nullable="1"' : ""} value="${esc(v ?? "")}"${f.nullable ? ' placeholder="(none)"' : ""}><span class="u">pu</span></span>
+          ${si.map((sp, i) => `<span class="dual-in" title="${esc(sp.title)}"><input type="number" step="any" data-si-target="${target}" data-si-field="${f.key}" data-si-i="${i}" value="${v == null ? "" : siFmt(v * sp.factor)}"><span class="u">${esc(sp.unit)}</span></span>`).join("")}
+        </div>${help}</div>`;
+      }
       return `<div class="${cls}">${lab}<input id="${id}" type="${type}"${type === "number" ? ' step="any"' : ""} ${data}${f.nullable ? ' data-nullable="1"' : ""} value="${esc(v ?? "")}"${f.nullable ? ' placeholder="(none)"' : ""}>${help}</div>`;
     }).join("")}</div>`;
   },
@@ -376,13 +405,24 @@ const NetworkPage = {
   // needs re-rendering (fields that change what else is editable).
   applyField(obj, field, input) {
     let v = input.value;
-    if (input.dataset.type === "int") v = parseInt(v, 10);
+    if (input.dataset.type === "bool") v = input.checked;
+    if (field === "closed" && v === false && obj.bus_type === "slack") {
+      alert("The slack unit's breaker can't be opened: it is the reference of the power flow and of the dynamic models. Make another unit the slack first.");
+      input.checked = true;
+      return false;
+    }
+    else if (input.dataset.type === "int") v = parseInt(v, 10);
     else if (input.type === "number") {
       if (v === "") { if (!input.dataset.nullable) return false; v = null; }
       else { v = parseFloat(v); if (!Number.isFinite(v)) return false; }
     } else if (input.tagName === "SELECT" && v === "") v = null;
+    if (field === "length_km" && "r_pu" in obj) {
+      if (!(v > 0)) return false;
+      const k = v / obj.length_km;
+      if (Number.isFinite(k) && k > 0) { obj.r_pu *= k; obj.x_pu *= k; obj.b_pu *= k; }
+    }
     obj[field] = v;
-    let rerender = input.tagName === "SELECT";
+    let rerender = input.tagName === "SELECT" || field.endsWith("closed");
     if (field === "unit_type") {
       if (v === "gfm" && !obj.controller) obj.controller = "droop";
       if (v !== "gfm") obj.controller = null;
@@ -393,9 +433,35 @@ const NetworkPage = {
     return rerender;
   },
 
+  // Refresh pu inputs (e.g. impedances rescaled by a length change) and the
+  // SI values next to them, except the input being typed in.
+  syncInputs(box) {
+    box.querySelectorAll("input[data-target][data-field]").forEach(inp => {
+      if (inp === document.activeElement || inp.type !== "number") return;
+      const obj = this.targetObj(inp.dataset.target), v = obj?.[inp.dataset.field];
+      if (typeof v === "number" && parseFloat(inp.value) !== v) inp.value = +v.toPrecision(10);
+    });
+    box.querySelectorAll("input[data-si-target]").forEach(inp => {
+      if (inp === document.activeElement) return;
+      const obj = this.targetObj(inp.dataset.siTarget);
+      const sp = siSpecs(TARGET_KIND[inp.dataset.siTarget.split(":")[0]], obj, inp.dataset.siField)[+inp.dataset.siI];
+      const v = obj?.[inp.dataset.siField];
+      inp.value = sp && typeof v === "number" ? siFmt(v * sp.factor) : "";
+    });
+  },
+
   bindInspector(box) {
+    box.querySelectorAll("input[data-si-target]").forEach(inp => inp.addEventListener("input", () => {
+      const obj = this.targetObj(inp.dataset.siTarget);
+      const sp = siSpecs(TARGET_KIND[inp.dataset.siTarget.split(":")[0]], obj, inp.dataset.siField)[+inp.dataset.siI];
+      const v = parseFloat(inp.value);
+      if (!sp || !Number.isFinite(v)) return;
+      const pu = box.querySelector(`input[data-target="${inp.dataset.siTarget}"][data-field="${inp.dataset.siField}"]`);
+      pu.value = +(v / sp.factor).toPrecision(10);
+      pu.dispatchEvent(new Event("input"));
+    }));
     box.querySelectorAll("[data-target]").forEach(input => {
-      const evtName = input.tagName === "SELECT" ? "change" : "input";
+      const evtName = input.tagName === "SELECT" || input.type === "checkbox" ? "change" : "input";
       input.addEventListener(evtName, () => {
         const obj = this.targetObj(input.dataset.target);
         if (!obj) return;
@@ -408,6 +474,7 @@ const NetworkPage = {
           if (h && this.selected.kind !== "network" && input.dataset.target.startsWith(this.selected.kind)) h.textContent = input.value || h.textContent;
         }
         if ($("#net-tables").open) this.renderTables();
+        this.syncInputs(box);
       });
     });
     box.querySelectorAll("[data-act]").forEach(btn => btn.addEventListener("click", () => this.inspectorAction(btn)));
@@ -453,17 +520,13 @@ const NetworkPage = {
     }
   },
 
-  // Derived (read-only) control parameters for the selected unit -- updated
-  // in place when /topology comes back, so typing isn't interrupted.
-  refreshControlParams() {
+    refreshControlParams() {
     const box = $("#insp-ctrl");
     if (!box || !this.selected || this.selected.kind !== "bus") return;
-    const info = state.derInfo[this.selected.id];
-    const cp = info && info.control_params;
-    box.innerHTML = cp
-      ? `<details style="margin-top:0.8rem"><summary style="cursor:pointer;font-size:0.8rem;font-weight:600">Control & electrical parameters <span class="muted" style="font-weight:400">(derived, read-only)</span></summary>
-          <div class="tablewrap" style="margin-top:0.5rem;max-height:300px"><table class="ro-table"><tbody>${Object.entries(cp).map(([k, v]) => `<tr><td class="name">${esc(k)}</td><td>${fmtSmart(v)}</td></tr>`).join("")}</tbody></table></div></details>`
-      : "";
+    const der = state.network.der_units.find(d => d.bus === this.selected.id);
+    if (!der) return;
+    if (der.unit_type === "infinite_bus") { box.innerHTML = ""; return; }
+    UnitParams.render(box, der);
   },
 
   // --- Validation ---
@@ -500,6 +563,7 @@ const NetworkPage = {
         const v = row[f.key];
         const data = `data-kind="${kind}" data-index="${idx}" data-field="${f.key}"`;
         if (f.type === "readonly") return `<td class="name">${esc(v)}</td>`;
+        if (f.type === "bool") return `<td style="text-align:center"><input type="checkbox" ${data} data-type="bool"${(f.breaker ? v !== false : v) ? " checked" : ""}></td>`;
         if (f.type === "bus") return `<td><select ${data} data-type="int">${state.network.buses.map(b => `<option value="${b.id}"${b.id === v ? " selected" : ""}>${b.id}</option>`).join("")}</select></td>`;
         if (f.type === "select") return `<td><select ${data}>${f.options.map(o => `<option value="${o}"${o === (v ?? "") ? " selected" : ""}>${o || "(none)"}</option>`).join("")}</select></td>`;
         const type = f.type === "number" ? "number" : "text";
@@ -521,6 +585,13 @@ const NetworkPage = {
       networkChanged();
       this.view.render();
       if (t.tagName === "SELECT") this.renderTables();
+      else {
+        // e.g. a length change rescales the same row's R/X/B
+        body.querySelectorAll(`input[data-kind="${t.dataset.kind}"][data-index="${t.dataset.index}"]`).forEach(inp => {
+          const v = obj[inp.dataset.field];
+          if (inp !== t && typeof v === "number" && parseFloat(inp.value) !== v) inp.value = +v.toPrecision(10);
+        });
+      }
       if (this.selected) this.openInspector(this.selected);
     };
     body.addEventListener("input", evt => { if (evt.target.tagName !== "SELECT") onEdit(evt); });
@@ -573,6 +644,8 @@ function nextId(rows) { return rows.length ? Math.max(...rows.map(r => r.id)) + 
 function presetFamily(id) {
   if (id.startsWith("wscc9_")) return "WSCC 9-bus";
   if (id.startsWith("cigre_islanded")) return "CIGRE MV islanded";
+  if (id.startsWith("cigre_interconnected")) return "CIGRE MV interconnected";
   if (id.endsWith("_smib")) return "Single machine – infinite bus";
+  if (id.endsWith("_smsm")) return "Single machine – synchronous machine";
   return "Other";
 }

@@ -25,7 +25,8 @@ def test_list_presets():
         "wscc9_3sm", "wscc9_2sm_1gfl", "wscc9_1sm_2gfl", "wscc9_1sm_1gfm_1gfl",
         "wscc9_1sm_2gfm", "wscc9_2sm_1gfm", "wscc9_1gfm_2gfl", "wscc9_3gfm",
         "cigre_islanded_1sm_1gfm_1gfl", "cigre_islanded", "cigre_islanded_1sm_3gfm_1gfl",
-        "cigre_islanded_2sm_2gfm_2gfl", "sm_smib", "gfm_smib", "gfl_smib",
+        "cigre_islanded_2sm_2gfm_2gfl", "cigre_interconnected_1sm_1gfm_1gfl",
+        "sm_smib", "gfm_smib", "gfl_smib", "sm_smsm", "gfm_smsm", "gfl_smsm",
     }
 
 

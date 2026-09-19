@@ -10,7 +10,10 @@ MATLAB-generated reference:
 - Every machine's transformer impedance (``Rt``/``Lt``) comes from the
   *first* DG's ``Y_DER`` TR_R/TR_XL columns, not its own — see
   ``script_generic.m``'s ``SG_Data`` construction (``Y_TR(1,4) Y_TR(1,5)``
-  for every row `i`).
+  for every row `i`). **No longer the default:** each unit now uses its own
+  transformer (the one the power flow uses, see
+  ``operating_point.unit_transformer_rx``); set
+  ``Network.units_use_first_transformer`` to reproduce the MATLAB behaviour.
 - Every node's shunt susceptance (``Cl``, in :mod:`g2elin_core.components.node`)
   comes from the *first* line's B column, not the sum of its own incident
   lines' — see ``script_generic.m``'s node-substitution loop (``Cl = Y_line(1,6)``).

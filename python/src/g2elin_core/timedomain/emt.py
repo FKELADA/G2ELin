@@ -58,6 +58,7 @@ from g2elin_core.components.sm import (
     SmOperatingPoint, sm_dae, sm_nonlinear_funcs, sm_nonlinear_jacobians, sm_nonlinear_point,
 )
 from g2elin_core.interconnect import Block, build_blocks_and_wiring, compute_topology
+from g2elin_core.network.breakers import node_b_pu
 from g2elin_core.network.schema import Network
 from g2elin_core.operating_point import NetworkOperatingPoint, compute_operating_point
 from g2elin_core.powerflow import PowerFlowResult
@@ -174,6 +175,21 @@ class NonlinearNetworkModel:
     topology: object  # interconnect.Topology
     z_offsets: list[int]
     n_z: int
+    # What measurements (timedomain.measurements) need beyond the blocks: the
+    # network the model was built from, and the rotation between the
+    # power-flow angles and the model's common frame (operating point's
+    # theta_g), so measured angles match the power flow's at t = 0.
+    network: object = None
+    theta_g0: float = 0.0
+    # The operating point the blocks were built around (network events
+    # rebuild single blocks from it -- see timedomain.events).
+    op: object = None
+    # Optional warm start for the first algebraic solve (a post-event model
+    # starts from the pre-event solution, not from its blocks' own guesses).
+    zu_guess: tuple | None = None
+    # Optional initial state replacing the blocks' own operating-point one
+    # (a post-event model starts from the pre-event state).
+    x_init: Vec | None = None
 
     @property
     def state_names(self) -> list[str]:
@@ -199,10 +215,14 @@ class NonlinearNetworkModel:
         return [f"{n}_{{{b.name}}}" for b in self.blocks for n in b.comp.output_names]
 
     def initial_state(self) -> Vec:
+        if self.x_init is not None:
+            return self.x_init.copy()
         parts = [b.comp.x0 for b in self.blocks if b.comp.n_states]
         return np.concatenate(parts) if parts else np.zeros(0)
 
     def initial_algebraic_guess(self) -> tuple[Vec, Vec]:
+        if self.zu_guess is not None:
+            return self.zu_guess[0].copy(), self.zu_guess[1].copy()
         z_parts = [b.comp.z0 for b in self.blocks if b.comp.n_z]
         u_parts = [b.comp.u0 for b in self.blocks]
         z0 = np.concatenate(z_parts) if z_parts else np.zeros(0)
@@ -354,6 +374,39 @@ class NonlinearNetworkModel:
                     outputs[f"{name}_{{{b.name}}}"] = float(y_b[k])
         return inputs, outputs
 
+    def recover_signals(
+        self, t: Vec, x: Vec, u_exo_fn: Callable[[float], Vec] | None = None,
+        measure: Callable[[Vec, Vec, Vec], dict[str, float]] | None = None,
+    ) -> tuple[dict[str, Vec], dict[str, Vec], dict[str, Vec]]:
+        """Like :meth:`recover_inputs_and_outputs`, plus, when ``measure`` is
+        given (``measure(x, z, u) -> {name: value}``, see
+        :mod:`g2elin_core.timedomain.measurements`), those measurements at
+        each sample -- from the same per-sample algebraic solve, so they cost
+        nothing extra when inputs/outputs are recovered anyway."""
+        u_exo_default = self.default_u_exo()
+        z_guess, u_guess = self.initial_algebraic_guess()
+        inputs: dict[str, list[float]] = {name: [] for name in self.input_names}
+        outputs: dict[str, list[float]] = {name: [] for name in self.output_names}
+        meas: dict[str, list[float]] = {}
+        for i in range(len(t)):
+            x_i = x[:, i]
+            u_exo = u_exo_fn(t[i]) if u_exo_fn is not None else u_exo_default
+            z_i, u_i = self.solve_algebraic(x_i, u_exo, z_guess, u_guess)
+            z_guess, u_guess = z_i, u_i
+            step_inputs, step_outputs = self._inputs_and_outputs(x_i, z_i, u_i)
+            for name, val in step_inputs.items():
+                inputs[name].append(val)
+            for name, val in step_outputs.items():
+                outputs[name].append(val)
+            if measure is not None:
+                for name, val in measure(x_i, z_i, u_i).items():
+                    meas.setdefault(name, []).append(val)
+        return (
+            {k: np.array(v) for k, v in inputs.items()},
+            {k: np.array(v) for k, v in outputs.items()},
+            {k: np.array(v) for k, v in meas.items()},
+        )
+
     def recover_inputs_and_outputs(
         self, t: Vec, x: Vec, u_exo_fn: Callable[[float], Vec] | None = None
     ) -> tuple[dict[str, Vec], dict[str, Vec]]:
@@ -374,26 +427,8 @@ class NonlinearNetworkModel:
         the same ``t_final``/timestep limits as ``simulate()``, not
         unbounded.
         """
-        u_exo_default = self.default_u_exo()
-        z_guess, u_guess = self.initial_algebraic_guess()
-        inputs: dict[str, list[float]] = {name: [] for name in self.input_names}
-        outputs: dict[str, list[float]] = {name: [] for name in self.output_names}
-
-        for i in range(len(t)):
-            x_i = x[:, i]
-            u_exo = u_exo_fn(t[i]) if u_exo_fn is not None else u_exo_default
-            z_i, u_i = self.solve_algebraic(x_i, u_exo, z_guess, u_guess)
-            z_guess, u_guess = z_i, u_i
-            step_inputs, step_outputs = self._inputs_and_outputs(x_i, z_i, u_i)
-            for name, val in step_inputs.items():
-                inputs[name].append(val)
-            for name, val in step_outputs.items():
-                outputs[name].append(val)
-
-        return (
-            {k: np.array(v) for k, v in inputs.items()},
-            {k: np.array(v) for k, v in outputs.items()},
-        )
+        inputs, outputs, _ = self.recover_signals(t, x, u_exo_fn)
+        return inputs, outputs
 
 
 def build_nonlinear_network(network: Network, result: PowerFlowResult) -> NonlinearNetworkModel:
@@ -423,7 +458,7 @@ def build_nonlinear_network(network: Network, result: PowerFlowResult) -> Nonlin
 
     # Falls back to 0 for a network with no lines at all -- see
     # pipeline.linearize_network's identical guard for why.
-    b_pu_quirk = network.lines[0].b_pu if network.lines else 0.0
+    b_pu_quirk = node_b_pu(network) or 0.0
     node_components = {
         bus_id: nonlinear_node_block(wb_val=wb_val, b_pu=b_pu_quirk, wg0=1.0, vgd_g0=vgd, vgq_g0=vgq)
         for bus_id, (vgd, vgq) in op.node_vg.items()
@@ -458,7 +493,9 @@ def build_nonlinear_network(network: Network, result: PowerFlowResult) -> Nonlin
     for b in blocks:
         z_offsets.append(off)
         off += b.comp.n_z
-    return NonlinearNetworkModel(blocks=blocks, topology=topology, z_offsets=z_offsets, n_z=off)
+    return NonlinearNetworkModel(
+        blocks=blocks, topology=topology, z_offsets=z_offsets, n_z=off, network=network, theta_g0=op.theta_g_rad, op=op,
+    )
 
 
 @dataclass
@@ -540,6 +577,10 @@ class EmtStep:
     x: Vec
     inputs: dict[str, float]
     outputs: dict[str, float]
+    # This step's solved algebraic variables and full input vector (for
+    # measurements, which need more than the named inputs/outputs).
+    z: Vec | None = None
+    u: Vec | None = None
 
 
 def simulate_steps(
@@ -607,12 +648,14 @@ def simulate_steps(
     # cache["z"]/cache["u"] already hold the *solved* (not just guessed)
     # algebraic state for x0 by the time we get here.
     inputs0, outputs0 = model._inputs_and_outputs(x0, cache["z"], cache["u"])
-    yield EmtStep(t=t_span[0], x=x0.copy(), inputs=inputs0, outputs=outputs0)
+    yield EmtStep(t=t_span[0], x=x0.copy(), inputs=inputs0, outputs=outputs0, z=cache["z"].copy(), u=cache["u"].copy())
 
     while stepper.status == "running":
         stepper.step()
         inputs_i, outputs_i = model._inputs_and_outputs(stepper.y, cache["z"], cache["u"])
-        yield EmtStep(t=stepper.t, x=stepper.y.copy(), inputs=inputs_i, outputs=outputs_i)
+        yield EmtStep(
+            t=stepper.t, x=stepper.y.copy(), inputs=inputs_i, outputs=outputs_i, z=cache["z"].copy(), u=cache["u"].copy()
+        )
 
     if stepper.status == "failed":
         raise RuntimeError(f"EMT live integration failed at t={stepper.t}")

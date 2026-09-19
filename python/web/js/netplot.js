@@ -209,7 +209,10 @@ class NetworkView {
 
   // One breaker symbol (positioned by the caller).
   breakerNode(br, closed) {
-    const g = svgEl("g", { class: `nd-brk${closed ? "" : " open"}${this.opts.onBreaker ? " live" : ""}` });
+    const g = svgEl("g", {
+      class: `nd-brk${closed ? "" : " open"}${this.opts.onBreaker ? " live" : ""}`,
+      "data-brk": br.kind === "unit" ? `unit:${br.id}` : `${br.kind}:${br.index}${br.end ? `:${br.end}` : ""}`,
+    });
     g.appendChild(svgEl("rect", { class: "hit", x: -8, y: -8, width: 16, height: 16 }));
     g.appendChild(svgEl("rect", { class: "sq", x: -4, y: -4, width: 8, height: 8, rx: 1 }));
     if (!closed) g.appendChild(svgEl("line", { class: "slash", x1: -6, y1: 6, x2: 6, y2: -6 }));

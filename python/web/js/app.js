@@ -60,6 +60,7 @@ async function boot() {
   on("network:loaded", updateSidebarNetwork);
   on("network:changed", updateSidebarNetwork);
   updateSidebarNetwork();
+  watchForFigures();   // PNG/SVG/CSV buttons on every figure and table (exports.js)
   window.addEventListener("hashchange", route);
 
   // Docs nav is filled lazily but should be browsable from any page.

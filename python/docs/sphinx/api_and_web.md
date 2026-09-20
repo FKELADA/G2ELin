@@ -262,6 +262,24 @@ persisted server-side. Always light-themed.
   snapshot scrubber (and *Play*) over the diagram and overview charts.
   The **Show** selector sits directly above the results table; clicking
   an element on the diagram jumps to its row.
+Every figure and table can be taken out of the page (`web/js/exports.js`):
+each one gets a small toolbar in its corner with **PNG** and **SVG** for the
+figure and **CSV** for the numbers behind it -- a chart's own series, a
+result table's rows, or, on the root-locus page, the selected mode's
+participation across the sweep. A `MutationObserver` decorates figures as
+they are drawn, so no page has to opt in. The exported SVG carries its
+styles on the elements themselves (read off the live page with
+`getComputedStyle`), since the app's rules are descendant selectors that
+stop matching once the figure stands on its own; the PNG is that SVG drawn
+onto a canvas at 2x.
+
+In a chart's legend, clicking an entry **hides that signal** and clicking it
+again brings it back; **double-clicking shows only it**, and double-clicking
+again restores the rest. A signal hidden this way also leaves the hover
+tooltip, and the PNG/SVG export follows what is on screen (the CSV always
+holds every series). Entries drive every chart in their own card, so a scope
+split over stacked subplots switches together.
+
 Signals, everywhere they are picked, are organised by the **element** they
 belong to: a name's trailing block (`..._{SM_2}`, `..._{Nd_4}`, `V_{bus4}`,
 `P_from_{line3}`) is mapped back to the unit, bus, line or load it names, so

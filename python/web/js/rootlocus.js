@@ -516,6 +516,10 @@ const RootLocus = {
         <div class="rl-bars">${d.states.map(i => `<div class="rl-bar-row"><span class="rl-bar-label" title="${esc(this.result.stateNames[i])}">${esc(this.result.stateNames[i])}</span>
           <span class="rl-bar-track"><span class="rl-bar-fill"></span></span><span class="rl-bar-val"></span></div>`).join("")}</div>
         <p class="muted" style="font-size:0.72rem;margin:0.6rem 0 0">Top ${d.states.length} states of this mode, in the order of their largest participation over the sweep. Hover a point of its locus to jump to that value.</p>`;
+      // Bars are HTML, not a figure the generic export can serialize, so the
+      // numbers behind them get their own CSV (exports.js).
+      exportToolbar(box, [["CSV", "Download this mode's participation across the sweep",
+        () => exportCsv(this.participationRows(), exportName(box))]]);
       box.querySelector('[data-role="close"]').addEventListener("click", () => {
         this.view.track = null; this.draw(); this.drawTable(); this.drawParticipation();
       });
@@ -532,6 +536,14 @@ const RootLocus = {
       slider.max = String(d.pts.length - 1);
     }
     this.setParticipationStep(step);
+  },
+
+  // [[parameter value, participation of each of the top states], ...]
+  participationRows() {
+    const d = this.part, names = this.result.stateNames;
+    const rows = [[this.result.labels[0] || "value", ...d.states.map(i => names[i])]];
+    d.pts.forEach((pt, k) => rows.push([pt.value, ...d.at[k]]));
+    return rows;
   },
 
   setParticipationStep(step) {

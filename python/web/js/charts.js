@@ -130,7 +130,7 @@ function lineChart(series, opts = {}) {
   });
 
   // Downsample very long series for drawing (hover still reads full data).
-  live.forEach(s => {
+  const pathEls = live.map(s => {
     const n = s.t.length, stride = Math.max(1, Math.floor(n / 2500));
     let d = "", gap = true;  // a missing value (null/NaN) breaks the line
     for (let j = 0; j < n; j += stride) {
@@ -139,16 +139,21 @@ function lineChart(series, opts = {}) {
       gap = false;
     }
     if (stride > 1 && n && Number.isFinite(s.y[n - 1]) && !gap) d += `L${sx(s.t[n - 1]).toFixed(1)},${sy(s.y[n - 1]).toFixed(1)}`;
-    svg.appendChild(svgEl("path", {
+    const el = svgEl("path", {
       d, fill: "none", stroke: s.color, "stroke-width": s.width || (s.dash ? 2.2 : 1.8), "stroke-linejoin": "round",
-      "stroke-linecap": "round", ...(s.dash ? { "stroke-dasharray": "1.5 4" } : {}),
-    }));
+      "stroke-linecap": "round", "data-series": s.name, ...(s.dash ? { "stroke-dasharray": "1.5 4" } : {}),
+    });
+    svg.appendChild(el);
+    return el;
   });
 
   // Hover: crosshair + a dot per series + the shared floating tooltip.
   const hoverLine = svgEl("line", { class: "hover-line", y1: PADT, y2: H - PADB });
   hoverLine.style.display = "none";
   svg.appendChild(hoverLine);
+  // Signals hidden from the legend (by name, so a trace and its dotted
+  // linearised twin go together).
+  const hidden = new Set();
   const dots = live.map(s => {
     const c = svgEl("circle", { r: 3.5, class: "hover-dot", fill: s.color });
     c.style.display = "none";
@@ -163,16 +168,37 @@ function lineChart(series, opts = {}) {
     hoverLine.setAttribute("x1", xPix); hoverLine.setAttribute("x2", xPix);
     hoverLine.style.display = "";
     return live.map((s, i) => {
+      if (hidden.has(s.name)) { dots[i].style.display = "none"; return null; }
       const k = nearestIndex(s.t, tx);
       const v = s.y[k];
       dots[i].setAttribute("cx", sx(s.t[k])); dots[i].setAttribute("cy", sy(v));
       dots[i].style.display = Number.isFinite(v) ? "" : "none";
       return { s, v };
-    });
+    }).filter(Boolean);
   };
   const hide = () => { hoverLine.style.display = "none"; dots.forEach(d => { d.style.display = "none"; }); };
   const handle = { showAt, hide };
   if (opts.group) (opts.group.charts ||= []).push(handle);
+
+  // What the legend drives, and what the CSV export reads.
+  const applyHidden = () => live.forEach((s, i) => {
+    const off = hidden.has(s.name);
+    pathEls[i].style.display = off ? "none" : "";
+    if (off) dots[i].style.display = "none";
+  });
+  wrap.__chart = {
+    series: live,
+    names: [...new Set(live.map(s => s.name))],
+    isHidden: name => hidden.has(name),
+    toggle(name) { hidden.has(name) ? hidden.delete(name) : hidden.add(name); applyHidden(); },
+    isolate(name) {
+      const others = this.names.filter(n => n !== name);
+      const already = !hidden.has(name) && others.every(n => hidden.has(n));
+      hidden.clear();
+      if (!already) others.forEach(n => hidden.add(n));   // a second double-click brings them back
+      applyHidden();
+    },
+  };
 
   capture.addEventListener("mousemove", evt => {
     const ctm = svg.getScreenCTM();
@@ -197,11 +223,42 @@ function lineChart(series, opts = {}) {
   return wrap;
 }
 
+// A legend whose entries switch their signal off and on: click to hide one,
+// double-click to show only it (and again to bring the rest back).
 function legendHtml(items) {
-  return `<div class="legend">${items.map(it => it.dash
-    ? `<span><span class="line-swatch dotted" style="border-color:${it.color}"></span>${esc(it.name)}</span>`
-    : `<span><span class="line-swatch" style="border-color:${it.color}"></span>${esc(it.name)}</span>`).join("")}</div>`;
+  return `<div class="legend legend-toggle">${items.map(it =>
+    `<span data-series="${esc(it.name)}" role="button" tabindex="0" title="Click to hide this signal · double-click to show only it"><span class="line-swatch${it.dash ? " dotted" : ""}" style="border-color:${it.color}"></span>${esc(it.name)}</span>`).join("")}</div>`;
 }
+
+// The charts a legend entry speaks for: the ones in its own card (so a scope
+// split over stacked subplots switches all of them together).
+function legendCharts(item) {
+  const scope = item.closest(".card, .channel, aside") || document;
+  return [...scope.querySelectorAll(".chart")].filter(c => c.__chart);
+}
+function legendApply(item, fn) {
+  const charts = legendCharts(item);
+  charts.forEach(c => fn(c.__chart, item.dataset.series));
+  const first = charts[0];
+  if (!first) return;
+  item.parentElement.querySelectorAll("[data-series]").forEach(sp => {
+    sp.classList.toggle("off", first.__chart.isHidden(sp.dataset.series));
+  });
+}
+let _legendClick = null;
+document.addEventListener("click", ev => {
+  const item = ev.target.closest(".legend-toggle [data-series]");
+  if (!item || ev.detail > 1) return;
+  clearTimeout(_legendClick);
+  _legendClick = setTimeout(() => { _legendClick = null; legendApply(item, (c, n) => c.toggle(n)); }, 220);
+});
+document.addEventListener("dblclick", ev => {
+  const item = ev.target.closest(".legend-toggle [data-series]");
+  if (!item) return;
+  clearTimeout(_legendClick);   // the click that came with it doesn't count
+  _legendClick = null;
+  legendApply(item, (c, n) => c.isolate(n));
+});
 
 // --- Pan/zoom by viewBox ---------------------------------------------------------
 // Wheel zooms around the cursor, background drag pans. `canStartPan(evt)` lets

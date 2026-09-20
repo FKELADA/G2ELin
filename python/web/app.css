@@ -378,6 +378,21 @@ details.card[open] > summary { margin-bottom: 0.8rem; }
   background: var(--surface-1); border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,0.14); padding: 0.5rem;
 }
 .picker-pop input[type="search"] { width: 100%; margin-bottom: 0.4rem; }
+/* Legend entries switch their signal off and on. */
+.legend-toggle span[data-series] { cursor: pointer; user-select: none; border-radius: 4px; padding: 0 0.15rem; }
+.legend-toggle span[data-series]:hover { background: var(--surface-2); color: var(--text-primary); }
+.legend-toggle span[data-series].off { opacity: 0.4; text-decoration: line-through; }
+
+/* Export buttons, in the corner of every figure and table. */
+.fig-tools { position: absolute; top: 6px; right: 6px; z-index: 5; display: flex; gap: 3px; opacity: 0.2; transition: opacity 0.15s; }
+.card:hover .fig-tools, .fig-tools:hover, .fig-tools:focus-within { opacity: 1; }
+.fig-tools button {
+  font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.05em; padding: 0.12rem 0.3rem; line-height: 1.5;
+  background: var(--surface-1); color: var(--text-secondary); border: 1px solid var(--border-strong); border-radius: 4px; font-weight: 500;
+}
+.fig-tools button:hover { color: var(--accent); border-color: var(--accent); }
+.fig-tools button:disabled { opacity: 0.5; }
+
 /* Root locus: the plot, with the selected mode's participation beside it. */
 .rl-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; }
 .rl-main.with-side { grid-template-columns: minmax(0, 1fr) 320px; }

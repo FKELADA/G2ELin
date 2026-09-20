@@ -65,8 +65,28 @@ mjx-container[display="true"],
 }
 
 /* Diagrams and images never exceed the column. */
-.rst-content img,
-.rst-content .mermaid svg {
+.rst-content img {
   max-width: 100%;
   height: auto;
+}
+
+/* Mermaid draws each diagram to the full width of its container, so with the
+   wider column above they came out huge (1400px). They are kept at 60% of that
+   size, and centred. Mermaid
+   sets width/max-width inline on the svg, hence !important. On a narrow screen
+   they go back to the full width, where 60% would be unreadably small. */
+.rst-content .mermaid,
+.rst-content div.mermaid {
+  text-align: center;
+}
+.rst-content .mermaid svg {
+  width: 60% !important;
+  max-width: 60% !important;
+  height: auto !important;
+}
+@media (max-width: 900px) {
+  .rst-content .mermaid svg {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
 }

@@ -163,3 +163,60 @@ def test_length_sweep_scales_line_impedances():
     assert out.length_km == pytest.approx(2 * line.length_km)
     for k in ("r_pu", "x_pu", "b_pu"):
         assert getattr(out, k) == pytest.approx(2 * getattr(line, k))
+
+
+# --- Participation along the sweep (the root-locus page's moving bar plot) ---
+def _line_sweep(net: dict, **extra) -> list[dict]:
+    x = net["lines"][0]["x_pu"]
+    body = dict(
+        network=net, target={"element": "line", "key": "0", "field": "x_pu"},
+        start=x, stop=1.5 * x, step=0.25 * x, **extra,
+    )
+    r, lines = _sweep(body)
+    assert r.status_code == 200, r.text
+    return lines
+
+
+def test_sweep_streams_each_mode_s_top_states():
+    net = _net()
+    lines = _line_sweep(net)
+    steps = [m for m in lines if m.get("ok")]
+    assert len(steps) == 3
+    # The state names come once, with the first solved value.
+    assert "state_names" in steps[0] and all("state_names" not in s for s in steps[1:])
+    names = steps[0]["state_names"]
+    for s in steps:
+        assert len(s["part"]) == len(s["eig"])          # one entry per mode, same order
+        for mode in s["part"]:
+            assert len(mode) <= 15                      # only the top states are streamed
+            values = [v for _, v in mode]
+            assert values == sorted(values, reverse=True)
+            assert all(0 <= v <= 1 for v in values)
+            assert all(0 <= i < len(names) for i, _ in mode)
+        # A mode is (almost) fully accounted for by its top states.
+        assert sum(v for _, v in s["part"][0]) > 0.5
+
+
+def test_sweep_participation_matches_the_modal_analysis():
+    """At the network's own value, the streamed participation is the one the
+    modal-analysis page shows (same eigendecomposition, just truncated)."""
+    net = _net()
+    step = [m for m in _line_sweep(net) if m.get("ok")][0]   # the sweep starts at the network's own value
+    modal = client.post("/api/network/modal", json={"network": net}).json()
+    assert modal["state_names"] == step["state_names"]
+    eig = np.array([complex(re, im) for re, im in step["eig"]])
+    modes = np.array([complex(m["real"], m["imag"]) for m in modal["modes"]])
+    k = int(np.argmax(np.abs(eig.imag)))                 # the fastest oscillatory mode
+    row = int(np.argmin(np.abs(modes - eig[k])))         # the same mode in the static analysis
+    assert abs(modes[row] - eig[k]) < 1e-6 * (1 + abs(eig[k]))
+    # Its rows are sorted for display, so a row's own "mode" is its column.
+    j = modal["modes"][row]["mode"]
+    column = [r[j] for r in modal["participation"]]
+    for i, v in step["part"][k]:
+        assert v == pytest.approx(column[i], abs=1e-4)
+
+
+def test_sweep_participation_can_be_turned_off():
+    lines = _line_sweep(_net(), participation=False)
+    steps = [m for m in lines if m.get("ok")]
+    assert steps and all("part" not in s and "state_names" not in s for s in steps)

@@ -25,7 +25,7 @@ from fastapi import HTTPException, Request
 from scipy.optimize import linear_sum_assignment
 from starlette.concurrency import run_in_threadpool
 
-from g2elin_core.modal import analyze
+from g2elin_core.modal import ModalAnalysisResult, analyze
 from g2elin_core.network.breakers import energized_network
 from g2elin_core.network.schema import Network
 from g2elin_core import tuning
@@ -34,6 +34,9 @@ from g2elin_core.pipeline import linearize_network
 from g2elin_core.powerflow import run_power_flow
 
 from .schemas import SweepRequest, SweepTarget
+
+# How many states of each mode a sweep streams (the page shows this many bars).
+PARTICIPATION_TOP = 15
 
 SWEEP_MAX_POINTS = 201
 
@@ -189,53 +192,91 @@ def network_with(network: Network, req: SweepRequest, value: float, extras: list
     return Network(**data)
 
 
-def eigenvalues_at(network: Network) -> np.ndarray:
+def modal_at(network: Network) -> "ModalAnalysisResult":
+    """The linearised model's modal analysis at one point of a sweep."""
     network = energized_network(network)
     result = run_power_flow(network)
     if not result.converged:
         raise ValueError("power flow did not converge")
     system = linearize_network(network, result)
-    return analyze(system.A, system.state_names).eigenvalues
+    return analyze(system.A, system.state_names)
 
 
-def match_to(previous: np.ndarray, current: np.ndarray) -> np.ndarray:
-    """``current`` reordered so ``current[k]`` continues ``previous[k]``'s locus.
-    Distance is relative to magnitude, since these eigenvalues span many
-    orders of magnitude (a fixed absolute distance would pair every slow mode
-    with its nearest neighbour and ignore the fast ones entirely).
+def eigenvalues_at(network: Network) -> np.ndarray:
+    return modal_at(network).eigenvalues
+
+
+def match_order(previous: np.ndarray, current: np.ndarray) -> np.ndarray:
+    """The permutation putting ``current`` in ``previous``'s order, i.e. so
+    that ``current[order][k]`` continues ``previous[k]``'s locus. Distance is
+    relative to magnitude, since these eigenvalues span many orders of
+    magnitude (a fixed absolute distance would pair every slow mode with its
+    nearest neighbour and ignore the fast ones entirely).
     """
     if len(previous) != len(current):
-        return current
+        return np.arange(len(current))
     a, b = previous[:, None], current[None, :]
     cost = np.abs(a - b) / (1.0 + np.minimum(np.abs(a), np.abs(b)))
     _, cols = linear_sum_assignment(cost)
-    return current[cols]
+    return cols
+
+
+def match_to(previous: np.ndarray, current: np.ndarray) -> np.ndarray:
+    """``current`` reordered so ``current[k]`` continues ``previous[k]``'s locus."""
+    return current[match_order(previous, current)]
+
+
+def top_participation(participation: np.ndarray, top: int, floor: float = 0.005) -> list[list[list[float]]]:
+    """Per mode (column), its ``top`` most participating states as
+    ``[state index, factor]`` pairs, dropping the negligible ones -- the whole
+    matrix is (states x modes) and far too big to stream at every step, while
+    what a reader looks at is the handful of states that drive a mode.
+    """
+    out: list[list[list[float]]] = []
+    for j in range(participation.shape[1]):
+        col = participation[:, j]
+        idx = np.argsort(col)[::-1][:top]
+        out.append([[int(i), round(float(col[i]), 4)] for i in idx if col[i] >= floor])
+    return out
 
 
 async def sweep_stream(network: Network, req: SweepRequest, request: Request) -> AsyncIterator[str]:
     """NDJSON lines: ``{"i", "value", "ok": true, "eig": [[re, im], ...]}`` per
     value (``"ok": false, "error"`` for a value that doesn't solve), then
-    ``{"done": true, "n": ...}``."""
+    ``{"done": true, "n": ...}``.
+
+    With ``req.participation`` (the default), a solved line also carries
+    ``"part"``: each mode's most participating states at that value, in the
+    same order as ``"eig"``, so the page can show how a mode's composition
+    moves along its locus. The state names they index come with the first
+    solved line (``"state_names"``).
+    """
     values = sweep_values(req)
     extras = extra_values(req, values)
     yield json.dumps({"start": True, "values": values, "extra_values": extras}) + "\n"
     previous: np.ndarray | None = None
+    sent_names = False
     for i, value in enumerate(values):
         if await request.is_disconnected():
             return
         step_extras = [xs[i] for xs in extras]
         try:
-            eig = await run_in_threadpool(lambda v=value, xs=step_extras: eigenvalues_at(network_with(network, req, v, xs)))
+            modal = await run_in_threadpool(lambda v=value, xs=step_extras: modal_at(network_with(network, req, v, xs)))
         except HTTPException as e:
             yield json.dumps({"i": i, "value": value, "ok": False, "error": str(e.detail)}) + "\n"
             continue
         except Exception as e:  # noqa: BLE001 -- one bad value shouldn't end the sweep
             yield json.dumps({"i": i, "value": value, "ok": False, "error": f"{type(e).__name__}: {e}"}) + "\n"
             continue
-        if previous is None:
-            eig = eig[np.lexsort((eig.imag, eig.real))]
-        else:
-            eig = match_to(previous, eig)
+        eig = modal.eigenvalues
+        order = np.lexsort((eig.imag, eig.real)) if previous is None else match_order(previous, eig)
+        eig = eig[order]
         previous = eig
-        yield json.dumps({"i": i, "value": value, "ok": True, "eig": [[float(z.real), float(z.imag)] for z in eig]}) + "\n"
+        line = {"i": i, "value": value, "ok": True, "eig": [[float(z.real), float(z.imag)] for z in eig]}
+        if req.participation:
+            if not sent_names:
+                line["state_names"] = list(modal.state_names)
+                sent_names = True
+            line["part"] = top_participation(modal.participation[:, order], PARTICIPATION_TOP)
+        yield json.dumps(line) + "\n"
     yield json.dumps({"done": True, "n": len(values)}) + "\n"

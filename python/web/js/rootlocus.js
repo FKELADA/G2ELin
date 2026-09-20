@@ -56,7 +56,10 @@ const RootLocus = {
           <label class="check"><input type="checkbox" id="rl-connect" checked> Connect loci</label>
           <label class="check"><input type="checkbox" id="rl-base" checked> Current eigenvalues</label>
         </div>
-        <div id="rl-plot"><p class="empty">Choose a parameter and a range, then run the sweep.</p></div>
+        <div class="rl-main" id="rl-main">
+          <div id="rl-plot"><p class="empty">Choose a parameter and a range, then run the sweep.</p></div>
+          <aside class="rl-side" id="rl-part" hidden></aside>
+        </div>
         <div class="plot-legends" id="rl-legend"></div>
       </div>
       <div class="card"><div class="card-title">Most affected modes <span class="card-sub">— click a row to highlight its locus</span></div><div id="rl-table"><p class="empty">No sweep yet.</p></div></div>`;
@@ -257,6 +260,7 @@ const RootLocus = {
     };
     this.zoom = null;
     this.view.track = null;
+    this.stopParticipation();
     const btn = $("#rl-run"), stop = $("#rl-stop");
     btn.disabled = true; stop.style.display = "";
     this.controller = new AbortController();
@@ -283,6 +287,7 @@ const RootLocus = {
           if (!line.trim()) continue;
           const msg = JSON.parse(line);
           if (msg.start) { this.result.values = msg.values; this.result.extraValues = msg.extra_values || []; }
+          else if (msg.state_names) { this.result.stateNames = msg.state_names; this.result.steps.push(msg); }
           else if (msg.done) this.result.done = true;
           else this.result.steps.push(msg);
         }
@@ -305,7 +310,7 @@ const RootLocus = {
 
   redrawIfShown() {
     if (!$("#rl-plot")) return;
-    this.renderProgress(); this.draw(); this.drawTable();
+    this.renderProgress(); this.draw(); this.drawTable(); this.drawParticipation();
   },
 
   renderProgress() {
@@ -390,9 +395,13 @@ const RootLocus = {
     }
     box.innerHTML = `<svg class="eigenmap-svg" viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">
       <defs><clipPath id="rl-clip"><rect x="${PAD}" y="${PAD}" width="${W - 2 * PAD}" height="${H - 2 * PAD}"/></clipPath></defs>
-      ${grid}${zero}<g clip-path="${lin ? "url(#rl-clip)" : ""}">${lines}${base}${dots}</g>
+      ${grid}${zero}<g clip-path="${lin ? "url(#rl-clip)" : ""}">${lines}${base}${dots}
+        <circle id="rl-cursor" r="8" fill="none" stroke="var(--text-primary)" stroke-width="2.5" opacity="0" pointer-events="none"/></g>
       <text x="${W - PAD}" y="${H - 8}" text-anchor="end" class="eigen-ticklabel" style="font-size:10.5px">Real part (1/s${lin ? "" : ", symlog"})</text>
       <text x="${PAD}" y="${PAD - 10}" class="eigen-ticklabel" style="font-size:10.5px">Frequency, Hz${lin ? "" : " (symlog)"}</text></svg>`;
+    // Keep the projection, so the participation panel can move its marker
+    // along the locus without redrawing the whole plot at every frame.
+    this._proj = { sx, sy };
     const svg = box.querySelector("svg");
     const prev = this.zoom ? this.zoom.get() : null;
     this.zoom = attachSvgZoomPan(svg);
@@ -407,17 +416,155 @@ const RootLocus = {
         ["Frequency", `${fmt(Math.abs(p.im) / (2 * Math.PI), 3)} Hz`], ["Damping", `${fmt(100 * z, 2)} %`]]), e);
     });
     svg.addEventListener("mousemove", e => { if (e.target.closest(".rl-pt")) moveTooltip(e); });
+    svg.addEventListener("mouseover", e => {
+      // Hovering the tracked mode's own locus scrubs its participation bars.
+      const c = e.target.closest(".rl-pt");
+      if (!c || +c.dataset.k !== this.view.track || !this.part) return;
+      this.pauseParticipation();
+      this.setParticipationStep(+c.dataset.j);
+    });
     svg.addEventListener("mouseout", e => { if (e.target.closest(".rl-pt")) hideTooltip(); });
     svg.addEventListener("click", e => {
       const c = e.target.closest(".rl-pt");
       if (svg.__justPanned) return;
       this.view.track = c ? (+c.dataset.k === this.view.track ? null : +c.dataset.k) : null;
-      this.draw(); this.drawTable();
+      this.draw(); this.drawTable(); this.drawParticipation();
     });
     $("#rl-legend").innerHTML = gradientLegendHtml(this.result.labels[0], LOCUS_STOPS, vmin, vmax, 4)
       + (this.result.labels.length > 1 ? `<span class="muted" style="font-size:0.74rem">colour = main parameter; ${this.result.labels.slice(1).map(esc).join(", ")} move${this.result.labels.length > 2 ? "" : "s"} with it</span>` : "")
       + (this.view.baseline ? `<span class="legend" style="margin:0"><span><svg width="12" height="12" style="vertical-align:-2px;margin-right:0.3em"><circle cx="6" cy="6" r="4.5" fill="none" stroke="#0b0b0b"/></svg>Eigenvalues at the current value</span></span>` : "")
       + `<span class="muted" style="font-size:0.74rem">Scroll to zoom · drag to pan · click a point to follow its mode</span>`;
+  },
+
+  // --- Participation of the selected mode, along the sweep ---
+  // Clicking a mode opens a bar plot of the states that make it up -- the
+  // same reading as the single-mode participation page, but moving: it plays
+  // through the sweep, so the composition of the mode can be watched changing
+  // with the parameter (a mode handing over from one machine to another, an
+  // inner loop taking over as a gain rises). The bars keep a fixed order (by
+  // each state's largest participation over the whole sweep) so only their
+  // lengths move.
+  PART_TOP: 15,
+  PART_MS: 320,
+
+  stopParticipation() {
+    if (this._partTimer) clearInterval(this._partTimer);
+    this._partTimer = null;
+    this.part = null;
+  },
+  pauseParticipation() {
+    if (this._partTimer) clearInterval(this._partTimer);
+    this._partTimer = null;
+    if (this.part) this.part.playing = false;
+    const btn = $("#rl-part [data-role=\"play\"]");
+    if (btn) btn.textContent = "▶ Play";
+  },
+  playParticipation() {
+    if (!this.part || this.part.pts.length < 2) return;
+    this.pauseParticipation();
+    this.part.playing = true;
+    const btn = $("#rl-part [data-role=\"play\"]");
+    if (btn) btn.textContent = "❚❚ Pause";
+    this._partTimer = setInterval(() => {
+      if (!this.part || !$("#rl-part") || !$("#page-modal")?.classList.contains("active")) return this.pauseParticipation();
+      this.setParticipationStep((this.part.step + 1) % this.part.pts.length);
+    }, this.PART_MS);
+  },
+
+  // Everything the panel shows for one mode, from the steps solved so far.
+  participationData(k) {
+    const r = this.result;
+    if (!r || !r.stateNames) return null;
+    const pts = r.steps.filter(s => s.ok && s.part && s.part.length > k)
+      .map(s => ({ i: s.i, value: s.value, eig: s.eig[k], rows: s.part[k] }));
+    if (!pts.length) return null;
+    const best = new Map();
+    pts.forEach(p => p.rows.forEach(([i, v]) => best.set(i, Math.max(best.get(i) || 0, v))));
+    const states = [...best.entries()].sort((a, b) => b[1] - a[1]).slice(0, this.PART_TOP).map(([i]) => i);
+    const at = pts.map(p => { const m = new Map(p.rows); return states.map(i => m.get(i) || 0); });
+    return { k, pts, states, at, max: Math.max(0.05, ...best.values()) };
+  },
+
+  drawParticipation() {
+    const box = $("#rl-part");
+    if (!box) return;
+    const k = this.view.track;
+    if (k === null || k === undefined) {
+      this.stopParticipation();
+      $("#rl-cursor")?.setAttribute("opacity", "0");
+      box.hidden = true;
+      $("#rl-main")?.classList.remove("with-side");
+      return;
+    }
+    const d = this.participationData(k);
+    box.hidden = false;
+    $("#rl-main")?.classList.add("with-side");
+    if (!d) {
+      box.innerHTML = `<div class="rl-side-head"><h4>Mode ${k}</h4></div><p class="empty">No participation for this mode yet.</p>`;
+      return;
+    }
+    const same = this.part && this.part.k === k && this.part.pts.length === d.pts.length && $("#rl-part .rl-bars");
+    const playing = this.part ? this.part.playing : true;
+    const step = same ? Math.min(this.part.step, d.pts.length - 1) : 0;
+    this.part = { ...d, step, playing };
+    if (!same) {
+      box.innerHTML = `<div class="rl-side-head"><h4>Mode ${k} — participation</h4>
+          <button class="ghost small" data-role="close" aria-label="Close">✕</button></div>
+        <p class="status-line" data-role="at"></p>
+        <div class="rl-play"><button class="secondary small" data-role="play">▶ Play</button>
+          <input type="range" min="0" max="${d.pts.length - 1}" value="${step}" data-role="slider" aria-label="Sweep step"></div>
+        <div class="rl-bars">${d.states.map(i => `<div class="rl-bar-row"><span class="rl-bar-label" title="${esc(this.result.stateNames[i])}">${esc(this.result.stateNames[i])}</span>
+          <span class="rl-bar-track"><span class="rl-bar-fill"></span></span><span class="rl-bar-val"></span></div>`).join("")}</div>
+        <p class="muted" style="font-size:0.72rem;margin:0.6rem 0 0">Top ${d.states.length} states of this mode, in the order of their largest participation over the sweep. Hover a point of its locus to jump to that value.</p>`;
+      box.querySelector('[data-role="close"]').addEventListener("click", () => {
+        this.view.track = null; this.draw(); this.drawTable(); this.drawParticipation();
+      });
+      box.querySelector('[data-role="play"]').addEventListener("click", () => {
+        if (this.part.playing) this.pauseParticipation(); else this.playParticipation();
+      });
+      box.querySelector('[data-role="slider"]').addEventListener("input", e => {
+        this.pauseParticipation();
+        this.setParticipationStep(+e.target.value);
+      });
+      if (playing) this.playParticipation(); else this.pauseParticipation();
+    } else {
+      const slider = box.querySelector('[data-role="slider"]');
+      slider.max = String(d.pts.length - 1);
+    }
+    this.setParticipationStep(step);
+  },
+
+  setParticipationStep(step) {
+    const box = $("#rl-part");
+    if (!box || !this.part) return;
+    const d = this.part;
+    d.step = Math.max(0, Math.min(step, d.pts.length - 1));
+    const p = d.pts[d.step], vals = d.at[d.step];
+    const [re, im] = p.eig;
+    const wn = Math.hypot(re, im), z = wn ? -re / wn : 0;
+    box.querySelector('[data-role="at"]').innerHTML =
+      `${this.stepValues(p.i).map(([lab, v]) => `${esc(lab.split(" · ").pop())} = <b>${fmtSmart(v)}</b>`).join(" · ")}
+       <br>${fmt(Math.abs(im) / (2 * Math.PI), 3)} Hz · damping ${fmt(100 * z, 2)} % · step ${p.i + 1}/${this.result.values.length}`;
+    const slider = box.querySelector('[data-role="slider"]');
+    if (slider && +slider.value !== d.step) slider.value = String(d.step);
+    this.moveLocusCursor();
+    box.querySelectorAll(".rl-bar-row").forEach((row, j) => {
+      const v = vals[j] || 0;
+      row.querySelector(".rl-bar-fill").style.width = `${(100 * v / d.max).toFixed(1)}%`;
+      row.querySelector(".rl-bar-val").textContent = v ? v.toFixed(3) : "—";
+    });
+  },
+
+  // The ring on the locus at the value the bars are showing.
+  moveLocusCursor() {
+    const c = $("#rl-cursor");
+    if (!c) return;
+    const d = this.part;
+    if (!d || this.view.track !== d.k || !this._proj) { c.setAttribute("opacity", "0"); return; }
+    const [re, im] = d.pts[d.step].eig;
+    c.setAttribute("cx", this._proj.sx(re).toFixed(1));
+    c.setAttribute("cy", this._proj.sy(im).toFixed(1));
+    c.setAttribute("opacity", "1");
   },
 
   // Modes ranked by how far they move -- the ones this parameter really affects.
@@ -441,7 +588,7 @@ const RootLocus = {
         <td class="name">${r.unstable ? `<span class="bad">unstable from step ${r.unstable.i + 1} (${esc(this.result.labels[0].split(" · ").pop())} = ${fmtSmart(r.unstable.value)})</span>` : '<span class="ok">stable</span>'}</td></tr>`).join("")}</tbody></table></div>`;
     $$("#rl-table tr[data-k]").forEach(tr => tr.addEventListener("click", () => {
       this.view.track = +tr.dataset.k === this.view.track ? null : +tr.dataset.k;
-      this.draw(); this.drawTable();
+      this.draw(); this.drawTable(); this.drawParticipation();
     }));
   },
 };

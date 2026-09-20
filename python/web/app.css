@@ -378,6 +378,21 @@ details.card[open] > summary { margin-bottom: 0.8rem; }
   background: var(--surface-1); border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,0.14); padding: 0.5rem;
 }
 .picker-pop input[type="search"] { width: 100%; margin-bottom: 0.4rem; }
+/* Root locus: the plot, with the selected mode's participation beside it. */
+.rl-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+.rl-main.with-side { grid-template-columns: minmax(0, 1fr) 320px; }
+.rl-side { border-left: 1px solid var(--border); padding-left: 1rem; min-width: 0; }
+.rl-side-head { display: flex; align-items: baseline; gap: 0.5rem; }
+.rl-side-head h4 { margin: 0; font-size: 0.86rem; flex: 1; }
+.rl-play { display: flex; align-items: center; gap: 0.5rem; margin: 0.5rem 0 0.8rem; }
+.rl-play input[type="range"] { flex: 1; min-width: 0; }
+.rl-bar-row { display: grid; grid-template-columns: 96px minmax(0, 1fr) 42px; align-items: center; gap: 0.4rem; margin-bottom: 0.3rem; }
+.rl-bar-label { font-family: var(--font-mono); font-size: 0.66rem; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-bar-track { background: var(--surface-2); border-radius: 3px; height: 13px; overflow: hidden; }
+.rl-bar-fill { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width 0.28s ease-out; }
+.rl-bar-val { font-family: var(--font-mono); font-size: 0.66rem; color: var(--text-muted); text-align: right; }
+@media (max-width: 1100px) { .rl-main.with-side { grid-template-columns: minmax(0, 1fr); } .rl-side { border-left: 0; padding-left: 0; border-top: 1px solid var(--border); padding-top: 0.8rem; } }
+
 /* Element type / element, picked before the signals they belong to. */
 .picker-pop .pfilters { display: flex; flex-direction: column; gap: 0.25rem; margin-bottom: 0.45rem; }
 .picker-pop .pfilters select { width: 100%; font-size: 0.76rem; padding: 0.3rem 0.4rem; }

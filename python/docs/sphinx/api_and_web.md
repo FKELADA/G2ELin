@@ -285,6 +285,18 @@ perturbed is never hidden away.
   Several parameters can be swept together (`extra` in the request):
   each moves from its own start to its stop in lockstep with the main
   parameter, so every step is their combined effect.
+  Selecting a mode (on the plot or in the table) opens its **participation
+  beside the locus, moving**: the same reading as the single-mode
+  participation page, played through the sweep, so a mode's composition can
+  be watched changing with the parameter (one machine handing a swing mode
+  over to another, an inner loop taking over as a gain rises). The bars keep
+  a fixed order — each state's largest participation over the whole sweep —
+  so only their lengths move, a ring on the locus marks the value being
+  shown, and hovering a point of that locus jumps the bars to it. The factors
+  come from the sweep itself: every value's eigendecomposition already
+  computes them, so each solved line carries each mode's top
+  `sweep.PARTICIPATION_TOP` states (`participation: false` turns this off if
+  the stream should stay small; about 14 kB per value for a 78-state model).
 - **EMT Simulation** — state offset, input step or **network event** at
   T0 = 0, integrated
   with the nonlinear model; plots start 0.01 s before T0 (`t_pre`) so the

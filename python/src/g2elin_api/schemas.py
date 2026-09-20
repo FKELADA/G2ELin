@@ -389,6 +389,10 @@ class SweepRequest(BaseModel):
     stop: float
     step: float
     extra: list[SweepExtra] = []
+    # Also stream each mode's most participating states at every value (they
+    # come out of the same eigendecomposition, so they cost nothing to
+    # compute -- only to send).
+    participation: bool = True
 
 
 class NetworkSweepRequest(SweepRequest):

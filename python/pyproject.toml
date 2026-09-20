@@ -37,6 +37,7 @@ docs = [
     "myst-nb>=1.1",
     "sphinxcontrib-mermaid>=1.0",
     "furo>=2024.8",
+    "sphinx-rtd-theme>=3.0",  # the Read the Docs look of the published copy (tools/deploy_docs_space.py)
 ]
 notebook = [
     "jupyterlab>=4.0",

@@ -137,6 +137,25 @@ run `python tools/build_docs.py` (needs the `docs` extra).
 **Deleting everything.** Remove `python/.venv/`. Nothing else is installed
 anywhere on the machine.
 
+## Publishing the documentation
+
+The manual is published as a free Hugging Face *Static* Space, in the Read
+the Docs theme:
+
+```bash
+pip install -e ".[docs]"
+hf auth login                                   # once, with a write token
+python tools/deploy_docs_space.py --space <username>/g2elin-docs
+```
+
+It builds `--theme rtd` into `docs/sphinx/_build/rtd/`, stages it with a
+Space card, creates the Space on the first run and updates it afterwards, and
+prints the address (`https://<username>-g2elin-docs.static.hf.space`). Two
+builds exist because the web interface embeds the default one and reads
+Furo's sidebar markup to make its own navigation; the published copy uses
+`sphinx_rtd_theme` instead. A static Space is free; the interactive
+application needs a backend and so cannot live in one (see below).
+
 ## Running it on a server
 
 `python/Dockerfile` builds a container that installs the package, builds the

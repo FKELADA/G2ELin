@@ -1,14 +1,37 @@
 # G2ELin documentation
 
-G2ELin is a Python port of a MATLAB/Simulink power-system linearization and
-EMT simulation toolbox — see this checkout's `README.md` (in the `python/`
-directory) for the full migration narrative, including what's real, what's
-tested, and what's still a placeholder. This is the API-reference and
-architecture documentation,
-generated from the code itself with [Sphinx](https://www.sphinx-doc.org/)
-and [autodoc](https://www.sphinx-doc.org/en/master/usage/extensions/autodoc.html),
+**G2ELin** is an open-access tool for the small-signal analysis and EMT
+simulation of power systems with a high share of inverter-based resources.
+It builds a network of synchronous machines, grid-forming and grid-following
+converters, infinite buses, lines, transformers and loads; solves its power
+flow; linearises the whole thing into one closed-loop state-space model for
+modal analysis (eigenvalues, participation factors, root loci); and
+integrates the same model nonlinearly in time.
+
+What you can do with it:
+
+- **Build or load a network** — 19 presets (WSCC 9-bus, CIGRE MV islanded and
+  interconnected, single-machine cases), or draw one from scratch, with
+  breakers on every branch, load and unit.
+- **Solve power flow** — several solvers, single or batch, on networks that
+  may be split into islands.
+- **Analyse modes** — eigenvalue maps, participation, sensitivity, mode
+  shapes, free and step responses, and root loci that sweep any parameter,
+  including each control loop's tuning.
+- **Simulate in time** — nonlinear EMT runs with network events (breaker
+  openings, load steps, phase jumps) and the linearised response overlaid.
+
+It runs as a Python library (`g2elin_core`), as a web interface
+(`g2elin_api` + `web/`), or from the notebooks. New here? Start with
+{doc}`getting_started`; the {doc}`installation` page has the command-line
+version. The rest of this manual is the architecture and API reference,
+generated from the code with [Sphinx](https://www.sphinx-doc.org/) and
+[autodoc](https://www.sphinx-doc.org/en/master/usage/extensions/autodoc.html),
 with [Mermaid](https://mermaid.js.org/) diagrams for the parts that are
 easier to see than to read as prose.
+
+Source: [github.com/FKELADA/G2ELin](https://github.com/FKELADA/G2ELin) ·
+licence: GPL-3.0.
 
 ## How the pieces fit together
 

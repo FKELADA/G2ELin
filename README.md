@@ -7,6 +7,11 @@ This repository contains two implementations:
 - **[`matlab/`](matlab/README.md)** — the original MATLAB/Simulink implementation (model library + linearization/modal analysis toolbox).
 - **[`python/`](python/README.md)** — a Python port of the same functionality.
 
+## Documentation
+
+**<https://fkelada-g2elin-docs.static.hf.space>** — the full manual (architecture,
+equations, API reference, worked examples), in the Read the Docs layout.
+
 ## Try it
 
 **[GETTING_STARTED.md](GETTING_STARTED.md) — three steps, no coding.** Install

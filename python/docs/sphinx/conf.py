@@ -84,8 +84,34 @@ intersphinx_mapping = {
     "numpy": ("https://numpy.org/doc/stable/", None),
 }
 
-html_theme = "furo"
+# Two looks, one source. The web interface's Documentation page reads Furo's
+# sidebar markup to build its own navigation (web/js/docs.js), so the copy
+# served with the app stays Furo. The published copy -- the one people find
+# by link -- uses the Read the Docs theme, which is what most engineers
+# expect a package manual to look like (G2ELIN_DOCS_THEME=rtd, set by
+# tools/build_docs.py --theme rtd).
+import os
+
+html_theme = os.environ.get("G2ELIN_DOCS_THEME", "furo")
 html_title = "G2ELin documentation"
+
+if html_theme == "sphinx_rtd_theme":
+    html_theme_options = {
+        "navigation_depth": 3,          # the module pages have sub-sections worth reaching from the sidebar
+        "collapse_navigation": False,   # keep the whole tree open, as in the reference manuals
+        "sticky_navigation": True,
+        "includehidden": True,
+        "titles_only": False,
+        "style_external_links": True,
+    }
+    html_context = {
+        # "Edit on GitHub" on every page.
+        "display_github": True,
+        "github_user": "FKELADA",
+        "github_repo": "G2ELin",
+        "github_version": "python-migration",
+        "conf_py_path": "/python/docs/sphinx/",
+    }
 html_static_path = ["_static"] if Path(__file__).resolve().parent.joinpath("_static").is_dir() else []
 
 # Mermaid diagrams render client-side via mermaid.js (loaded from a CDN by

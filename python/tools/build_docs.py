@@ -20,6 +20,8 @@ second copy to keep in sync by hand, the same way ``_build/`` itself is.
 
 from __future__ import annotations
 
+import argparse
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -47,11 +49,28 @@ def _stage_notebooks() -> None:
         shutil.copy2(ROOT / "notebooks" / name, NOTEBOOKS_STAGING_DIR / name)
 
 
-def main() -> int:
+THEMES = {
+    # name -> (Sphinx theme, output directory). Furo is what the web interface
+    # embeds (its Documentation page reads Furo's sidebar); the Read the Docs
+    # theme is the published copy (tools/deploy_docs_space.py).
+    "furo": ("furo", OUT_DIR),
+    "rtd": ("sphinx_rtd_theme", SPHINX_SRC / "_build" / "rtd"),
+}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Build the G2ELin documentation.")
+    parser.add_argument("--theme", choices=sorted(THEMES), default="furo",
+                        help="furo (default; embedded in the web interface) or rtd (the published copy)")
+    args_ = parser.parse_args(argv)
+    theme, out = THEMES[args_.theme]
+    os.environ["G2ELIN_DOCS_THEME"] = theme
     _stage_notebooks()
-    args = ["-b", "html", "-W", "--keep-going", str(SPHINX_SRC), str(OUT_DIR)]
+    # Each theme has its own output directory, and Sphinx keeps its build cache
+    # inside it, so switching theme never reuses the other one's pages.
+    args = ["-b", "html", "-W", "--keep-going", str(SPHINX_SRC), str(out)]
     return sphinx_main(args)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

@@ -324,11 +324,20 @@ def test_network_validate_reports_every_issue_at_once():
     assert all(i["severity"] == "error" for i in body["issues"])
 
 
-def test_network_validate_unsupported_slack_is_a_warning_not_an_error():
-    # A GFM/GFL slack: power flow works, modal/EMT don't support it
-    # yet -- validate() should flag it as a warning, not block "ok".
+def test_network_validate_gfm_slack_is_fine():
+    # A GFM slack is an ordinary network now that the reference frame is a
+    # block of its own (components/frame.py): no error, and nothing to warn
+    # about either.
     r = client.post("/api/network/validate", json={"network": wscc9_1gfm_2gfl().model_dump()})
     assert r.status_code == 200
     body = r.json()
+    assert body["ok"] is True
+    assert not any("slack" in i["message"] for i in body["issues"])
+
+
+def test_network_validate_gfm_slack_warns_when_the_frame_follows_it():
+    net = wscc9_1gfm_2gfl()
+    net.frame_follows_slack = True
+    body = client.post("/api/network/validate", json={"network": net.model_dump()}).json()
     assert body["ok"] is True  # no errors, just a warning
     assert any(i["severity"] == "warning" and "slack" in i["message"] for i in body["issues"])

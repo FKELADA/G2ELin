@@ -319,18 +319,27 @@ def compute_operating_point(network: Network, result: PowerFlowResult) -> Networ
             angle_grid_rad=a_g,
             p_ref_pu=p_gross_pu,
             theta_g_rad=theta_g_rad,
-            is_slack=der.bus_type.value == "slack",
+            # A unit only *owns* the frame in the MATLAB-compatible mode; with
+            # a frame of its own (components/frame.py) every unit is ordinary.
+            is_slack=network.frame_follows_slack and der.bus_type.value == "slack",
         )
 
+    # The reference angle theta_g_0: the slack machine's own rotor angle, as
+    # in the toolbox. With a frame of its own the frame simply starts there,
+    # so every unit's theta - theta_g is the value computed here either way.
     sm_ops: dict[int, SmOperatingPoint] = {}
     theta_g_rad = 0.0
+    slack_id = next((d.id for d in network.der_units if d.bus_type.value == "slack"), None)
     for der in ders_by_slack_first:
         if der.unit_type.value != "sm":
             continue
         op = build_sm_op(der, theta_g_rad)
         sm_ops[der.id] = op
-        if op.is_slack:
+        if der.id == slack_id:
             theta_g_rad = op.theta0
+            if not network.frame_follows_slack:
+                # Rebuilt now that the frame angle is known (its own theta_g).
+                sm_ops[der.id] = build_sm_op(der, theta_g_rad)
 
     # GFM/GFL are never the slack (network_form.m never places them there),
     # so theta_g_rad is already final by the time these run.
@@ -386,12 +395,16 @@ def compute_operating_point(network: Network, result: PowerFlowResult) -> Networ
     for der in network.der_units:
         if der.unit_type.value != "infinite_bus":
             continue
-        v_t, _ = bus_vm_va(der.bus)
+        v_t, a_t = bus_vm_va(der.bus)
         p_net, q_net = bus_pq(der.bus)
         rt, lt = unit_transformer_rx(network, der)
+        own_frame = network.frame_follows_slack and der.id == slack_id
         ib_ops[der.id] = dict(
             wb_val=wb_val, r_pu=rt, x_pu=lt, v_pu=v_t,
             p_mw=p_net + der.p_cons_mw, q_mvar=q_net + der.q_cons_mvar, sn_mva=network.sn_mva,
+            # Where this source sits in the common frame (0 when it is the frame).
+            delta_rad=0.0 if own_frame else math.radians(a_t) - theta_g_rad,
+            is_slack=own_frame,
         )
 
     # Lines: solve the steady-state 2x2 for the line current.

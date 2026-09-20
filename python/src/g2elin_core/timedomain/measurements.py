@@ -3,8 +3,9 @@ off a meter -- power flows, frequency, voltage magnitude and angle, and
 instantaneous 3-phase voltages -- computed from each element's own model
 variables at every sample.
 
-All model variables live in one common dq frame that rotates with the slack
-unit (``theta`` / ``wr`` of the slack block). From them:
+All model variables live in a common dq frame -- the frame block a network's
+island is referenced to (``components/frame.py``), or the slack unit itself
+in the MATLAB-compatible mode. Its ``theta``/``wr`` are read here. From them:
 
 - **Bus voltage** ``v = vd + j vq`` (a network node's two states):
   magnitude ``|v|`` [pu]; angle ``atan2(vq, vd) + theta_g0`` [deg], where
@@ -84,7 +85,15 @@ class MeasurementSet:
             block = by_name[lab.der[der.id]]
             j, tr = hv_of.get(der.bus, (None, None))
             self.units.append((der, block, j, tr))
-        self.slack = next(b for d, b, _, _ in self.units if b.kind.endswith("_slack"))
+        # The frame everything is written in: its own block, or the slack
+        # unit when the frame follows it (Network.frame_follows_slack). With
+        # several islands the first frame is used for the shared quantities
+        # (the absolute phase of the 3-phase waveforms); every other
+        # measurement is local to its element.
+        self.frame = next(
+            (b for b in model.blocks if b.kind == "frame"),
+            next((b for d, b, _, _ in self.units if b.kind.endswith("_slack")), None),
+        )
         self.filtered: set[str] = set()      # names smoothed along time (see smooth())
         self.frequencies: set[str] = set()   # bus frequencies (ideal value before the disturbance)
         self._catalog = self._build_catalog()
@@ -247,11 +256,11 @@ class _Sample:
         return complex(y[n + ports["igd_g"]], y[n + ports["igq_g"]])
 
     def frame_speed(self) -> float:
-        b = self.ms.slack
+        b = self.ms.frame
         return float(self.y(b)[b.comp.n_out_s + _OUTG_PORTS[b.kind]["wr"]])
 
     def frame_theta(self) -> float:
-        b = self.ms.slack
+        b = self.ms.frame
         return float(self.y(b)[b.comp.n_out_s + _OUTG_PORTS[b.kind]["theta"]])
 
     def phi(self, node) -> float:
@@ -275,8 +284,9 @@ class _Sample:
         return abs(self.v(node)) * math.cos(theta - k * TWO_PI_3)
 
     def unit_freq(self, b) -> float:
-        if b.kind == "ib_slack":
-            return self.ms.f_n * self.frame_speed()
+        if b.kind.startswith("ib"):
+            # An infinite bus runs at its own (exogenous) speed input.
+            return self.ms.f_n * float(self.u_list[self.ms.model.blocks.index(b)][0])
         names = b.comp.output_names
         key = _UNIT_SPEED_OUTPUT.get(b.kind.removesuffix("_slack"))
         if key in names:

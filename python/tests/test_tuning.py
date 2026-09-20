@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from g2elin_api.main import app
 from g2elin_core import tuning
-from g2elin_core.modal import analyze
+from g2elin_core.modal import analyze, reference_angle_modes
 from g2elin_core.network.presets import (
     cigre_interconnected_1sm_1gfm_1gfl, gfl_smsm, gfm_smsm, sm_smsm, wscc9_1sm_1gfm_1gfl,
 )
@@ -100,7 +100,11 @@ def test_new_presets_are_valid_and_stable(build):
     result = run_power_flow(net)
     assert result.converged
     system = linearize_network(net, result)
-    assert analyze(system.A, system.state_names).eigenvalues.real.max() < 1e-6
+    modal = analyze(system.A, system.state_names)
+    # Leaving out the reference-angle modes, which the formulation puts on
+    # the imaginary axis (modal.reference_angle_modes).
+    ref = set(reference_angle_modes(modal))
+    assert max(z.real for j, z in enumerate(modal.eigenvalues) if j not in ref) < 1e-6
 
 
 def test_cigre_interconnected_topology():

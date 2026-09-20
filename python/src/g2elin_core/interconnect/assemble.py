@@ -36,6 +36,9 @@ import numpy as np
 _UG_PORTS = {
     "sm_slack": {"vgd_g": 0, "vgq_g": 1},
     "ib_slack": {"vgd_g": 0, "vgq_g": 1},  # matches ib_dae()'s ug_vec = [vgd_g, vgq_g]
+    # The frame itself has no inputs; a unit that doesn't own it reads it.
+    "frame": {"w_in": 0},
+    "ib": {"theta_g": 0, "wg": 1, "vgd_g": 2, "vgq_g": 3},
     "sm": {"theta_g": 0, "vgd_g": 1, "vgq_g": 2},
     "gfm": {"theta_g": 0, "vgd_g": 1, "vgq_g": 2},  # GFM is never the slack (see components/gfm.py)
     "gfl": {"theta_g": 0, "vgd_g": 1, "vgq_g": 2},  # GFL is never the slack
@@ -49,6 +52,8 @@ _OUTG_PORTS = {
     # (p_up/q_up are the n_out_s=2 "own" outputs, skipped here); an IB is
     # always the slack (see components/ib.py), so this is the only IB kind.
     "ib_slack": {"igd_g": 0, "igq_g": 1, "theta": 2, "wr": 3},
+    "frame": {"theta": 0, "wr": 1},
+    "ib": {"igd_g": 0, "igq_g": 1},
     "sm": {"igd_g": 0, "igq_g": 1},
     "gfm": {"igd_g": 0, "igq_g": 1},
     "gfl": {"igd_g": 0, "igq_g": 1},
@@ -84,7 +89,12 @@ class Block:
         return self.input_off + self.comp.n_us + _UG_PORTS[self.kind][port]
 
     def output_col(self, port: str) -> int:
-        return self.output_off + self.comp.n_out_s + _OUTG_PORTS[self.kind][port]
+        ports = _OUTG_PORTS[self.kind]
+        if port in ports:
+            return self.output_off + self.comp.n_out_s + ports[port]
+        # One of the block's own named outputs (its "s" outputs) -- how the
+        # reference frame reads the speed of the machine it follows.
+        return self.output_off + list(self.comp.output_names).index(port)
 
 
 @dataclass

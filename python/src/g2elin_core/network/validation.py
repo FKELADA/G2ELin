@@ -219,13 +219,16 @@ def validate_network(network: Network) -> list[NetworkIssue]:
                     dynamics_caps,
                 ))
 
+    # Only the MATLAB-compatible frame cares what the slack unit is: it *is*
+    # the frame there. With a frame of its own any unit can be the slack.
     slack = next((d for d in network.der_units if d.bus_type.value == "slack"), None)
-    if slack is not None and slack.unit_type.value not in _SUPPORTED_SLACK_UNIT_TYPES:
+    if network.frame_follows_slack and slack is not None and slack.unit_type.value not in _SUPPORTED_SLACK_UNIT_TYPES:
         issues.append(NetworkIssue(
             "warning",
             f"the slack unit (id={slack.id}) is a {slack.unit_type.value}, not a synchronous machine or "
-            f"infinite bus -- power flow works, but modal analysis/EMT don't support a "
-            f"{slack.unit_type.value} slack yet",
+            f"infinite bus -- this network asks the dynamic models' frame to follow the slack "
+            "(units_use_first_transformer's sibling, frame_follows_slack), which only those two can do; "
+            "switch that off to use a frame of its own",
             dynamics_caps,
         ))
 
@@ -245,16 +248,17 @@ def validate_network(network: Network) -> list[NetworkIssue]:
             all_caps,
         ))
 
-    # Breakers (network.breakers): the slack can't be switched out, and
-    # whatever open breakers cut off is reported, so a result that ignores
-    # it is never a surprise.
-    from .breakers import out_of_service_summary  # local: keeps this module's imports minimal
+    # Breakers (network.breakers): what open breakers leave out, and which
+    # unit is the reference of each island that is still energized.
+    from .breakers import out_of_service_summary, service_state  # local: keeps this module's imports minimal
 
-    if slack is not None and not slack.closed:
+    st = service_state(network)
+    if network.der_units and not st.references:
         issues.append(NetworkIssue(
             "error",
-            f"the slack unit (id={slack.id})'s breaker is open -- it is the reference of the power flow and "
-            "the dynamic models; close it, or make another unit the slack",
+            "no unit is left that could set a voltage and a frequency: open breakers have taken every "
+            "synchronous machine, grid-forming converter and infinite bus out of service (a grid-following "
+            "converter can only follow a voltage, never start one)",
             all_caps,
         ))
     else:
@@ -263,6 +267,26 @@ def validate_network(network: Network) -> list[NetworkIssue]:
             issues.append(NetworkIssue(
                 "warning",
                 "open breakers: " + "; ".join(summary) + " -- every analysis runs without them",
+                all_caps,
+            ))
+        by_id = {d.id: d for d in network.der_units}
+        if len(st.references) > 1:
+            parts = [
+                f"unit {i.reference} ({by_id[i.reference].unit_type.value}) for bus(es) {sorted(i.buses)}"
+                for i in st.islands if i.reference is not None
+            ]
+            issues.append(NetworkIssue(
+                "warning",
+                f"open breakers have split the network into {len(st.references)} energized islands, each "
+                "solved against its own reference: " + "; ".join(parts),
+                all_caps,
+            ))
+        elif st.references and slack is not None and st.references[0] != slack.id:
+            ref = st.references[0]
+            issues.append(NetworkIssue(
+                "warning",
+                f"the designated slack (unit {slack.id}) is out of service -- unit {ref} "
+                f"({by_id[ref].unit_type.value}) is the reference the power flow solves against instead",
                 all_caps,
             ))
 

@@ -85,6 +85,10 @@ class ModalResponse(BaseModel):
     input_names: list[str]
     output_names: list[str]
     participation: list[list[float]]  # [state][mode], each column sums to 1 -- see ModalAnalysisResult
+    # Modes that are only the model's free reference angle(s) (see
+    # modal.reference_angle_modes): marginal by construction, so they are left
+    # out of "stable"/"max_real_part".
+    reference_modes: list[int] = []
 
 
 class SensitivityRequest(BaseModel):
@@ -423,10 +427,16 @@ class NetworkIssueRow(BaseModel):
     affects: list[str]  # which of "powerflow"/"modal"/"emt" this issue affects
 
 
+class IslandRow(BaseModel):
+    buses: list[int]
+    reference: int | None  # the unit acting as this island's slack, None = blacked out
+
+
 class ServiceInfo(BaseModel):
     """What open breakers leave in service (network.breakers.service_state)."""
 
-    slack_connected: bool
+    references: list[int]  # the units acting as a power-flow reference, one per energized island
+    islands: list[IslandRow]
     energized_buses: list[int]
     lines: list[bool]
     transformers: list[bool]

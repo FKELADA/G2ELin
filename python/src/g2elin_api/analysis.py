@@ -20,8 +20,11 @@ import scipy.signal
 from fastapi import HTTPException, Request
 
 from g2elin_core.interconnect import AssembledSystem
-from g2elin_core.modal import ModalAnalysisResult, analyze, eigenvalue_sensitivity, free_response, mode_shape, step_response
-from g2elin_core.network.breakers import SlackDisconnected, energized_network, service_state
+from g2elin_core.modal import (
+    ModalAnalysisResult, analyze, eigenvalue_sensitivity, free_response, mode_shape, reference_angle_modes,
+    step_response,
+)
+from g2elin_core.network.breakers import NoReferenceUnit, energized_network, service_state
 from g2elin_core.network.schema import Network
 from g2elin_core.network.topology import compute_topology_layout
 from g2elin_core.network.validation import validate_network
@@ -54,6 +57,7 @@ from .schemas import (
     PowerFlowResponse,
     SensitivityEntryRow,
     SensitivityRequest,
+    IslandRow,
     SensitivityResponse,
     ServiceInfo,
     StatesResponse,
@@ -165,7 +169,8 @@ def validate_network_response(network: Network) -> ValidateResponse:
         ok=not any(i.severity == "error" for i in issues),
         issues=[NetworkIssueRow(severity=i.severity, message=i.message, affects=list(i.affects)) for i in issues],
         service=ServiceInfo(
-            slack_connected=st.slack_connected, energized_buses=sorted(st.energized_buses),
+            references=list(st.references), energized_buses=sorted(st.energized_buses),
+            islands=[IslandRow(buses=sorted(i.buses), reference=i.reference) for i in st.islands],
             lines=list(st.lines), transformers=list(st.transformers), loads=list(st.loads),
             der_units=st.der_units,
         ),
@@ -177,7 +182,7 @@ def energized_or_422(network: Network) -> Network:
     breakers switch out (network.breakers.energized_network)."""
     try:
         return energized_network(network)
-    except SlackDisconnected as e:
+    except NoReferenceUnit as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 
 
@@ -335,10 +340,18 @@ def mode_or_422(modal: ModalAnalysisResult, mode: int) -> None:
 def modal_response(network: Network) -> ModalResponse:
     system, modal = build_modal_from_network(network)
     table = modal.summary_table().sort_values("real", ascending=False)
+    # The reference-angle modes are the model's own coordinates, marginal by
+    # construction (see modal.reference_angle_modes), so the verdict and the
+    # worst real part are read off the physical ones.
+    reference = reference_angle_modes(modal)
+    physical = np.array([z for j, z in enumerate(modal.eigenvalues) if j not in set(reference)])
+    if not len(physical):
+        physical = modal.eigenvalues
     return ModalResponse(
         n_states=system.A.shape[0],
-        stable=bool((modal.eigenvalues.real < 1e-6).all()),
-        max_real_part=float(modal.eigenvalues.real.max()),
+        stable=bool((physical.real < 1e-6).all()),
+        max_real_part=float(physical.real.max()),
+        reference_modes=reference,
         modes=[ModeRow(**row) for row in table.to_dict(orient="records")],
         state_names=system.state_names,
         input_names=system.input_names,

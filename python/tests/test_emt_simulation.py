@@ -31,8 +31,9 @@ def model():
 
 
 def test_model_sizes(model):
-    # 3 SM x 19 states (PSS on); node/line/load contribute no algebraic vars.
-    assert sum(b.comp.n_states for b in model.blocks) == 87
+    # 3 SM x 19 states (PSS on) + the reference frame's angle
+    # (components/frame.py); node/line/load contribute no algebraic vars.
+    assert sum(b.comp.n_states for b in model.blocks) == 88
     assert model.n_z == 3 * 15  # SM's algVec = [wr, ved, veq, id, i1d, ifd, iq, i1q, i2q, vgd, vgq, Cm, Ce, DP, Et]
 
 

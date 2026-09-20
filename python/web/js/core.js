@@ -82,22 +82,33 @@ function networkChanged() {
 
 // Which elements open breakers leave in service -- the same rules as the
 // server's network.breakers.service_state: a line/transformer with either
-// breaker open, a load/unit with its breaker open, and anything cut off from
-// the slack's bus are out of service.
+// breaker open and a load/unit with its breaker open are out of service, the
+// closed breakers split the rest into islands, and an island is energized
+// only while it still holds a unit that can set a voltage and a frequency.
+const GRID_FORMING = ["infinite_bus", "sm", "gfm"];
 function serviceState(net) {
-  const out = { slackConnected: true, energized: new Set(), lines: [], transformers: [], loads: [], units: {} };
+  const out = { energized: new Set(), islands: [], references: [], lines: [], transformers: [], loads: [], units: {} };
   if (!net) return out;
-  const slack = net.der_units.find(d => d.bus_type === "slack");
   const adj = new Map(net.buses.map(b => [b.id, []]));
   const link = (a, b) => { adj.get(a)?.push(b); adj.get(b)?.push(a); };
   net.lines.forEach(l => { if (l.from_closed !== false && l.to_closed !== false) link(l.from_bus, l.to_bus); });
   net.transformers.forEach(t => { if (t.hv_closed !== false && t.lv_closed !== false) link(t.hv_bus, t.lv_bus); });
-  out.slackConnected = !slack || slack.closed !== false;
-  if (slack && out.slackConnected && adj.has(slack.bus)) {
-    const queue = [slack.bus];
-    out.energized.add(slack.bus);
-    while (queue.length) for (const n of adj.get(queue.shift()) || []) if (!out.energized.has(n)) { out.energized.add(n); queue.push(n); }
-  } else if (!slack) net.buses.forEach(b => out.energized.add(b.id));  // no slack yet: nothing to grey out
+  const seen = new Set();
+  net.buses.forEach(b => {
+    if (seen.has(b.id)) return;
+    const group = new Set([b.id]), queue = [b.id];
+    seen.add(b.id);
+    while (queue.length) for (const n of adj.get(queue.shift()) || []) if (!group.has(n)) { group.add(n); seen.add(n); queue.push(n); }
+    // This island's reference: the designated slack, else the biggest grid
+    // former (infinite bus, then synchronous machine, then grid-forming).
+    const formers = net.der_units.filter(d => d.closed !== false && group.has(d.bus) && GRID_FORMING.includes(d.unit_type));
+    const rank = d => [d.bus_type === "slack" ? 0 : 1, GRID_FORMING.indexOf(d.unit_type), -Math.abs(d.p_set_mw), d.id];
+    formers.sort((a, b2) => { const x = rank(a), y = rank(b2); for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] - y[i]; return 0; });
+    const ref = formers.length ? formers[0].id : null;
+    out.islands.push({ buses: group, reference: ref });
+    if (ref !== null) { out.references.push(ref); group.forEach(id => out.energized.add(id)); }
+  });
+  if (!net.der_units.length) net.buses.forEach(b => out.energized.add(b.id));  // nothing placed yet: grey nothing out
   const on = b => out.energized.has(b);
   out.lines = net.lines.map(l => l.from_closed !== false && l.to_closed !== false && on(l.from_bus));
   out.transformers = net.transformers.map(t => t.hv_closed !== false && t.lv_closed !== false && on(t.hv_bus));
@@ -125,16 +136,19 @@ function breakerLabel(net, br) {
   if (br.kind === "load") return `Load #${br.index} at bus ${o.bus}`;
   return `${UNIT_NAME[o.unit_type] || "Unit"} ${o.id} at bus ${o.bus}`;
 }
-// Toggles a breaker (refusing to open the slack's); returns false if refused.
+// Toggles a breaker. Any of them may be opened, the slack unit's included:
+// the reference then moves to another grid former (see serviceState). Only
+// leaving the network with no grid former at all is refused.
 function toggleBreaker(br) {
   const net = state.network, o = breakerTarget(net, br);
   if (!o) return false;
   const f = breakerField(br), closed = o[f] !== false;
-  if (closed && br.kind === "unit" && o.bus_type === "slack") {
-    alert("The slack unit's breaker can't be opened: it is the reference of the power flow and of the dynamic models. Make another unit the slack first.");
+  o[f] = !closed;
+  if (closed && !serviceState(net).references.length) {
+    o[f] = true;
+    alert("Opening this breaker would leave no synchronous machine, grid-forming converter or infinite bus in service — nothing could set a voltage and a frequency, so there would be nothing left to solve.");
     return false;
   }
-  o[f] = !closed;
   networkChanged();
   return true;
 }

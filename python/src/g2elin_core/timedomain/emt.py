@@ -44,6 +44,7 @@ import numpy as np
 import scipy.integrate
 import scipy.optimize
 
+from g2elin_core.components.frame import frame_dae, frame_nonlinear_funcs, frame_nonlinear_jacobians, frame_nonlinear_point
 from g2elin_core.components.gfl import (
     GflOperatingPoint, gfl_dae, gfl_nonlinear_funcs, gfl_nonlinear_jacobians, gfl_nonlinear_point,
 )
@@ -58,7 +59,7 @@ from g2elin_core.components.sm import (
     SmOperatingPoint, sm_dae, sm_nonlinear_funcs, sm_nonlinear_jacobians, sm_nonlinear_point,
 )
 from g2elin_core.interconnect import Block, build_blocks_and_wiring, compute_topology
-from g2elin_core.network.breakers import node_b_pu
+from g2elin_core.network.breakers import frame_references, node_b_pu
 from g2elin_core.network.schema import Network
 from g2elin_core.operating_point import NetworkOperatingPoint, compute_operating_point
 from g2elin_core.powerflow import PowerFlowResult
@@ -143,7 +144,19 @@ def nonlinear_gfl_block(op: GflOperatingPoint) -> NonlinearBlockComp:
 
 
 def nonlinear_ib_block(**kwargs) -> NonlinearBlockComp:
-    return _bind(ib_dae(), ib_nonlinear_funcs(), ib_nonlinear_jacobians(), ib_nonlinear_point(**kwargs))
+    is_slack = kwargs.get("is_slack", True)
+    return _bind(
+        ib_dae(is_slack), ib_nonlinear_funcs(is_slack), ib_nonlinear_jacobians(is_slack),
+        ib_nonlinear_point(**kwargs),
+    )
+
+
+def nonlinear_frame_block(**kwargs) -> NonlinearBlockComp:
+    driven = kwargs.get("driven", True)
+    return _bind(
+        frame_dae(driven), frame_nonlinear_funcs(driven), frame_nonlinear_jacobians(driven),
+        frame_nonlinear_point(**kwargs),
+    )
 
 
 def nonlinear_line_block(**kwargs) -> NonlinearBlockComp:
@@ -479,12 +492,21 @@ def build_nonlinear_network(network: Network, result: PowerFlowResult) -> Nonlin
             nonlinear_load_block(wb_val=wb_val, r_pu=r_pu, x_pu=x_pu, wg0=1.0, vgd_g0=vgd, vgq_g0=vgq)
         )
 
+    # One reference frame per island (components/frame.py), each following
+    # the unit that island is referenced to -- an infinite bus turns at its
+    # own fixed speed, a machine or grid-forming converter carries its frame
+    # with it. All of them start at the operating point's reference angle.
+    frame_components = None if network.frame_follows_slack else {
+        ref: nonlinear_frame_block(wb_val=wb_val, theta0=op.theta_g_rad, driven=driven)
+        for ref, driven in frame_references(network).items()
+    }
     blocks, wiring = build_blocks_and_wiring(
         network,
         der_components=der_components,
         node_components=node_components,
         line_components=line_components,
         load_components=load_components,
+        frame_components=frame_components,
     )
     topology = compute_topology(blocks, wiring)
 

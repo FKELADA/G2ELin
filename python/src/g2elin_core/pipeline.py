@@ -7,6 +7,7 @@ non-slack units.
 
 from __future__ import annotations
 
+from g2elin_core.components.frame import linearize_frame
 from g2elin_core.components.gfl import linearize_gfl
 from g2elin_core.components.gfm import linearize_gfm
 from g2elin_core.components.ib import linearize_ib
@@ -15,7 +16,7 @@ from g2elin_core.components.load import linearize_load
 from g2elin_core.components.node import linearize_node
 from g2elin_core.components.sm import linearize_sm
 from g2elin_core.interconnect import AssembledSystem, assemble_network
-from g2elin_core.network.breakers import node_b_pu
+from g2elin_core.network.breakers import frame_references, node_b_pu
 from g2elin_core.network.schema import Network
 from g2elin_core.operating_point import compute_operating_point
 from g2elin_core.powerflow import PowerFlowResult
@@ -37,6 +38,14 @@ def linearize_network(network: Network, result: PowerFlowResult) -> AssembledSys
         der_components[der_id] = linearize_gfl(gfl_op)
     for der_id, ib_kwargs in op.ib_ops.items():
         der_components[der_id] = linearize_ib(**ib_kwargs)
+    # One reference frame per island (components/frame.py), each following
+    # the unit that island is referenced to -- an infinite bus turns at its
+    # own fixed speed, a machine or grid-forming converter carries its frame
+    # with it. All of them start at the operating point's reference angle.
+    frame_components = None if network.frame_follows_slack else {
+        ref: linearize_frame(wb_val=wb_val, theta0=op.theta_g_rad, driven=driven)
+        for ref, driven in frame_references(network).items()
+    }
 
     missing = {d.id for d in network.der_units} - der_components.keys()
     if missing:
@@ -82,4 +91,5 @@ def linearize_network(network: Network, result: PowerFlowResult) -> AssembledSys
         node_components=node_components,
         line_components=line_components,
         load_components=load_components,
+        frame_components=frame_components,
     )

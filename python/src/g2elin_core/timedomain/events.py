@@ -14,8 +14,11 @@ the event; the algebraic variables re-solve instantly).
   unit). What the opening cuts off stays in the simulation: an islanded
   group of buses keeps evolving on its own (a load-only island decays, an
   island with a grid-forming unit keeps running) -- unlike the steady-state
-  analyses, which drop de-energized parts (see ``network.breakers``). The
-  slack unit can't be tripped: it carries the model's reference frame.
+  analyses, which drop de-energized parts (see ``network.breakers``). Any
+  unit can be tripped, the power flow's slack included: the reference frame
+  is a block of its own (``components/frame.py``) and simply moves to
+  another unit. Only the MATLAB-compatible frame
+  (``Network.frame_follows_slack``), which *is* the slack unit, keeps it.
 - **Load step**: the load's active/reactive power change by ``dp_pct`` /
   ``dq_pct`` percent at the voltage of the operating point (the load is a
   constant impedance, so its conductance and susceptance scale by
@@ -38,16 +41,16 @@ from dataclasses import dataclass
 import numpy as np
 
 from g2elin_core.interconnect import build_blocks_and_wiring, compute_topology
-from g2elin_core.network.breakers import BlockLabels, block_labels
+from g2elin_core.network.breakers import BlockLabels, block_labels, frame_references
 from g2elin_core.network.schema import Network
 
-from .emt import NonlinearNetworkModel, nonlinear_load_block
+from .emt import NonlinearNetworkModel, nonlinear_frame_block, nonlinear_load_block
 
 EVENT_KINDS = ("breaker", "load_step", "phase_jump")
 BREAKER_ELEMENTS = ("line", "transformer", "load", "unit")
 # Angle state of each non-slack unit kind (rotated by an infinite-bus phase jump).
 _ANGLE_STATE = {"sm": "theta", "gfm": "theta", "gfl": "theta_pll"}
-_COMMON_FRAME_KINDS = ("node", "line", "load", "ib_slack")
+_COMMON_FRAME_KINDS = ("node", "line", "load", "ib_slack", "ib")
 
 
 class EventError(ValueError):
@@ -98,10 +101,10 @@ def _breaker(model: NonlinearNetworkModel, ev: NetworkEvent) -> AppliedEvent:
         der = next((d for d in ders if d.id == der_id), None)
         if der is None:
             raise EventError(f"unit id {der_id} is already out of service")
-        if der.bus_type.value == "slack":
+        if der.bus_type.value == "slack" and getattr(net, "frame_follows_slack", False):
             raise EventError(
-                f"unit id {der_id} is the slack -- its angle and speed are the model's reference frame, so it "
-                "can't be tripped"
+                f"unit id {der_id} is the slack, and this network's frame follows it "
+                "(Network.frame_follows_slack) -- switch that off to be able to trip it"
             )
         ders.remove(der)
         for j, tr in enumerate(trs):
@@ -187,23 +190,30 @@ def _phase_jump(model: NonlinearNetworkModel, ev: NetworkEvent) -> AppliedEvent:
     x_eq = model.initial_state()
     x0 = x_eq.copy()
     by_name = {b.name: b for b in model.blocks}
-    slack = next(u for u in net.der_units if u.bus_type.value == "slack")
 
     def rotate(b, angle: float) -> None:
         s = b.state_off
         v = complex(x0[s], x0[s + 1]) * cmath.exp(1j * angle)
         x0[s], x0[s + 1] = v.real, v.imag
 
+    ib = next((u for u in net.der_units if u.bus == ev.bus and u.unit_type.value == "infinite_bus"), None)
     node = by_name.get(f"Nd_{ev.bus}")
     if node is not None:
         rotate(node, d)
         what = f"phase jump of {ev.angle_deg:+g}° at bus {ev.bus}"
-    elif ev.bus == slack.bus and slack.unit_type.value == "infinite_bus":
-        for b in model.blocks:
-            if b.kind in _COMMON_FRAME_KINDS:
-                rotate(b, -d)
-            elif b.kind in _ANGLE_STATE:
-                x0[b.state_off + b.comp.state_names.index(_ANGLE_STATE[b.kind])] -= d
+    elif ib is not None:
+        ib_block = by_name[block_labels(net).der[ib.id]]
+        if ib_block.kind == "ib":
+            # The source carries its own angle: jump it, and nothing else.
+            x0[ib_block.state_off + ib_block.comp.state_names.index("theta")] += d
+        else:
+            # MATLAB-compatible frame: this source *is* the frame, so the jump
+            # is expressed the other way round -- everything else turns by -d.
+            for b in model.blocks:
+                if b.kind in _COMMON_FRAME_KINDS:
+                    rotate(b, -d)
+                elif b.kind in _ANGLE_STATE:
+                    x0[b.state_off + b.comp.state_names.index(_ANGLE_STATE[b.kind])] -= d
         what = f"phase jump of {ev.angle_deg:+g}° of the infinite-bus source (bus {ev.bus})"
     else:
         raise EventError(
@@ -224,12 +234,27 @@ def rebuild(model: NonlinearNetworkModel, network: Network, replace: dict | None
     comps = {b.name: b.comp for b in model.blocks}
     comps.update(replace)
     lab = block_labels(network)
+    # The reference frames of the network the event leaves behind: an island
+    # split in two gets one each, and an island whose reference unit was just
+    # tripped hands its frame to the unit that takes over. They start where
+    # the frame they replace is now, so nothing jumps at the event.
+    old_frames = [b for b in model.blocks if b.kind == "frame"]
+    x_now = model.initial_state()
+    theta_now = float(x_now[old_frames[0].state_off]) if old_frames else model.theta_g0
+    frame_components = None
+    if old_frames:
+        wb_val = 2 * math.pi * network.f_hz
+        frame_components = {
+            ref: nonlinear_frame_block(wb_val=wb_val, theta0=theta_now, driven=driven)
+            for ref, driven in frame_references(network).items()
+        }
     blocks, wiring = build_blocks_and_wiring(
         network,
         der_components={d.id: comps[lab.der[d.id]] for d in network.der_units},
         node_components={b.id: comps[f"Nd_{b.id}"] for b in network.buses if f"Nd_{b.id}" in comps},
         line_components=[comps[f"Ln_{n + 1}"] for n in lab.line],
         load_components=[comps[f"Ld_{n + 1}"] for n in lab.load],
+        frame_components=frame_components,
     )
     topology = compute_topology(blocks, wiring)
     z_offsets, off = [], 0
@@ -241,14 +266,21 @@ def rebuild(model: NonlinearNetworkModel, network: Network, replace: dict | None
         theta_g0=model.theta_g0, op=model.op,
     )
 
-    # Carry the state and the algebraic solution over by block name.
-    x_pre = model.initial_state() if model.x_init is None else model.x_init
+    # Carry the state and the algebraic solution over by block name. A block
+    # the event creates -- a frame for an island that didn't exist before --
+    # starts from its own initial values instead.
+    x_pre = x_now
     z_pre, u_pre = model.solve_algebraic(x_pre, model.default_u_exo())
     old = {b.name: (b, zo) for b, zo in zip(model.blocks, model.z_offsets)}
     x0 = np.zeros(sum(b.comp.n_states for b in blocks))
     z0 = np.zeros(off)
     u0 = np.zeros(topology.n_u)
     for b, zo in zip(blocks, z_offsets):
+        if b.name not in old:
+            x0[b.state_off:b.state_off + b.comp.n_states] = b.comp.x0
+            z0[zo:zo + b.comp.n_z] = b.comp.z0
+            u0[b.input_off:b.input_off + b.comp.n_us + b.comp.n_ug] = b.comp.u0
+            continue
         ob, ozo = old[b.name]
         x0[b.state_off:b.state_off + b.comp.n_states] = x_pre[ob.state_off:ob.state_off + ob.comp.n_states]
         z0[zo:zo + b.comp.n_z] = z_pre[ozo:ozo + ob.comp.n_z]

@@ -50,7 +50,8 @@ def test_modal_endpoint(preset_id):
     r = client.post(f"/api/presets/{preset_id}/modal")
     assert r.status_code == 200
     body = r.json()
-    assert body["stable"] is True
+    assert body["stable"] is True   # the reference-angle modes don't count
+    assert 1 <= len(body["reference_modes"]) <= 2
     assert body["n_states"] == len(body["modes"])
     assert len(body["state_names"]) == body["n_states"]
     assert len(body["participation"]) == body["n_states"]
@@ -150,7 +151,8 @@ def test_states_endpoint():
     assert r.status_code == 200
     body = r.json()
     names = body["state_names"]
-    assert len(names) == 87
+    assert len(names) == 88   # 87 + the reference frame's own angle
+    assert "theta_{Frame}" in names
     assert "dw_r_{SM_2}" in names
     assert "theta_{SM_2}" in names
     assert "P_ref_{SM_2}" in body["input_names"]

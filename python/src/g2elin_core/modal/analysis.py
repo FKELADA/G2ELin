@@ -51,6 +51,38 @@ class ModalAnalysisResult:
         return pd.DataFrame(rows)
 
 
+# A mode this close to the origin, made only of angle states, is one of the
+# model's free reference angles rather than a physical mode -- see
+# reference_angle_modes(). The physical modes of every case in this
+# repository sit at least four orders of magnitude further out.
+REFERENCE_MODE_TOL = 1e-4
+_ANGLE_PARTICIPATION = 0.9
+
+
+def reference_angle_modes(result: "ModalAnalysisResult") -> list[int]:
+    """The modes that are only the model's own reference angles.
+
+    Nothing pins the absolute position of the dq frame, so the model always
+    has one marginal direction: turn every angle by the same amount and
+    nothing physical changes. With a frame of its own
+    (``components/frame.py``) there is a second one, since the frame and the
+    unit it follows turn at the same speed and their difference is therefore
+    conserved -- a redundancy of the coordinates, not a mode of the system.
+
+    Both show up as eigenvalues at the origin (numerically a hair either
+    side of it, which is why a plain ``max(Re) < 0`` test on the raw
+    spectrum is the wrong question to ask) and both are made *entirely* of
+    angle states, which is how they are told apart from a genuinely slow
+    mode sitting near the origin.
+    """
+    angle = [i for i, n in enumerate(result.state_names) if n.startswith("theta")]
+    out = []
+    for j, lam in enumerate(result.eigenvalues):
+        if abs(lam) <= REFERENCE_MODE_TOL and sum(result.participation[i, j] for i in angle) > _ANGLE_PARTICIPATION:
+            out.append(j)
+    return out
+
+
 def analyze(A: np.ndarray, state_names: list[str]) -> ModalAnalysisResult:
     """Eigen-decompose ``A`` and compute the participation-factor matrix.
 

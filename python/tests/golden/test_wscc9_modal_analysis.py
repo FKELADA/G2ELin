@@ -30,8 +30,10 @@ def modal(system):
 
 
 def test_state_count(system):
-    # 3 SM x 19 states (PSS on) + 6 nodes x 2 + 6 lines x 2 + 3 loads x 2
-    assert system.A.shape == (3 * 19 + 6 * 2 + 6 * 2 + 3 * 2, 3 * 19 + 6 * 2 + 6 * 2 + 3 * 2)
+    # 3 SM x 19 states (PSS on) + 6 nodes x 2 + 6 lines x 2 + 3 loads x 2,
+    # + 1 for the reference frame's own angle (components/frame.py)
+    expected = 3 * 19 + 6 * 2 + 6 * 2 + 3 * 2 + 1
+    assert system.A.shape == (expected, expected)
 
 
 def test_no_nan_or_inf(system):

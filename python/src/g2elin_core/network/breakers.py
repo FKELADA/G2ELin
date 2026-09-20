@@ -11,13 +11,21 @@ Rules, shared by every analysis:
   line open at one end only would, in reality, still charge from the other
   end; that charging current is neglected, as it is by the lumped model.)
 - A load or unit with its breaker open is out of service.
-- A bus is **energized** when it is connected to the slack unit's bus
-  through in-service lines/transformers. Anything on a de-energized bus
-  (an island cut off from the slack) is out of service too -- the tool has
-  one reference (the slack) and doesn't simulate islanded operation from a
-  steady state.
-- The slack unit's own breaker can't be opened: it is the reference of the
-  power flow and of the dynamic models' common frame.
+- Open breakers split the network into **islands**. An island is energized
+  when it still holds a unit that can set its own voltage and frequency --
+  a synchronous machine, a grid-forming converter or an infinite bus. That
+  unit is the island's **reference** (the power flow's slack for it): the
+  network's designated slack keeps the role in its own island, otherwise
+  the largest grid former takes it, infinite bus first, then synchronous
+  machine, then grid-forming converter.
+- An island holding only grid-following converters and loads is **blacked
+  out**: a grid-following converter needs a voltage to follow and cannot
+  start one, and anti-islanding protection would trip it. Everything in
+  such an island is out of service, as it is in every load-flow tool that
+  requires a reference per island.
+- Any breaker may be opened, the slack unit's included -- the reference
+  then moves to another unit. Only a network left with no grid former at
+  all has nothing to solve.
 
 Power flow keeps every element and marks these ones out of service
 (pandapower ``in_service``), so its result tables keep the network's own
@@ -32,9 +40,12 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 
-from .schema import Network
+from .schema import BusType, Network
 
 TYPE_LABEL = {"sm": "SM", "gfm": "GFM", "gfl": "GFL", "infinite_bus": "IB"}
+# Units that can hold an island's voltage and frequency on their own, in the
+# order they are preferred as its reference.
+GRID_FORMING = ("infinite_bus", "sm", "gfm")
 
 
 @dataclass(frozen=True)
@@ -79,10 +90,19 @@ def block_labels(network: Network) -> BlockLabels:
 
 
 @dataclass(frozen=True)
+class Island:
+    """One electrically connected group of buses, and the unit that is its
+    power-flow reference (``None`` when it has no grid former: blacked out)."""
+
+    buses: frozenset[int]
+    reference: int | None
+
+
+@dataclass(frozen=True)
 class ServiceState:
     """Which elements of a network are in service (indices into its lists)."""
 
-    slack_connected: bool
+    islands: tuple[Island, ...]
     energized_buses: frozenset[int]
     lines: tuple[bool, ...]
     transformers: tuple[bool, ...]
@@ -90,9 +110,21 @@ class ServiceState:
     der_units: dict[int, bool] = field(default_factory=dict)
 
     @property
+    def references(self) -> tuple[int, ...]:
+        """The units acting as a power-flow reference, one per energized island."""
+        return tuple(i.reference for i in self.islands if i.reference is not None)
+
+    @property
+    def primary_reference(self) -> int | None:
+        """The reference of the largest energized island -- the one that takes
+        the ``slack`` role when the designated slack unit is out of service."""
+        live = [i for i in self.islands if i.reference is not None]
+        return max(live, key=lambda i: (len(i.buses), -i.reference)).reference if live else None
+
+    @property
     def everything_in_service(self) -> bool:
         return (
-            self.slack_connected and all(self.lines) and all(self.transformers)
+            all(self.lines) and all(self.transformers)
             and all(self.loads) and all(self.der_units.values())
         )
 
@@ -107,7 +139,6 @@ def any_breaker_open(network: Network) -> bool:
 
 
 def service_state(network: Network) -> ServiceState:
-    slack = next(d for d in network.der_units if d.bus_type.value == "slack")
     adj: dict[int, list[int]] = {b.id: [] for b in network.buses}
     for ln in network.lines:
         if ln.from_closed and ln.to_closed:
@@ -118,18 +149,38 @@ def service_state(network: Network) -> ServiceState:
             adj[tr.hv_bus].append(tr.lv_bus)
             adj[tr.lv_bus].append(tr.hv_bus)
 
-    energized: set[int] = set()
-    if slack.closed:
-        queue = deque([slack.bus])
-        energized.add(slack.bus)
+    # Islands: the connected groups of buses left by the closed breakers.
+    seen: set[int] = set()
+    groups: list[frozenset[int]] = []
+    for bus in network.buses:
+        if bus.id in seen:
+            continue
+        group, queue = {bus.id}, deque([bus.id])
+        seen.add(bus.id)
         while queue:
             for nxt in adj[queue.popleft()]:
-                if nxt not in energized:
-                    energized.add(nxt)
+                if nxt not in group:
+                    group.add(nxt)
+                    seen.add(nxt)
                     queue.append(nxt)
+        groups.append(frozenset(group))
+
+    def rank(d) -> tuple:
+        # The designated slack first, then by unit type, then the largest.
+        return (d.bus_type is not BusType.SLACK, GRID_FORMING.index(d.unit_type.value), -abs(d.p_set_mw), d.id)
+
+    islands: list[Island] = []
+    for group in groups:
+        formers = [
+            d for d in network.der_units
+            if d.closed and d.bus in group and d.unit_type.value in GRID_FORMING
+        ]
+        ref = min(formers, key=rank) if formers else None
+        islands.append(Island(buses=group, reference=ref.id if ref else None))
+    energized = {b for i in islands if i.reference is not None for b in i.buses}
 
     return ServiceState(
-        slack_connected=slack.closed,
+        islands=tuple(islands),
         energized_buses=frozenset(energized),
         lines=tuple(ln.from_closed and ln.to_closed and ln.from_bus in energized for ln in network.lines),
         transformers=tuple(tr.hv_closed and tr.lv_closed and tr.hv_bus in energized for tr in network.transformers),
@@ -138,8 +189,8 @@ def service_state(network: Network) -> ServiceState:
     )
 
 
-class SlackDisconnected(ValueError):
-    pass
+class NoReferenceUnit(ValueError):
+    """Nothing is left that could set a voltage and a frequency."""
 
 
 def energized_network(network: Network) -> Network:
@@ -153,10 +204,10 @@ def energized_network(network: Network) -> Network:
     if not any_breaker_open(network):
         return network
     st = service_state(network)
-    if not st.slack_connected:
-        raise SlackDisconnected(
-            "the slack unit's breaker is open -- it is the reference of the power flow and of the dynamic "
-            "models, so it can't be disconnected; make another unit the slack first"
+    if not st.references:
+        raise NoReferenceUnit(
+            "no part of this network has a unit that could set its voltage and frequency -- open breakers "
+            "have left only grid-following converters and loads, which can't energize an island on their own"
         )
     full = block_labels(network)
     unit_bus_out = {d.bus for d in network.der_units if not st.der_units[d.id]}
@@ -166,6 +217,14 @@ def energized_network(network: Network) -> Network:
     keep_ln = [i for i, ok in enumerate(st.lines) if ok]
     keep_ld = [i for i, ok in enumerate(st.loads) if ok]
     keep_der = [d for d in network.der_units if st.der_units[d.id]]
+    # The reduced network needs exactly one unit marked as the slack (the
+    # schema's own rule). It is the designated one while it is in service;
+    # otherwise the largest energized island's reference takes the role.
+    if not any(d.bus_type is BusType.SLACK for d in keep_der):
+        primary = st.primary_reference
+        keep_der = [
+            d.model_copy(update={"bus_type": BusType.SLACK}) if d.id == primary else d for d in keep_der
+        ]
     buses = [b for b in network.buses if b.id in st.energized_buses and b.id not in unit_bus_out]
 
     reduced = network.model_copy(update=dict(
@@ -185,6 +244,19 @@ def energized_network(network: Network) -> Network:
     return reduced
 
 
+def frame_references(network: Network) -> dict[int, bool]:
+    """``{reference unit id: the frame follows its speed}`` -- one entry per
+    energized island (see ``components/frame.py``). An infinite-bus reference
+    drives nothing: its source already turns at a fixed speed, so its island's
+    frame does too.
+    """
+    by_id = {d.id: d for d in network.der_units}
+    return {
+        i.reference: by_id[i.reference].unit_type.value != "infinite_bus"
+        for i in service_state(network).islands if i.reference is not None
+    }
+
+
 def node_b_pu(network: Network) -> float | None:
     """The susceptance every node uses (the full network's first line's)."""
     return block_labels(network).node_b_pu
@@ -199,7 +271,10 @@ def out_of_service_summary(network: Network) -> list[str]:
     msgs: list[str] = []
     dead = sorted(b.id for b in network.buses if b.id not in st.energized_buses)
     if dead:
-        msgs.append(f"de-energized bus(es) {dead} (cut off from the slack by open breakers)")
+        blacked = [i for i in st.islands if i.reference is None and i.buses]
+        why = ("split off with no unit able to set a voltage and a frequency"
+               if any(len(i.buses) > 1 for i in blacked) else "cut off by open breakers")
+        msgs.append(f"de-energized bus(es) {dead} ({why})")
     lines = [i for i, ok in enumerate(st.lines) if not ok]
     if lines:
         msgs.append(f"line(s) #{', #'.join(map(str, lines))} out of service")

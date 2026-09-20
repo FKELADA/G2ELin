@@ -64,12 +64,24 @@ def test_modal_analysis_runs(name):
 
 
 @pytest.mark.parametrize("name", GFM_SLACK_VARIANTS)
-def test_gfm_slack_variants_modal_analysis_not_implemented(name):
-    # See wscc9_1gfm_2gfl's / wscc9_3gfm's own docstrings: a GFM slack isn't
-    # wired up in interconnect/network_assembly.py yet, and should fail
-    # this way (a controlled NotImplementedError -> HTTP 501 at the API
-    # layer), not silently produce a wrong linearization.
+def test_gfm_slack_variants_linearize(name):
+    """A network whose slack is a grid-forming converter -- no synchronous
+    machine anywhere -- linearizes now that the reference frame is a block of
+    its own (components/frame.py) instead of being read off the slack unit."""
     net = GFM_SLACK_VARIANTS[name]()
+    system = linearize_network(net, run_power_flow(net))
+    modal = analyze(system.A, system.state_names)
+    assert np.all(np.isfinite(modal.eigenvalues))
+    assert "theta_{Frame}" in system.state_names
+
+
+@pytest.mark.parametrize("name", GFM_SLACK_VARIANTS)
+def test_gfm_slack_variants_need_a_frame_of_their_own(name):
+    # The MATLAB-compatible frame *is* the slack unit, and only a synchronous
+    # machine or an infinite bus is wired up to play that part -- a controlled
+    # NotImplementedError (HTTP 501 at the API layer), not a wrong model.
+    net = GFM_SLACK_VARIANTS[name]()
+    net.frame_follows_slack = True
     result = run_power_flow(net)
     with pytest.raises(NotImplementedError):
         linearize_network(net, result)

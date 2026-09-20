@@ -14,14 +14,17 @@ connects to which) doesn't care whether a block is linear or not.
 
 from __future__ import annotations
 
-from g2elin_core.network.breakers import TYPE_LABEL, block_labels
+from g2elin_core.network.breakers import TYPE_LABEL, block_labels, service_state
 from g2elin_core.network.schema import Network
 
 from .assemble import AssembledSystem, Block, PortSpec, Wiring, assemble
 
-_KIND_BY_UNIT_TYPE = {"sm": "sm", "gfm": "gfm", "gfl": "gfl"}
+_KIND_BY_UNIT_TYPE = {"sm": "sm", "gfm": "gfm", "gfl": "gfl", "infinite_bus": "ib"}
 _SLACK_KIND_BY_UNIT_TYPE = {"sm": "sm_slack", "infinite_bus": "ib_slack"}
 _TYPE_LABEL = TYPE_LABEL
+# The output a unit's own frame follows (an infinite bus has none: its frame
+# simply turns at the fixed speed of its source).
+_SPEED_OUTPUT = {"sm": "w_r", "gfm": "w", "gfl": "w_pll"}
 
 
 def build_blocks_and_wiring(
@@ -31,11 +34,31 @@ def build_blocks_and_wiring(
     node_components: dict[int, PortSpec],
     line_components: list[PortSpec],
     load_components: list[PortSpec],
+    frame_components: dict[int, PortSpec] | None = None,
 ) -> tuple[list[Block], list[Wiring]]:
-    slack_der = next(d for d in network.der_units if d.bus_type.value == "slack")
-    if slack_der.unit_type.value not in _SLACK_KIND_BY_UNIT_TYPE:
-        raise NotImplementedError("only a synchronous-machine or infinite-bus slack is wired up so far")
-    slack_kind = _SLACK_KIND_BY_UNIT_TYPE[slack_der.unit_type.value]
+    """Wires one network's components together.
+
+    ``frame_components`` (see ``components/frame.py``) are the dq reference
+    frames everything is written in, one per island, keyed by the unit that
+    island is referenced to. Each frame is a block of its own, following that
+    unit's speed, so no unit is load-bearing for the model: any of them can
+    be disconnected, and islands each keep their own frequency. Without them
+    the frame is the slack unit itself (``Network.frame_follows_slack``, the
+    MATLAB toolbox's convention), which then has to be a synchronous machine
+    or an infinite bus and can never leave the model.
+    """
+    # Only the MATLAB-compatible frame needs a slack unit: it *is* the frame.
+    # With frames of their own a network needn't name one at all -- which is
+    # what a mid-run trip of the slack leaves behind (timedomain/events.py).
+    slack_der = next((d for d in network.der_units if d.bus_type.value == "slack"), None)
+    if not frame_components and slack_der is None:
+        raise ValueError("a network whose frame follows its slack unit must have one")
+    if not frame_components and slack_der.unit_type.value not in _SLACK_KIND_BY_UNIT_TYPE:
+        raise NotImplementedError(
+            "with the frame tied to the slack unit only a synchronous-machine or infinite-bus slack is "
+            "wired up; switch Network.frame_follows_slack off to use a frame of its own"
+        )
+    slack_kind = _SLACK_KIND_BY_UNIT_TYPE.get(slack_der.unit_type.value) if slack_der else None
 
     missing = {d.id for d in network.der_units} - der_components.keys()
     if missing:
@@ -56,8 +79,18 @@ def build_blocks_and_wiring(
     labels = block_labels(network)
     der_blocks: dict[int, Block] = {}
     for der in network.der_units:
-        kind = slack_kind if der.id == slack_der.id else _KIND_BY_UNIT_TYPE[der.unit_type.value]
+        owns_frame = not frame_components and der.id == slack_der.id
+        kind = slack_kind if owns_frame else _KIND_BY_UNIT_TYPE[der.unit_type.value]
         der_blocks[der.id] = Block(name=labels.der[der.id], kind=kind, comp=der_components[der.id])
+
+    # One frame per island, named for its reference unit when there are
+    # several ("Frame" stays "Frame" while the network is in one piece).
+    frame_blocks: dict[int, Block] = {}
+    if frame_components:
+        several = len(frame_components) > 1
+        for ref_id, comp in frame_components.items():
+            name = f"Frame_{labels.der[ref_id]}" if several else "Frame"
+            frame_blocks[ref_id] = Block(name=name, kind="frame", comp=comp)
 
     node_blocks: dict[int, Block] = {
         bus_id: Block(name=f"Nd_{bus_id}", kind="node", comp=comp)
@@ -73,26 +106,58 @@ def build_blocks_and_wiring(
     # Order matches script_generic.m's concatenation order: slack, other DGs,
     # nodes, lines, loads. Only cosmetic (state/output ordering), not required
     # for correctness, but kept for easy visual comparison with a MATLAB run.
-    ordered_ders = [slack_der] + [d for d in network.der_units if d.id != slack_der.id]
+    ordered_ders = ([slack_der] if slack_der else []) + [
+        d for d in network.der_units if slack_der is None or d.id != slack_der.id
+    ]
     blocks = (
-        [der_blocks[d.id] for d in ordered_ders]
+        list(frame_blocks.values())
+        + [der_blocks[d.id] for d in ordered_ders]
         + [node_blocks[b.id] for b in network.buses if b.id in node_blocks]
         + line_blocks
         + load_blocks
     )
 
-    slack_block = der_blocks[slack_der.id]
     transformer_by_lv_bus = {tr.lv_bus: tr for tr in network.transformers}
     wiring: list[Wiring] = []
 
-    # theta_g / wg: every non-slack DG's theta_g, and every node/line/load's
-    # wg, equals the slack unit's own theta / wr.
+    # Which frame each bus belongs to: its island's (the slack unit's own
+    # block in the MATLAB-compatible mode, where there is only ever one).
+    if frame_blocks:
+        island_of_bus: dict[int, Block] = {}
+        for island in service_state(network).islands:
+            frame = frame_blocks.get(island.reference)
+            if frame is None:  # an island of a network built without one (shouldn't happen)
+                frame = next(iter(frame_blocks.values()))
+            for bus_id in island.buses:
+                island_of_bus[bus_id] = frame
+        frame_of = lambda bus_id: island_of_bus.get(bus_id, next(iter(frame_blocks.values())))  # noqa: E731
+        # Each frame follows the speed of the unit its island is referenced to
+        # (an infinite-bus reference turns at its own fixed speed: no input).
+        for ref_id, frame in frame_blocks.items():
+            speed = _SPEED_OUTPUT.get(next(d.unit_type.value for d in network.der_units if d.id == ref_id))
+            if speed is not None:
+                wiring.append(Wiring(frame, "w_in", [(der_blocks[ref_id], speed, 1.0)]))
+    else:
+        slack_block = der_blocks[slack_der.id]
+        frame_of = lambda bus_id: slack_block  # noqa: E731
+
+    # theta_g / wg: every unit that doesn't own the frame reads its angle, and
+    # every node/line/load (and an infinite bus, for its own rotational terms)
+    # its speed.
     for der in network.der_units:
-        if der.id == slack_der.id:
+        if not frame_blocks and slack_der is not None and der.id == slack_der.id:
             continue
-        wiring.append(Wiring(der_blocks[der.id], "theta_g", [(slack_block, "theta", 1.0)]))
-    for b in list(node_blocks.values()) + line_blocks + load_blocks:
-        wiring.append(Wiring(b, "wg", [(slack_block, "wr", 1.0)]))
+        db = der_blocks[der.id]
+        frame = frame_of(der.bus)
+        wiring.append(Wiring(db, "theta_g", [(frame, "theta", 1.0)]))
+        if db.kind == "ib":
+            wiring.append(Wiring(db, "wg", [(frame, "wr", 1.0)]))
+    for bus_id, b in node_blocks.items():
+        wiring.append(Wiring(b, "wg", [(frame_of(bus_id), "wr", 1.0)]))
+    for ln, b in zip(network.lines, line_blocks):
+        wiring.append(Wiring(b, "wg", [(frame_of(ln.from_bus), "wr", 1.0)]))
+    for ld, b in zip(network.loads, load_blocks):
+        wiring.append(Wiring(b, "wg", [(frame_of(ld.bus), "wr", 1.0)]))
 
     # DG voltage input = its raw node's voltage output.
     for der in network.der_units:
@@ -151,6 +216,7 @@ def assemble_network(
     node_components: dict[int, PortSpec],
     line_components: list[PortSpec],
     load_components: list[PortSpec],
+    frame_components: dict[int, PortSpec] | None = None,
 ) -> AssembledSystem:
     blocks, wiring = build_blocks_and_wiring(
         network,
@@ -158,5 +224,6 @@ def assemble_network(
         node_components=node_components,
         line_components=line_components,
         load_components=load_components,
+        frame_components=frame_components,
     )
     return assemble(blocks, wiring)

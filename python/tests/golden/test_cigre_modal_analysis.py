@@ -6,6 +6,7 @@ first to exercise GFM and GFL in the interconnection (WSCC-9/3SM is SM-only).
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from g2elin_core.network.presets import cigre_islanded_1sm_2gfm_1gfl
@@ -30,7 +31,8 @@ def modal(system):
 def test_state_count(system):
     # 1 SM x 19 (PSS on) + 2 GFM x 15 (Droop) + 1 GFL x 14
     # + 14 nodes x 2 + 13 lines x 2 + 13 loads x 2
-    expected = 19 + 2 * 15 + 14 + 14 * 2 + 13 * 2 + 13 * 2
+    # + 1 for the reference frame's own angle (components/frame.py)
+    expected = 19 + 2 * 15 + 14 + 14 * 2 + 13 * 2 + 13 * 2 + 1
     assert system.A.shape == (expected, expected)
 
 
@@ -44,7 +46,14 @@ def test_no_nan_or_inf(system):
 
 
 def test_system_is_stable(modal):
-    assert (modal.eigenvalues.real < 1e-6).all()
+    # Excluding the reference-angle modes, which are the model's own free
+    # coordinates and sit on the imaginary axis by construction (they land a
+    # hair either side of it numerically) -- see modal.reference_angle_modes.
+    from g2elin_core.modal import reference_angle_modes
+
+    ref = set(reference_angle_modes(modal))
+    physical = [z for j, z in enumerate(modal.eigenvalues) if j not in ref]
+    assert len(ref) == 2 and (np.array(physical).real < 1e-6).all()
 
 
 def test_participation_columns_sum_to_one(modal):

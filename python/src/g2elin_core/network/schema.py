@@ -152,6 +152,13 @@ class Network(BaseModel):
         "transformer impedance (script_generic.m's Y_TR(1,:) convention) instead of its own. Off by "
         "default, so power flow and the dynamic models see the same transformer.",
     )
+    frame_follows_slack: bool = Field(
+        default=False,
+        description="MATLAB-compatible mode: the dynamic models' common dq frame turns with the slack "
+        "unit's own speed (script_generic.m's convention) instead of standing on its own at nominal speed. "
+        "Off by default, so any unit -- the slack included -- can be disconnected and a network can be "
+        "split into islands (see components/frame.py).",
+    )
     buses: list[Bus]
     lines: list[Line] = Field(default_factory=list)
     transformers: list[Transformer] = Field(default_factory=list)

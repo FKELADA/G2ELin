@@ -78,7 +78,9 @@ const ModalPage = {
 
   renderStatus() {
     const m = state.modal.data;
-    $("#modal-status").innerHTML = `${m.n_states} states · ${m.stable ? '<span class="ok">small-signal stable</span>' : '<span class="bad">unstable</span>'} · max Re(λ) = ${m.max_real_part.toExponential(3)}`;
+    const ref = (m.reference_modes || []).length;
+    $("#modal-status").innerHTML = `${m.n_states} states · ${m.stable ? '<span class="ok">small-signal stable</span>' : '<span class="bad">unstable</span>'} · max Re(λ) = ${m.max_real_part.toExponential(3)}`
+      + (ref ? ` · <span class="muted" title="Nothing pins the absolute position of the dq frame, so the model always has a marginal direction: turn every angle by the same amount and nothing physical changes. These modes sit at the origin by construction and are left out of the verdict above.">${ref} reference-angle mode${ref > 1 ? "s" : ""} (λ ≈ 0, not counted)</span>` : "");
   },
 
   sortedModes() { return [...state.modal.data.modes].sort((a, b) => b.real - a.real); },

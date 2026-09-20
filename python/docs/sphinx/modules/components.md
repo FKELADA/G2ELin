@@ -93,7 +93,8 @@ flowchart LR
         sm["sm.py<br/>synchronous machine"]
         gfm["gfm.py<br/>grid-forming (Droop)"]
         gfl["gfl.py<br/>grid-following"]
-        ib["ib.py<br/>infinite bus (always the slack)"]
+        ib["ib.py<br/>infinite bus"]
+        frame["frame.py<br/>reference frame"]
         line["line.py"]
         node["node.py"]
         load["load.py"]
@@ -143,17 +144,24 @@ source's own dq-frame formulation:
   symbol below is exactly the sympy symbol name used in the code, just
   set in math instead of `snake_case` (e.g. `Dwr` → $\Delta\omega_r$,
   `phi_d` → $\psi_d$, `theta_g` → $\theta_g$).
-- Two reference frames are in play. A **global** dq frame rotates at the
-  slack unit's own instantaneous speed and is pinned to the slack's own
-  angle ($\theta_g$); every node, line, and load lives directly in this
-  frame (their own states already carry a `_g` suffix). Each DER
-  (SM/GFM/GFL) instead has its **own** rotating frame, at its own angle
-  $\theta$ (SM) or $\theta$ (GFM) or $\theta_{pll}$ (GFL, PLL-locked) —
-  the algebraic equations below rotate a DER's own terminal quantities
-  into/out of the global frame by the angle difference $\theta_g - \theta$.
-  The infinite bus is the one exception: an IB is always the slack itself
-  ({doc}`ib.py <components>`), so its own frame *is* the global frame and
-  no rotation appears in its equations.
+- Two reference frames are in play. A **global** dq frame carries every
+  node, line and load (their states already have a `_g` suffix), turning at
+  $\omega_g$ with angle $\theta_g$. Each DER (SM/GFM/GFL/IB) instead has its
+  **own** rotating frame, at its own angle $\theta$ (SM, GFM), $\theta_{pll}$
+  (GFL, PLL-locked) or $\theta_{up}$ (IB) — the algebraic equations below
+  rotate a DER's own terminal quantities into and out of the global frame by
+  the angle difference $\theta_g - \theta$.
+- The global frame is a **block of its own** ({doc}`frame.py <components>`):
+  one state, the frame angle, following the speed of the unit its island is
+  referenced to, and nothing else. It replaces the toolbox's convention of
+  reading $\theta_g$/$\omega_g$ off the slack unit, which made that unit
+  impossible to disconnect: with the frame standing apart, any unit can be
+  tripped and a network can split into islands, each with its own frame and
+  its own frequency. `Network.frame_follows_slack` restores the old wiring,
+  where the slack unit itself is the frame and has to be a synchronous
+  machine or an infinite bus. The two give the same modes (checked to 1e-5
+  relative in `tests/test_breakers.py`) and, being only a change of
+  coordinates, the same nonlinear trajectories.
 
 A state's time derivative is written $\dot x$ throughout; every equation
 below carries an explicit $\omega_b$ (`wb`, the base angular frequency,
@@ -631,6 +639,10 @@ substitution and inversion, same result either way).
 
 ```{eval-rst}
 .. automodule:: g2elin_core.components.ib
+```
+
+```{eval-rst}
+.. automodule:: g2elin_core.components.frame
 ```
 
 ```{eval-rst}

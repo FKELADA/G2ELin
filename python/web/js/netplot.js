@@ -317,7 +317,13 @@ function elementTooltip(sel) {
     const rows = [["Bus id", b.id], ["Nominal voltage", `${fmt(b.vn_kv, 2)} kV`]];
     if (!sv.energized.has(b.id)) rows.push(["State", "de-energized (open breakers)"]);
     const der = net.der_units.find(d => d.bus === b.id);
-    if (der) rows.push({ sep: UNIT_NAME[der.unit_type] || der.unit_type }, ["Bus type", der.bus_type], ["P set", `${fmt(der.p_set_mw, 3)} MW`], ["Q set", `${fmt(der.q_set_mvar, 3)} MVAr`], ["V set", `${fmt(der.v_set_pu, 3)} pu`], ["Breaker", der.closed === false ? "open" : "closed"]);
+    if (der) {
+      rows.push({ sep: UNIT_NAME[der.unit_type] || der.unit_type }, ["Bus type", der.bus_type]);
+      // Which unit each island is solved against can differ from the
+      // designated slack once breakers are open (see serviceState).
+      if (sv.references.includes(der.id)) rows.push(["Role", sv.references.length > 1 ? "reference of its island" : "reference (slack)"]);
+      rows.push(["P set", `${fmt(der.p_set_mw, 3)} MW`], ["Q set", `${fmt(der.q_set_mvar, 3)} MVAr`], ["V set", `${fmt(der.v_set_pu, 3)} pu`], ["Breaker", der.closed === false ? "open" : "closed"]);
+    }
     const loads = net.loads.map((l, i) => [l, i]).filter(([l]) => l.bus === b.id);
     if (loads.length) {
       rows.push({ sep: `Load${loads.length > 1 ? "s" : ""}` });

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 import pandapower as pp
 import pandas as pd
 
-from g2elin_core.network.breakers import SlackDisconnected, service_state
+from g2elin_core.network.breakers import NoReferenceUnit, service_state
 from g2elin_core.network.schema import BusType, Network, UnitType
 
 _LARGE_Q_LIMIT_MVAR = 9999.0  # matches Power_Fl.m's default qg_max/qg_min when unspecified
@@ -32,13 +32,18 @@ def build_pandapower_net(network: Network) -> tuple[pp.pandapowerNet, dict[int, 
     Elements switched out by open breakers (see ``network.breakers``) are
     created but marked out of service, and de-energized buses too, so every
     result table keeps the network's own element order.
+
+    Each energized island gets its own reference (``ext_grid``), as every
+    load-flow tool requires -- the designated slack in its own island, the
+    largest grid former in any other (``breakers.service_state``).
     """
     st = service_state(network)
-    if not st.slack_connected:
-        raise SlackDisconnected(
-            "the slack unit's breaker is open -- the power flow has no reference; close it, or make "
-            "another unit the slack"
+    if not st.references:
+        raise NoReferenceUnit(
+            "the power flow has no reference: open breakers have left no synchronous machine, grid-forming "
+            "converter or infinite bus in service to set a voltage and a frequency"
         )
+    references = set(st.references)
     net = pp.create_empty_network(name=network.name, f_hz=network.f_hz, sn_mva=network.sn_mva)
 
     bus_index: dict[int, int] = {
@@ -101,7 +106,9 @@ def build_pandapower_net(network: Network) -> tuple[pp.pandapowerNet, dict[int, 
         b = bus_index[der.bus]
         name = f"der{der.id}"
         on = st.der_units[der.id]
-        if der.bus_type is BusType.SLACK:
+        if der.id in references:
+            # This island's reference: a slack bus for it, whatever the unit's
+            # own declared bus type (it may be a PV machine picking up the role).
             pp.create_ext_grid(net, bus=b, vm_pu=der.v_set_pu, va_degree=0.0, name=name)
         elif der.bus_type is BusType.PV:
             pp.create_gen(

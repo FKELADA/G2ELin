@@ -236,6 +236,20 @@ persisted server-side. Always light-themed.
   names keep the full network's numbers (line #3 is always `Ln_4`, the
   second SM always `SM_2`; `breakers.BlockLabels`). A unit that is out of
   service takes its own transformer and terminal bus with it.
+  **Any breaker may be opened, the slack unit's included.** Open breakers
+  split the network into islands, and each island that still holds a unit
+  able to set a voltage and a frequency — a synchronous machine, a
+  grid-forming converter or an infinite bus — is solved against its own
+  reference (its own `ext_grid`), as every load-flow tool requires: the
+  designated slack keeps the role in its island, otherwise the largest grid
+  former takes it. An island left with only grid-following converters and
+  loads is blacked out, since a grid-following converter can only follow a
+  voltage, never start one (and anti-islanding protection would trip it).
+  Only a network with no grid former left at all is an error. In the dynamic
+  models this works because the reference frame is a block of its own
+  ({doc}`frame.py <modules/components>`), one per island, so no unit is
+  load-bearing for the model — EMT can trip the slack and watch the rest
+  island and drift to its own frequency.
 - **Power Flow** — solver (`nr`, `iwamoto_nr`, `fdbx`, `fdxb`, `gs`,
   `bfsw`), max iterations, tolerance and initialisation, passed to
   `pandapower.runpp`. The network diagram is shown before any run;

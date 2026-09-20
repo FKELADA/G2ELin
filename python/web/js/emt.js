@@ -119,9 +119,9 @@ const EmtPage = {
     const keep = (sel, html) => { const prev = sel.value; sel.innerHTML = html; if ([...sel.options].some(o => o.value === prev)) sel.value = prev; };
     const unitByBus = Object.fromEntries(net.der_units.map(d => [d.bus, d]));
     const lines = net.lines.map((l, i) => [l, i]).filter(([, i]) => sv.lines[i]);
-    const trs = net.transformers.map((t, i) => [t, i]).filter(([t, i]) => sv.transformers[i] && unitByBus[t.lv_bus] && unitByBus[t.lv_bus].bus_type !== "slack" && sv.units[unitByBus[t.lv_bus].id]);
+    const trs = net.transformers.map((t, i) => [t, i]).filter(([t, i]) => sv.transformers[i] && unitByBus[t.lv_bus] && sv.units[unitByBus[t.lv_bus].id]);
     const loads = net.loads.map((l, i) => [l, i]).filter(([, i]) => sv.loads[i]);
-    const units = net.der_units.filter(d => d.bus_type !== "slack" && sv.units[d.id]);
+    const units = net.der_units.filter(d => sv.units[d.id]);
     keep($("#emt-ev-breaker"),
       (lines.length ? `<optgroup label="Lines">${lines.map(([l, i]) => `<option value="line:${i}">Line #${i} (${l.from_bus} → ${l.to_bus})${l.name ? ` ${esc(l.name)}` : ""}</option>`).join("")}</optgroup>` : "")
       + (trs.length ? `<optgroup label="Unit transformers">${trs.map(([t, i]) => `<option value="transformer:${i}">Transformer #${i} (${t.hv_bus} → ${t.lv_bus}) — trips unit ${unitByBus[t.lv_bus].id}</option>`).join("")}</optgroup>` : "")
@@ -130,10 +130,10 @@ const EmtPage = {
     keep($("#emt-ev-load"), loads.map(([l, i]) => `<option value="${i}">Load #${i} at bus ${l.bus} (${fmtSmart(l.p_mw)} MW, ${fmtSmart(l.q_mvar)} MVAr)</option>`).join(""));
     // Phase-jump buses: the network buses (a unit's own terminal bus is inside
     // its model), plus the infinite bus's source.
-    const slack = net.der_units.find(d => d.bus_type === "slack");
+    const ibs = net.der_units.filter(d => d.unit_type === "infinite_bus" && sv.units[d.id]);
     const nodes = net.buses.filter(b => !unitByBus[b.id] && sv.energized.has(b.id));
     keep($("#emt-ev-bus"),
-      (slack && slack.unit_type === "infinite_bus" ? `<option value="${slack.bus}">Infinite-bus source (bus ${slack.bus})</option>` : "")
+      ibs.map(d => `<option value="${d.bus}">Infinite-bus source (unit ${d.id}, bus ${d.bus})</option>`).join("")
       + nodes.map(b => `<option value="${b.id}">Bus ${b.id}${b.name ? ` (${esc(b.name)})` : ""}</option>`).join(""));
     this.showEventFields();
   },
@@ -142,7 +142,7 @@ const EmtPage = {
     const kind = $("#emt-ev-kind").value;
     $$("#emt-event-box [data-ev]").forEach(f => { f.style.display = f.dataset.ev === kind ? "" : "none"; });
     $("#emt-ev-note").textContent = {
-      breaker: "The element is disconnected at T0 and the simulation continues with the rest of the network, from the pre-event state and with unchanged setpoints. Whatever the opening islands keeps running on its own (a load-only island decays). Opening a unit transformer trips its unit. The slack can't be tripped (it is the reference frame).",
+      breaker: "The element is disconnected at T0 and the simulation continues with the rest of the network, from the pre-event state and with unchanged setpoints. Whatever the opening islands keeps running on its own, at its own frequency (a load-only island decays). Opening a unit transformer trips its unit. Any unit can be tripped, the power flow's slack included — the reference frame is a block of its own.",
       load_step: "The load's P and Q change by these percentages at T0 (as a constant impedance: at the operating-point voltage). To disconnect a load, use a breaker opening.",
       phase_jump: "At a network bus: the bus voltage phasor is rotated instantaneously (its shunt capacitor's state). At the infinite-bus source: the source's voltage angle jumps — the usual grid-code phase-jump test. A phase jump only moves the initial state, so the linearised model can reproduce it.",
     }[kind];

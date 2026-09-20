@@ -1,4 +1,4 @@
-from .analysis import ModalAnalysisResult, analyze
+from .analysis import reference_angle_modes, ModalAnalysisResult, analyze
 from .toolbox import (
     ModeShapeResult,
     SensitivityEntry,

@@ -1,0 +1,72 @@
+/* The Read the Docs theme caps the text column at 800px, which leaves half of
+   a modern screen empty, and its tables use white-space: nowrap, so a wide
+   cell pushes the table out of the page. Loaded only by the published
+   (rtd) build -- see conf.py. */
+
+/* Use the screen: the column grows with the window, up to a comfortable limit
+   for very wide monitors. */
+.wy-nav-content {
+  max-width: min(1500px, 100%);
+}
+
+/* Let table cells wrap instead of forcing the table wider than its column. */
+.wy-table-responsive table td,
+.wy-table-responsive table th,
+.rst-content table.docutils td,
+.rst-content table.docutils th {
+  white-space: normal;
+}
+.rst-content table.docutils {
+  width: 100%;
+  table-layout: auto;
+}
+.wy-table-responsive {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+/* Long words, identifiers and inline code break rather than overflow. */
+.rst-content p,
+.rst-content li,
+.rst-content td,
+.rst-content th,
+.rst-content dd,
+.rst-content code,
+.rst-content .literal {
+  overflow-wrap: anywhere;
+}
+
+/* Code blocks scroll inside their box. */
+.rst-content div[class^="highlight"],
+.rst-content pre.literal-block {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* Display equations scroll inside their box instead of running out of it --
+   both MathJax's own container and the block-level span Sphinx wraps a
+   display equation in (a long state vector is wider than a phone). */
+mjx-container[display="true"],
+.rst-content div.math {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+/* Inline math too: normally short, and left alone, but one that is wider than
+   the column (a long state vector) scrolls inside it rather than pushing the
+   whole page sideways. */
+.rst-content span.math {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  vertical-align: middle;
+}
+
+/* Diagrams and images never exceed the column. */
+.rst-content img,
+.rst-content .mermaid svg {
+  max-width: 100%;
+  height: auto;
+}

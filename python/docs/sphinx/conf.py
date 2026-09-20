@@ -112,6 +112,8 @@ if html_theme == "sphinx_rtd_theme":
         "github_version": "python-migration",
         "conf_py_path": "/python/docs/sphinx/",
     }
+    # Wider text column and wrapping tables (the theme's own are narrow).
+    html_css_files = ["rtd_wide.css"]
 html_static_path = ["_static"] if Path(__file__).resolve().parent.joinpath("_static").is_dir() else []
 
 # Mermaid diagrams render client-side via mermaid.js (loaded from a CDN by

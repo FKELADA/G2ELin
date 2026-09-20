@@ -51,6 +51,12 @@ myst_all_links_external = True
 # tools/build_docs.py -- "off" renders exactly those already-baked
 # outputs rather than re-running a multi-minute EMT simulation on
 # every docs build.
+# A notebook saved from VS Code carries its data-wrangler view alongside the
+# ordinary outputs; myst-nb doesn't know that MIME type and says so. The
+# build treats warnings as errors (tools/build_docs.py passes -W), so this
+# one would fail every clean build over something that renders fine.
+suppress_warnings = ["mystnb.unknown_mime_type"]
+
 nb_execution_mode = "off"
 
 templates_path = ["_templates"]

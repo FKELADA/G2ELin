@@ -91,6 +91,14 @@ validator <modules/network>` checks for — see
 
 ```{toctree}
 :maxdepth: 2
+:caption: Getting started
+
+getting_started
+installation
+```
+
+```{toctree}
+:maxdepth: 2
 :caption: Architecture
 
 modules/network

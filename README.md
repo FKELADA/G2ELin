@@ -7,6 +7,29 @@ This repository contains two implementations:
 - **[`matlab/`](matlab/README.md)** — the original MATLAB/Simulink implementation (model library + linearization/modal analysis toolbox).
 - **[`python/`](python/README.md)** — a Python port of the same functionality.
 
+## Try it
+
+**[GETTING_STARTED.md](GETTING_STARTED.md) — three steps, no coding.** Install
+Python, download this repository, then double-click `start-windows.bat`
+(Windows) or run `./start-macos-linux.sh` (macOS/Linux): it sets everything
+up in a private environment inside the folder and opens the web interface at
+<http://127.0.0.1:8000>.
+
+From a command line instead:
+
+```bash
+cd python
+python -m venv .venv
+source .venv/bin/activate                # Windows instead: .venv\Scripts\activate
+pip install -e ".[api,docs]"
+python tools/build_docs.py               # the in-app manual (optional)
+python -m uvicorn g2elin_api.main:app --port 8000
+```
+
+[`python/docs/sphinx/installation.md`](python/docs/sphinx/installation.md)
+has the full setup: the optional extras (`api`, `docs`, `dev`, `notebook`),
+the test suite, the notebooks, troubleshooting and server deployment.
+
 See each directory's README for requirements, installation, and usage instructions specific to that implementation.
 
 ## Copyright and License

@@ -329,6 +329,15 @@ perturbed is never hidden away.
   computes them, so each solved line carries each mode's top
   `sweep.PARTICIPATION_TOP` states (`participation: false` turns this off if
   the stream should stay small; about 14 kB per value for a 78-state model).
+  **Video** records the sweep as it plays: one frame per solved value, the
+  loci growing as the parameter moves, with a caption strip carrying the
+  parameter's value and — when a mode is selected — that mode's frequency and
+  damping, in red once it turns negative. The frames are the page's own plot,
+  serialized exactly as the PNG export is and painted onto a canvas that
+  `MediaRecorder` captures: MP4 where the browser can write it (Chrome,
+  Edge), WebM otherwise. The canvas is repainted while each value is held,
+  since a canvas left untouched emits no frames and the video would come out
+  a fraction of its intended length.
 - **EMT Simulation** — state offset, input step or **network event** at
   T0 = 0, integrated
   with the nonlinear model; plots start 0.01 s before T0 (`t_pre`) so the

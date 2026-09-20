@@ -46,7 +46,7 @@ const RootLocus = {
         </div>
         <div id="rl-progress" style="margin-top:0.8rem"></div>
       </div>
-      <div class="card"><div class="card-title">Root locus <span class="card-sub" id="rl-sub"></span><span class="spacer"></span><button class="ghost small" id="rl-reset">Reset zoom</button></div>
+      <div class="card"><div class="card-title">Root locus <span class="card-sub" id="rl-sub"></span><span class="spacer"></span><button class="ghost small" id="rl-video" title="Record the sweep as a video, one frame per value">Video</button><button class="ghost small" id="rl-reset">Reset zoom</button></div>
         <div class="controls" style="margin-bottom:0.6rem;align-items:center">
           <div class="field"><label for="rl-axes">Axes</label><select id="rl-axes"><option value="symlog">Symlog (all modes)</option><option value="linear">Linear (zoomed region)</option></select></div>
           <div class="field rl-lin"><label for="rl-re0">Real from</label><input type="number" step="any" id="rl-re0"></div>
@@ -64,6 +64,7 @@ const RootLocus = {
       </div>
       <div class="card"><div class="card-title">Most affected modes <span class="card-sub">— click a row to highlight its locus</span></div><div id="rl-table"><p class="empty">No sweep yet.</p></div></div>`;
 
+    $("#rl-video").addEventListener("click", () => this.recordSweep());
     $("#rl-add").addEventListener("click", () => { this.rows.push(this.newRow(this.rows[this.rows.length - 1])); this.renderRows(); });
     $("#rl-run").addEventListener("click", () => this.run());
     $("#rl-stop").addEventListener("click", () => this.controller && this.controller.abort());
@@ -327,7 +328,10 @@ const RootLocus = {
 
   // tracks[k] = [{value, re, im}] -- the k-th mode across the solved steps
   tracks() {
-    const ok = (this.result?.steps || []).filter(s => s.ok);
+    // view.upTo limits the loci to the values solved so far -- how the video
+    // is drawn, frame by frame (recordSweep).
+    const upTo = this.view.upTo;
+    const ok = (this.result?.steps || []).filter(s => s.ok && (upTo === undefined || s.i <= upTo));
     if (!ok.length) return [];
     const n = ok[0].eig.length;
     const tracks = Array.from({ length: n }, () => []);
@@ -577,6 +581,114 @@ const RootLocus = {
     c.setAttribute("cx", this._proj.sx(re).toFixed(1));
     c.setAttribute("cy", this._proj.sy(im).toFixed(1));
     c.setAttribute("opacity", "1");
+  },
+
+  // --- The sweep as a video ---
+  // One frame per solved value, the loci growing as the parameter moves. The
+  // frames are the page's own plot: each one is drawn with view.upTo set,
+  // serialized exactly as the PNG export does (exports.js), and painted onto
+  // a canvas that MediaRecorder is recording. MP4 when the browser can write
+  // it, WebM otherwise -- both play everywhere that matters, and neither
+  // needs anything installed.
+  VIDEO_FPS: 25,          // what the recorder samples the canvas at
+  VIDEO_BUDGET_MS: 9000,  // roughly how long the sweep should take to play
+
+  videoMimeType() {
+    const wanted = [
+      ["video/mp4;codecs=avc1.42E01E", "mp4"], ["video/mp4", "mp4"],
+      ["video/webm;codecs=vp9", "webm"], ["video/webm", "webm"],
+    ];
+    for (const [mime, ext] of wanted) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported(mime)) return { mime, ext };
+    }
+    return null;
+  },
+
+  async recordSweep() {
+    const btn = $("#rl-video");
+    const steps = (this.result?.steps || []).filter(s => s.ok);
+    if (steps.length < 2) { alert("Run a sweep first — a video needs at least two solved values."); return; }
+    const fmt_ = this.videoMimeType();
+    if (!fmt_) { alert("This browser can't record video (MediaRecorder is unavailable)."); return; }
+    const svg = $("#rl-plot svg");
+    if (!svg) return;
+    const vb = svg.viewBox.baseVal;
+    const scale = 1.5;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(vb.width * scale);
+    canvas.height = Math.round((vb.height + 34) * scale);   // room for the caption strip
+    const ctx = canvas.getContext("2d");
+    // A fixed capture rate. The canvas is repainted continuously while a
+    // value is held: pushing frames by hand (captureStream(0) +
+    // requestFrame) dropped half of them, and a canvas left untouched
+    // produces no frames at all, so the video came out at a fraction of its
+    // intended length.
+    const stream = canvas.captureStream(this.VIDEO_FPS);
+    const rec = new MediaRecorder(stream, { mimeType: fmt_.mime, videoBitsPerSecond: 6e6 });
+    const holdMs = Math.max(120, Math.min(400, this.VIDEO_BUDGET_MS / steps.length));
+    const chunks = [];
+    rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+
+    const keepUpTo = this.view.upTo, keepTrack = this.view.track;
+    const label = this.result.labels[0] || "parameter";
+    let paint = () => {};
+    const repaint = setInterval(() => paint(), Math.round(1000 / this.VIDEO_FPS));
+    const draw = async (step, last) => {
+      this.view.upTo = step.i;
+      this.draw();
+      const frameSvg = $("#rl-plot svg");
+      const url = URL.createObjectURL(new Blob([serializeSvg(frameSvg)], { type: "image/svg+xml;charset=utf-8" }));
+      try {
+        const img = new Image();
+        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+        paint = () => {
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, Math.round(vb.width * scale), Math.round(vb.height * scale));
+        // Caption strip: where the parameter is, and how the tracked mode is doing.
+        ctx.fillStyle = "#0b0b0b";
+        ctx.font = `${Math.round(13 * scale)}px "IBM Plex Mono", monospace`;
+        const vals = this.stepValues(step.i).map(([lab, v]) => `${lab.split(" · ").pop()} = ${fmtSmart(v)}`).join("   ");
+        ctx.fillText(`${vals}   ·   value ${step.i + 1}/${this.result.values.length}`, 10 * scale, canvas.height - 12 * scale);
+        if (this.view.track !== null && this.view.track !== undefined) {
+          const eig = step.eig[this.view.track];
+          if (eig) {
+            const [re, im] = eig, wn = Math.hypot(re, im), z = wn ? -100 * re / wn : 0;
+            ctx.fillStyle = z < 0 ? "#d03b3b" : "#52514e";
+            ctx.textAlign = "right";
+            ctx.fillText(`mode ${this.view.track}: ${fmt(Math.abs(im) / (2 * Math.PI), 2)} Hz · damping ${fmt(z, 2)} %`,
+                         canvas.width - 10 * scale, canvas.height - 12 * scale);
+            ctx.textAlign = "left";
+          }
+        }
+        };
+        paint();
+      } finally { URL.revokeObjectURL(url); }
+      await new Promise(r => setTimeout(r, last ? 1600 : holdMs));   // hold the last value longer
+    };
+
+    btn.disabled = true;
+    const was = btn.textContent;
+    try {
+      rec.start();
+      for (let k = 0; k < steps.length; k++) {
+        btn.textContent = `${Math.round((100 * (k + 1)) / steps.length)} %`;
+        await draw(steps[k], k === steps.length - 1);
+      }
+      await new Promise(res => { rec.onstop = res; rec.stop(); });
+      const net = state.networkLabel ? `${state.networkLabel}-` : "";
+      downloadBlob(`${exportSlug(`${net}root-locus-${label}`)}.${fmt_.ext}`, new Blob(chunks, { type: fmt_.mime }));
+    } catch (e) {
+      alert(`Could not record the sweep: ${e.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = was;
+      clearInterval(repaint);
+      this.view.upTo = keepUpTo;
+      this.view.track = keepTrack;
+      this.draw();
+      this.drawParticipation();
+    }
   },
 
   // Modes ranked by how far they move -- the ones this parameter really affects.

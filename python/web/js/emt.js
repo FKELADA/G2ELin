@@ -171,7 +171,7 @@ const EmtPage = {
 
   async onShow() {
     $("#emt-context").innerHTML = networkContextHtml({ plot: true });
-    bindContextPlot();
+    bindContextPlot($("#emt-context"));
     if (!state.network) return;
     if (this.names && this.names.version === state.version) return;
     const sel = $("#emt-perturb");

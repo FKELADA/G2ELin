@@ -513,19 +513,21 @@ function networkContextHtml({ plot = false } = {}) {
     ${out ? `<span class="badge crit" title="Open breakers: these elements (and anything they cut off from the slack) are left out of every analysis">${out} element${out > 1 ? "s" : ""} out of service</span>` : ""}
     <span class="muted" style="font-size:0.8rem;font-family:var(--font-mono)">${n.buses.length} buses · ${n.lines.length} lines · ${n.transformers.length} trafos · ${n.loads.length} loads · ${n.der_units.length} DER</span>
     <span style="flex:1"></span><a href="#/network" style="font-size:0.8rem">Change / edit →</a></div>
-    ${plot ? `<details class="ctx-plot" id="ctx-plot"${ctxPlotOpen ? " open" : ""}><summary>Network diagram</summary><div id="ctx-plot-host"></div>${unitLegendHtml()}</details>` : ""}</div>`;
+    ${plot ? `<details class="ctx-plot"${ctxPlotOpen ? " open" : ""}><summary>Network diagram</summary><div class="ctx-plot-host"></div>${unitLegendHtml()}</details>` : ""}</div>`;
 }
 
 // Read-only diagram inside the context strip: built the first time it is
 // unfolded (a diagram nobody opens costs nothing), breakers still operable.
-function bindContextPlot() {
-  const det = $("#ctx-plot");
+// Scoped to the strip it was rendered into -- every page that shows one has
+// its own, and a page that is merely hidden keeps its copy in the document.
+function bindContextPlot(container) {
+  const det = (container || document).querySelector(".ctx-plot");
   if (!det) return;
   let view = null;
   const show = () => {
     if (!state.network) return;
     if (!view) {
-      view = new NetworkView($("#ctx-plot-host"), {
+      view = new NetworkView(det.querySelector(".ctx-plot-host"), {
         editable: false, tooltip: elementTooltip,
         onBreaker: br => { if (toggleBreaker(br)) view.render(); },
       });

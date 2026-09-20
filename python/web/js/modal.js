@@ -47,7 +47,7 @@ const ModalPage = {
     $("#modal-title").textContent = MODAL_VIEWS[this.view].title;
     $("#modal-desc").textContent = MODAL_VIEWS[this.view].desc;
     $("#modal-context").innerHTML = networkContextHtml({ plot: true });
-    bindContextPlot();
+    bindContextPlot($("#modal-context"));
     this.load(false);
   },
 

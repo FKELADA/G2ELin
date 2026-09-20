@@ -400,7 +400,7 @@ details.card[open] > summary { margin-bottom: 0.8rem; }
 .ctx-plot { margin-top: 0.6rem; border-top: 1px solid var(--border); padding-top: 0.5rem; }
 .ctx-plot > summary { cursor: pointer; font-family: var(--font-mono); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
 .ctx-plot > summary:hover { color: var(--text-primary); }
-.ctx-plot #ctx-plot-host { margin-top: 0.6rem; }
+.ctx-plot .ctx-plot-host { margin-top: 0.6rem; }
 .picker-pop .plist { max-height: 260px; overflow-y: auto; }
 .picker-pop .popt { display: flex; align-items: center; gap: 0.45rem; padding: 0.22rem 0.35rem; border-radius: 5px; font-family: var(--font-mono); font-size: 0.74rem; cursor: pointer; }
 .picker-pop .popt:hover { background: var(--surface-2); }

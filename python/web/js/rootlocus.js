@@ -522,8 +522,12 @@ const RootLocus = {
         <p class="muted" style="font-size:0.72rem;margin:0.6rem 0 0">Top ${d.states.length} states of this mode, in the order of their largest participation over the sweep. Hover a point of its locus to jump to that value.</p>`;
       // Bars are HTML, not a figure the generic export can serialize, so the
       // numbers behind them get their own CSV (exports.js).
-      exportToolbar(box, [["CSV", "Download this mode's participation across the sweep",
-        () => exportCsv(this.participationRows(), exportName(box))]]);
+      exportToolbar(box, [
+        ["CSV", "Download this mode's participation across the sweep",
+          () => exportCsv(this.participationRows(), exportName(box))],
+        ["Video", "Record this mode's participation playing through the sweep",
+          () => this.recordParticipation()],
+      ]);
       box.querySelector('[data-role="close"]').addEventListener("click", () => {
         this.view.track = null; this.draw(); this.drawTable(); this.drawParticipation();
       });
@@ -604,91 +608,159 @@ const RootLocus = {
     return null;
   },
 
-  async recordSweep() {
-    const btn = $("#rl-video");
-    const steps = (this.result?.steps || []).filter(s => s.ok);
-    if (steps.length < 2) { alert("Run a sweep first — a video needs at least two solved values."); return; }
+  // Records a playback: `paint(ctx, k)` draws value k onto the canvas and
+  // returns a repaint function for it. A fixed capture rate, and the canvas
+  // repainted while each value is held -- pushing frames by hand
+  // (captureStream(0) + requestFrame) dropped half of them, and a canvas left
+  // untouched emits no frames at all, which came out as a video a fraction of
+  // its intended length.
+  async recordVideo({ btn, name, width, height, count, paint, done }) {
     const fmt_ = this.videoMimeType();
     if (!fmt_) { alert("This browser can't record video (MediaRecorder is unavailable)."); return; }
-    const svg = $("#rl-plot svg");
-    if (!svg) return;
-    const vb = svg.viewBox.baseVal;
-    const scale = 1.5;
     const canvas = document.createElement("canvas");
-    canvas.width = Math.round(vb.width * scale);
-    canvas.height = Math.round((vb.height + 34) * scale);   // room for the caption strip
+    canvas.width = Math.round(width);
+    canvas.height = Math.round(height);
     const ctx = canvas.getContext("2d");
-    // A fixed capture rate. The canvas is repainted continuously while a
-    // value is held: pushing frames by hand (captureStream(0) +
-    // requestFrame) dropped half of them, and a canvas left untouched
-    // produces no frames at all, so the video came out at a fraction of its
-    // intended length.
-    const stream = canvas.captureStream(this.VIDEO_FPS);
-    const rec = new MediaRecorder(stream, { mimeType: fmt_.mime, videoBitsPerSecond: 6e6 });
-    const holdMs = Math.max(120, Math.min(400, this.VIDEO_BUDGET_MS / steps.length));
+    const rec = new MediaRecorder(canvas.captureStream(this.VIDEO_FPS), {
+      mimeType: fmt_.mime, videoBitsPerSecond: 6e6,
+    });
     const chunks = [];
     rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
-
-    const keepUpTo = this.view.upTo, keepTrack = this.view.track;
-    const label = this.result.labels[0] || "parameter";
-    let paint = () => {};
-    const repaint = setInterval(() => paint(), Math.round(1000 / this.VIDEO_FPS));
-    const draw = async (step, last) => {
-      this.view.upTo = step.i;
-      this.draw();
-      const frameSvg = $("#rl-plot svg");
-      const url = URL.createObjectURL(new Blob([serializeSvg(frameSvg)], { type: "image/svg+xml;charset=utf-8" }));
-      try {
-        const img = new Image();
-        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
-        paint = () => {
-        ctx.fillStyle = "#ffffff";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0, Math.round(vb.width * scale), Math.round(vb.height * scale));
-        // Caption strip: where the parameter is, and how the tracked mode is doing.
-        ctx.fillStyle = "#0b0b0b";
-        ctx.font = `${Math.round(13 * scale)}px "IBM Plex Mono", monospace`;
-        const vals = this.stepValues(step.i).map(([lab, v]) => `${lab.split(" · ").pop()} = ${fmtSmart(v)}`).join("   ");
-        ctx.fillText(`${vals}   ·   value ${step.i + 1}/${this.result.values.length}`, 10 * scale, canvas.height - 12 * scale);
-        if (this.view.track !== null && this.view.track !== undefined) {
-          const eig = step.eig[this.view.track];
-          if (eig) {
-            const [re, im] = eig, wn = Math.hypot(re, im), z = wn ? -100 * re / wn : 0;
-            ctx.fillStyle = z < 0 ? "#d03b3b" : "#52514e";
-            ctx.textAlign = "right";
-            ctx.fillText(`mode ${this.view.track}: ${fmt(Math.abs(im) / (2 * Math.PI), 2)} Hz · damping ${fmt(z, 2)} %`,
-                         canvas.width - 10 * scale, canvas.height - 12 * scale);
-            ctx.textAlign = "left";
-          }
-        }
-        };
-        paint();
-      } finally { URL.revokeObjectURL(url); }
-      await new Promise(r => setTimeout(r, last ? 1600 : holdMs));   // hold the last value longer
-    };
-
+    const holdMs = Math.max(120, Math.min(400, this.VIDEO_BUDGET_MS / count));
+    let frame = () => {};
+    const repaint = setInterval(() => frame(), Math.round(1000 / this.VIDEO_FPS));
     btn.disabled = true;
     const was = btn.textContent;
     try {
       rec.start();
-      for (let k = 0; k < steps.length; k++) {
-        btn.textContent = `${Math.round((100 * (k + 1)) / steps.length)} %`;
-        await draw(steps[k], k === steps.length - 1);
+      for (let k = 0; k < count; k++) {
+        btn.textContent = `${Math.round((100 * (k + 1)) / count)} %`;
+        frame = (await paint(ctx, k)) || frame;
+        frame();
+        await new Promise(r => setTimeout(r, k === count - 1 ? 1600 : holdMs));
       }
       await new Promise(res => { rec.onstop = res; rec.stop(); });
-      const net = state.networkLabel ? `${state.networkLabel}-` : "";
-      downloadBlob(`${exportSlug(`${net}root-locus-${label}`)}.${fmt_.ext}`, new Blob(chunks, { type: fmt_.mime }));
+      downloadBlob(`${exportSlug(name)}.${fmt_.ext}`, new Blob(chunks, { type: fmt_.mime }));
     } catch (e) {
-      alert(`Could not record the sweep: ${e.message}`);
+      alert(`Could not record the video: ${e.message}`);
     } finally {
+      clearInterval(repaint);
       btn.disabled = false;
       btn.textContent = was;
-      clearInterval(repaint);
-      this.view.upTo = keepUpTo;
-      this.view.track = keepTrack;
-      this.draw();
-      this.drawParticipation();
+      done?.();
     }
+  },
+
+  // The sweep itself: the loci growing, value by value, with a caption strip.
+  async recordSweep() {
+    const steps = (this.result?.steps || []).filter(s => s.ok);
+    if (steps.length < 2) { alert("Run a sweep first — a video needs at least two solved values."); return; }
+    const svg = $("#rl-plot svg");
+    if (!svg) return;
+    const vb = svg.viewBox.baseVal, scale = 1.5;
+    const keepUpTo = this.view.upTo, keepTrack = this.view.track;
+    const net = state.networkLabel ? `${state.networkLabel}-` : "";
+    await this.recordVideo({
+      btn: $("#rl-video"),
+      name: `${net}root-locus-${this.result.labels[0] || "sweep"}`,
+      width: vb.width * scale,
+      height: (vb.height + 34) * scale,   // room for the caption strip
+      count: steps.length,
+      done: () => {
+        this.view.upTo = keepUpTo;
+        this.view.track = keepTrack;
+        this.draw();
+        this.drawParticipation();
+      },
+      paint: async (ctx, k) => {
+        const step = steps[k];
+        this.view.upTo = step.i;
+        this.draw();
+        const url = URL.createObjectURL(new Blob([serializeSvg($("#rl-plot svg"))], { type: "image/svg+xml;charset=utf-8" }));
+        try {
+          const img = new Image();
+          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+          const W = Math.round(vb.width * scale), H = Math.round((vb.height + 34) * scale);
+          return () => {
+            ctx.fillStyle = "#ffffff";
+            ctx.fillRect(0, 0, W, H);
+            ctx.drawImage(img, 0, 0, W, Math.round(vb.height * scale));
+            ctx.fillStyle = "#0b0b0b";
+            ctx.font = `${Math.round(13 * scale)}px "IBM Plex Mono", monospace`;
+            const vals = this.stepValues(step.i).map(([lab, v]) => `${lab.split(" · ").pop()} = ${fmtSmart(v)}`).join("   ");
+            ctx.fillText(`${vals}   ·   value ${step.i + 1}/${this.result.values.length}`, 10 * scale, H - 12 * scale);
+            const tracked = this.view.track;
+            const eig = tracked === null || tracked === undefined ? null : step.eig[tracked];
+            if (eig) {
+              const [re, im] = eig, wn = Math.hypot(re, im), z = wn ? -100 * re / wn : 0;
+              ctx.fillStyle = z < 0 ? "#d03b3b" : "#52514e";
+              ctx.textAlign = "right";
+              ctx.fillText(`mode ${tracked}: ${fmt(Math.abs(im) / (2 * Math.PI), 2)} Hz · damping ${fmt(z, 2)} %`,
+                           W - 10 * scale, H - 12 * scale);
+              ctx.textAlign = "left";
+            }
+          };
+        } finally { URL.revokeObjectURL(url); }
+      },
+    });
+  },
+
+  // The participation panel playing through the sweep. Its bars are HTML, so
+  // the frames are drawn straight onto the canvas rather than serialized.
+  async recordParticipation() {
+    const d = this.part;
+    if (!d || d.pts.length < 2) { alert("Select a mode first — a video needs at least two solved values."); return; }
+    const names = this.result.stateNames;
+    const S = 2;                                   // drawn at twice the size
+    const rowH = 26, top = 92, labelW = 250, valueW = 72, pad = 16;
+    const W = 900, H = top + d.states.length * rowH + pad;
+    const net = state.networkLabel ? `${state.networkLabel}-` : "";
+    const keepStep = d.step;
+    this.pauseParticipation();
+    await this.recordVideo({
+      btn: $('#rl-part .fig-tools button:last-child'),
+      name: `${net}mode-${d.k}-participation`,
+      width: W * S, height: H * S,
+      count: d.pts.length,
+      done: () => this.setParticipationStep(keepStep),
+      paint: (ctx, k) => {
+        const pt = d.pts[k], vals = d.at[k];
+        const [re, im] = pt.eig, wn = Math.hypot(re, im), z = wn ? -100 * re / wn : 0;
+        return () => {
+          ctx.save();
+          ctx.scale(S, S);
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, W, H);
+          ctx.fillStyle = "#0b0b0b";
+          ctx.font = '600 19px "IBM Plex Sans", system-ui, sans-serif';
+          ctx.fillText(`Mode ${d.k} — participation`, pad, 30);
+          ctx.font = '13px "IBM Plex Mono", monospace';
+          ctx.fillStyle = "#52514e";
+          const vs = this.stepValues(pt.i).map(([lab, v]) => `${lab.split(" · ").pop()} = ${fmtSmart(v)}`).join("   ");
+          ctx.fillText(`${vs}   ·   value ${pt.i + 1}/${this.result.values.length}`, pad, 54);
+          ctx.fillStyle = z < 0 ? "#d03b3b" : "#52514e";
+          ctx.fillText(`${fmt(Math.abs(im) / (2 * Math.PI), 3)} Hz · damping ${fmt(z, 2)} %`, pad, 76);
+          d.states.forEach((si, i) => {
+            const y = top + i * rowH, v = vals[i] || 0;
+            ctx.font = '12px "IBM Plex Mono", monospace';
+            ctx.fillStyle = "#52514e";
+            ctx.textAlign = "right";
+            ctx.fillText(names[si], labelW, y + 13);
+            ctx.textAlign = "left";
+            const x0 = labelW + 14, trackW = W - x0 - valueW - pad;
+            ctx.fillStyle = "#f7f6f3";
+            ctx.fillRect(x0, y + 2, trackW, 15);
+            ctx.fillStyle = "#2a78d6";
+            ctx.fillRect(x0, y + 2, Math.max(0, (v / d.max) * trackW), 15);
+            ctx.fillStyle = "#898781";
+            ctx.textAlign = "right";
+            ctx.fillText(v ? v.toFixed(3) : "—", W - pad, y + 13);
+            ctx.textAlign = "left";
+          });
+          ctx.restore();
+        };
+      },
+    });
   },
 
   // Modes ranked by how far they move -- the ones this parameter really affects.

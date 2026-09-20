@@ -337,7 +337,11 @@ perturbed is never hidden away.
   `MediaRecorder` captures: MP4 where the browser can write it (Chrome,
   Edge), WebM otherwise. The canvas is repainted while each value is held,
   since a canvas left untouched emits no frames and the video would come out
-  a fraction of its intended length.
+  a fraction of its intended length. The participation panel records the same
+  way (**Video** beside its CSV): its bars are HTML rather than a figure, so
+  those frames are drawn straight onto the canvas -- the state names, the
+  bars and their values, over the parameter, frequency and damping of that
+  value.
 - **EMT Simulation** — state offset, input step or **network event** at
   T0 = 0, integrated
   with the nonlinear model; plots start 0.01 s before T0 (`t_pre`) so the

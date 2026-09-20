@@ -374,10 +374,18 @@ details.card[open] > summary { margin-bottom: 0.8rem; }
 .picker .pchip button { background: none; border: 0; color: var(--text-muted); padding: 0 0.2rem; font-size: 0.85rem; line-height: 1; }
 .picker .padd { font-size: 0.74rem; padding: 0.18rem 0.5rem; background: none; color: var(--accent); border: 1px dashed rgba(42,120,214,0.5); font-weight: 500; }
 .picker-pop {
-  position: absolute; z-index: 60; top: calc(100% + 4px); left: 0; width: 320px; max-width: 80vw;
+  position: absolute; z-index: 60; top: calc(100% + 4px); left: 0; width: 360px; max-width: 80vw;
   background: var(--surface-1); border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,0.14); padding: 0.5rem;
 }
 .picker-pop input[type="search"] { width: 100%; margin-bottom: 0.4rem; }
+/* Element type / element, picked before the signals they belong to. */
+.picker-pop .pfilters { display: flex; flex-direction: column; gap: 0.25rem; margin-bottom: 0.45rem; }
+.picker-pop .pfilters select { width: 100%; font-size: 0.76rem; padding: 0.3rem 0.4rem; }
+/* The network diagram folded into an analysis page's context strip. */
+.ctx-plot { margin-top: 0.6rem; border-top: 1px solid var(--border); padding-top: 0.5rem; }
+.ctx-plot > summary { cursor: pointer; font-family: var(--font-mono); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+.ctx-plot > summary:hover { color: var(--text-primary); }
+.ctx-plot #ctx-plot-host { margin-top: 0.6rem; }
 .picker-pop .plist { max-height: 260px; overflow-y: auto; }
 .picker-pop .popt { display: flex; align-items: center; gap: 0.45rem; padding: 0.22rem 0.35rem; border-radius: 5px; font-family: var(--font-mono); font-size: 0.74rem; cursor: pointer; }
 .picker-pop .popt:hover { background: var(--surface-2); }

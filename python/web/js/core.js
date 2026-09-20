@@ -269,10 +269,105 @@ function ttTable(rows) {
 // A chip list + searchable checkbox popover over a (possibly grouped) list of
 // names -- replaces native <select multiple>, which is unusable for the
 // 50-200 state/output names these models have.
+// --- Signals and the elements they belong to ---------------------------------
+// Every model signal is named "<quantity>_{<block>}" -- a state like
+// "dw_r_{SM_2}" or "v_{g_d}_{Nd_4}", a measurement like "V_{bus4}" or
+// "P_from_{line3}". The block names the element it belongs to, so a signal
+// list can be organised (and filtered) by element instead of being one flat
+// list of a few hundred names. Blocks use the dynamic model's own naming
+// (per-type unit counters, Nd_/Ln_/Ld_ + 1-based index); measurements use the
+// network's numbering (unit id, bus id, 0-based line/load index) -- both are
+// mapped to the same element here.
+const ELEMENT_KIND_LABEL = { unit: "Units", node: "Buses", line: "Lines", load: "Loads" };
+
+let _elementCache = { version: -1, list: [], byToken: new Map() };
+
+function elementCatalog() {
+  if (_elementCache.version === state.version) return _elementCache.list;
+  const net = state.network;
+  const list = [], byToken = new Map();
+  const add = (e) => { list.push(e); e.tokens.forEach(t => byToken.set(t, e)); };
+  if (net) {
+    const counters = {};
+    const unitBus = new Set(net.der_units.map(d => d.bus));
+    net.der_units.forEach(d => {
+      const lab = UNIT_LABEL[d.unit_type] || "U";
+      counters[lab] = (counters[lab] || 0) + 1;
+      const block = `${lab}_${counters[lab]}`;
+      const tr = net.transformers.findIndex(t => t.lv_bus === d.bus);
+      add({
+        key: `unit:${d.id}`, kind: "unit", block,
+        label: `${UNIT_NAME[d.unit_type] || d.unit_type} ${d.id} · ${block}`,
+        tokens: [block, `unit${d.id}`, ...(tr >= 0 ? [`trafo${tr}`] : [])],
+      });
+    });
+    net.buses.filter(b => !unitBus.has(b.id)).forEach(b => add({
+      key: `bus:${b.id}`, kind: "node", block: `Nd_${b.id}`,
+      label: `Bus ${b.id}${b.name ? ` (${b.name})` : ""}`, tokens: [`Nd_${b.id}`, `bus${b.id}`],
+    }));
+    net.lines.forEach((l, i) => add({
+      key: `line:${i}`, kind: "line", block: `Ln_${i + 1}`,
+      label: `Line #${i} (${l.from_bus} → ${l.to_bus})${l.name ? ` ${l.name}` : ""}`, tokens: [`Ln_${i + 1}`, `line${i}`],
+    }));
+    net.loads.forEach((l, i) => add({
+      key: `load:${i}`, kind: "load", block: `Ld_${i + 1}`,
+      label: `Load #${i} (bus ${l.bus})${l.name ? ` ${l.name}` : ""}`, tokens: [`Ld_${i + 1}`, `load${i}`],
+    }));
+  }
+  _elementCache = { version: state.version, list, byToken };
+  return list;
+}
+
+// The block/token inside a signal name's trailing "_{...}".
+function signalBlock(name) {
+  const m = /_\{([^{}]+)\}\s*$/.exec(name || "");
+  return m ? m[1] : null;
+}
+function signalElement(name) {
+  elementCatalog();
+  const b = signalBlock(name);
+  return b ? _elementCache.byToken.get(b) || null : null;
+}
+// States of the network itself (buses, lines, loads) -- hidden by default in
+// the signal pickers, since there are many of them and they are rarely the
+// point of a study. Their measurements are not affected.
+function isNetworkElementSignal(name) {
+  const e = signalElement(name);
+  return !!e && e.kind !== "unit";
+}
+// <option>s for an element picker, optionally restricted to one kind.
+// keys: when given, only those elements are offered (the ones that actually
+// have a signal in the list being filtered).
+function elementOptionsHtml(selectedKey, { kind = "", allLabel = "All elements", keys = null } = {}) {
+  const list = elementCatalog().filter(e => (!kind || e.kind === kind) && (!keys || keys.has(e.key)));
+  let html = `<option value=""${selectedKey ? "" : " selected"}>${esc(allLabel)}</option>`;
+  let lastKind = null;
+  list.forEach(e => {
+    if (e.kind !== lastKind) {
+      if (lastKind !== null) html += "</optgroup>";
+      html += `<optgroup label="${esc(ELEMENT_KIND_LABEL[e.kind])}">`;
+      lastKind = e.kind;
+    }
+    html += `<option value="${esc(e.key)}"${e.key === selectedKey ? " selected" : ""}>${esc(e.label)}</option>`;
+  });
+  if (lastKind !== null) html += "</optgroup>";
+  return html;
+}
+function elementKindOptionsHtml(selected, keys = null) {
+  const kinds = [...new Set(elementCatalog().filter(e => !keys || keys.has(e.key)).map(e => e.kind))];
+  return `<option value=""${selected ? "" : " selected"}>All types</option>`
+    + kinds.map(k => `<option value="${k}"${k === selected ? " selected" : ""}>${esc(ELEMENT_KIND_LABEL[k])}</option>`).join("");
+}
+
 class SignalPicker {
-  constructor(host, { options = [], selected = [], placeholder = "add signal", colors = false, onChange = null, display = null } = {}) {
+  constructor(host, { options = [], selected = [], placeholder = "add signal", colors = false, onChange = null, display = null, byElement = false } = {}) {
     this.host = host;
-    this.options = options;      // [{name, group?}] or [name]
+    this.options = options;      // [{name, raw?, group?, label?}] or [name]
+    // byElement: the popover asks for an element type and an element first,
+    // and lists that element's signals only (options are grouped by element).
+    this.byElement = byElement;
+    this.elKind = "";
+    this.elKey = "";
     this.selected = [...selected];
     this.placeholder = placeholder;
     this.colors = colors;
@@ -287,6 +382,14 @@ class SignalPicker {
     this.render();
   }
   optionNames() { return this.options.map(o => typeof o === "string" ? o : o.name); }
+  // The model name behind an option ("s:dw_r_{SM_1}" -> "dw_r_{SM_1}").
+  rawName(o) { return (typeof o === "string" ? o : (o.raw ?? o.name)); }
+  // The elements this picker's options belong to.
+  elementKeys() {
+    const keys = new Set();
+    this.options.forEach(o => { const e = signalElement(this.rawName(o)); if (e) keys.add(e.key); });
+    return keys;
+  }
   get() { return [...this.selected]; }
   set(list) { this.selected = [...list]; this.render(); }
   changed() { this.render(); if (this.onChange) this.onChange(this.get()); }
@@ -310,6 +413,10 @@ class SignalPicker {
   openPopover(box) {
     closePopovers();
     const pop = el(`<div class="picker-pop" role="dialog">
+      ${this.byElement ? `<div class="pfilters">
+        <select data-f="kind" aria-label="Element type">${elementKindOptionsHtml(this.elKind, this.elementKeys())}</select>
+        <select data-f="el" aria-label="Element">${elementOptionsHtml(this.elKey, { kind: this.elKind, keys: this.elementKeys() })}</select>
+      </div>` : ""}
       <input type="search" placeholder="Filter…" aria-label="Filter signals">
       <div class="pactions"><button type="button" class="ghost small" data-a="all">Select shown</button><button type="button" class="ghost small" data-a="none">Clear shown</button></div>
       <div class="plist"></div></div>`);
@@ -318,19 +425,38 @@ class SignalPicker {
     const input = pop.querySelector("input");
     const shown = () => {
       const q = input.value.trim().toLowerCase();
-      return this.options.map(o => typeof o === "string" ? { name: o } : o).filter(o => !q || o.name.toLowerCase().includes(q) || (o.label || "").toLowerCase().includes(q) || (o.group || "").toLowerCase().includes(q));
+      return this.options.map(o => typeof o === "string" ? { name: o } : o).filter(o => {
+        if (this.byElement && (this.elKey || this.elKind)) {
+          const e = signalElement(this.rawName(o));
+          if (this.elKey && (!e || e.key !== this.elKey)) return false;
+          if (!this.elKey && this.elKind && (!e || e.kind !== this.elKind)) return false;
+        }
+        return !q || o.name.toLowerCase().includes(q) || (o.label || "").toLowerCase().includes(q) || (o.group || "").toLowerCase().includes(q);
+      });
     };
     const draw = () => {
       let lastGroup = null, html = "";
       const items = shown();
+      if (this.byElement && !this.elKey && !this.elKind && !input.value.trim()) {
+        html = `<p class="empty">Pick an element above, or search — every signal is listed below.</p>`;
+      }
       items.slice(0, 400).forEach(o => {
         if (o.group && o.group !== lastGroup) { html += `<div class="pgroup">${esc(o.group)}</div>`; lastGroup = o.group; }
         html += `<label class="popt"><input type="checkbox" value="${esc(o.name)}"${this.selected.includes(o.name) ? " checked" : ""}>${o.label ? `<span>${esc(o.label)} <span class="muted">${esc(this.display(o.name))}</span></span>` : esc(this.display(o.name))}</label>`;
       });
       if (items.length > 400) html += `<div class="pgroup">${items.length - 400} more — refine the filter</div>`;
-      if (!items.length) html = `<p class="empty">No match.</p>`;
+      if (!items.length) html = `<p class="empty">No signal here${this.byElement && this.elKey ? " for this element" : ""}.</p>`;
       list.innerHTML = html;
     };
+    if (this.byElement) {
+      pop.querySelector('[data-f="kind"]').addEventListener("change", ev => {
+        this.elKind = ev.target.value;
+        this.elKey = "";
+        pop.querySelector('[data-f="el"]').innerHTML = elementOptionsHtml("", { kind: this.elKind, keys: this.elementKeys() });
+        draw();
+      });
+      pop.querySelector('[data-f="el"]').addEventListener("change", ev => { this.elKey = ev.target.value; draw(); });
+    }
     list.addEventListener("change", ev => {
       const n = ev.target.value;
       if (ev.target.checked) { if (!this.selected.includes(n)) this.selected.push(n); }
@@ -368,8 +494,12 @@ function closePopovers() { $$(".picker-pop").forEach(p => p.remove()); }
 document.addEventListener("click", closePopovers);
 document.addEventListener("keydown", e => { if (e.key === "Escape") closePopovers(); });
 
-// Network-context strip shown at the top of analysis pages.
-function networkContextHtml() {
+// Whether the context strip's diagram is unfolded (kept across re-renders).
+let ctxPlotOpen = false;
+
+// Network-context strip shown at the top of analysis pages, optionally with
+// the network diagram folded into it (hidden by default).
+function networkContextHtml({ plot = false } = {}) {
   if (!state.network) {
     return `<div class="notice warn-bg"><span>No network loaded yet — <a href="#/network">choose a preset or build one</a> on the Network page.</span></div>`;
   }
@@ -382,5 +512,30 @@ function networkContextHtml() {
     ${isModified() ? '<span class="badge warn">modified</span>' : ""}
     ${out ? `<span class="badge crit" title="Open breakers: these elements (and anything they cut off from the slack) are left out of every analysis">${out} element${out > 1 ? "s" : ""} out of service</span>` : ""}
     <span class="muted" style="font-size:0.8rem;font-family:var(--font-mono)">${n.buses.length} buses · ${n.lines.length} lines · ${n.transformers.length} trafos · ${n.loads.length} loads · ${n.der_units.length} DER</span>
-    <span style="flex:1"></span><a href="#/network" style="font-size:0.8rem">Change / edit →</a></div></div>`;
+    <span style="flex:1"></span><a href="#/network" style="font-size:0.8rem">Change / edit →</a></div>
+    ${plot ? `<details class="ctx-plot" id="ctx-plot"${ctxPlotOpen ? " open" : ""}><summary>Network diagram</summary><div id="ctx-plot-host"></div>${unitLegendHtml()}</details>` : ""}</div>`;
+}
+
+// Read-only diagram inside the context strip: built the first time it is
+// unfolded (a diagram nobody opens costs nothing), breakers still operable.
+function bindContextPlot() {
+  const det = $("#ctx-plot");
+  if (!det) return;
+  let view = null;
+  const show = () => {
+    if (!state.network) return;
+    if (!view) {
+      view = new NetworkView($("#ctx-plot-host"), {
+        editable: false, tooltip: elementTooltip,
+        onBreaker: br => { if (toggleBreaker(br)) view.render(); },
+      });
+    }
+    view.render();
+    view.fit();
+  };
+  det.addEventListener("toggle", () => {
+    ctxPlotOpen = det.open;
+    if (det.open) show();
+  });
+  if (det.open) show();
 }

@@ -248,6 +248,17 @@ persisted server-side. Always light-themed.
   snapshot scrubber (and *Play*) over the diagram and overview charts.
   The **Show** selector sits directly above the results table; clicking
   an element on the diagram jumps to its row.
+Signals, everywhere they are picked, are organised by the **element** they
+belong to: a name's trailing block (`..._{SM_2}`, `..._{Nd_4}`, `V_{bus4}`,
+`P_from_{line3}`) is mapped back to the unit, bus, line or load it names, so
+a bus's states and its measurements sit under the same entry (`core.js`'s
+`elementCatalog()`). A perturbation is chosen as **element type → element →
+signal**, and the "+ add signal" pickers ask the same way before listing
+anything. Buses, lines and loads have two states each and are rarely what a
+study is about, so a tick-box (on by default) keeps their *states* out of the
+lists — their measurements are unaffected, and whatever is already plotted or
+perturbed is never hidden away.
+
 - **Modal Analysis** — one linearisation per network version (cached
   server-side too, see `analysis._cached`), seven sub-pages: eigenvalue
   map (+ mode table, click to select a mode), participation heatmap,
@@ -281,6 +292,9 @@ persisted server-side. Always light-themed.
   response* adds the linear model's response to the same disturbance
   (`linear_overlay`: `lsim` of the full `(A, B, C, D)` around the same
   operating point, in absolute units) as dotted lines in the same colours.
+  The network diagram is folded into the page's network strip (closed by
+  default, and breakers can be operated from it), and *Trace live* is on by
+  default.
   The nonlinear model's initial point is not an exact equilibrium (see
   {doc}`modules/timedomain`), so the EMT traces include a small initial
   transient the linear response doesn't have — the difference

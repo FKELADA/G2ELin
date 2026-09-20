@@ -43,7 +43,9 @@ const EmtPage = {
           <button class="secondary toggle small" data-dist="event" aria-pressed="false">Network event</button>
         </div>
         <div class="controls" id="emt-signal-box">
-          <div class="field"><label for="emt-perturb">Perturb (state offset or input step)</label><select id="emt-perturb" style="min-width:260px"></select></div>
+          <div class="field"><label for="emt-el-kind">Element type</label><select id="emt-el-kind"></select></div>
+          <div class="field"><label for="emt-el">Element</label><select id="emt-el" style="min-width:230px"></select></div>
+          <div class="field"><label for="emt-perturb">Perturbed state / stepped input</label><select id="emt-perturb" style="min-width:250px"></select></div>
           <div class="field"><label for="emt-amp">Amplitude</label><input type="number" id="emt-amp" step="any" value="0.02"></div>
         </div>
         <div id="emt-event-box" style="display:none">
@@ -69,11 +71,12 @@ const EmtPage = {
         <div id="emt-scopes"></div>
         <div class="controls" style="margin-top:0.6rem;align-items:center">
           <button class="secondary small" id="emt-add-scope">+ Add scope</button>
+          <label class="check" title="Buses, lines and loads have a lot of states (voltages and currents) that are rarely the point of a study. Their measurements stay available either way."><input type="checkbox" id="emt-hide-net" checked> Hide bus, line and load states</label>
           <span class="muted" id="emt-meas-note" style="font-size:0.76rem">Measurements: power flows (lines at both ends, loads, units / transformers), bus voltage magnitude, angle and frequency, instantaneous 3-phase bus voltages, and each unit's own frequency — in pu on the network base unless stated.</span>
         </div>
         <div class="controls" style="margin-top:1.1rem;align-items:center">
           <label class="check"><input type="checkbox" id="emt-linear"> Overlay the equivalent linearised response (dotted, same colours; states, inputs and outputs)</label>
-          <label class="check"><input type="checkbox" id="emt-live"> Trace live <span class="muted" style="font-size:0.76rem">(streams solver steps; slower)</span></label>
+          <label class="check"><input type="checkbox" id="emt-live" checked> Trace live <span class="muted" style="font-size:0.76rem">(streams solver steps; slower)</span></label>
         </div>
         <div class="controls" style="margin-top:1rem;align-items:center">
           <button id="emt-run"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>Run EMT simulation</button>
@@ -84,6 +87,9 @@ const EmtPage = {
       <div id="emt-results" class="stack" style="margin-top:1rem"></div>`;
     $("#emt-run").addEventListener("click", () => this.run());
     $$("#page-emt [data-dist]").forEach(b => b.addEventListener("click", () => this.setDist(b.dataset.dist)));
+    $("#emt-hide-net").addEventListener("change", () => this.refreshSignalOptions());
+    $("#emt-el-kind").addEventListener("change", () => { this.elKey = ""; this.fillElementSelects(); this.fillPerturbSelect(); });
+    $("#emt-el").addEventListener("change", e => { this.elKey = e.target.value; this.fillPerturbSelect(); });
     $("#emt-ev-kind").addEventListener("change", () => this.showEventFields());
     $("#emt-add-scope").addEventListener("click", () => { this.scopes.push(this.newScope()); this.renderScopes(); });
     on("network:loaded", () => {
@@ -164,7 +170,8 @@ const EmtPage = {
   },
 
   async onShow() {
-    $("#emt-context").innerHTML = networkContextHtml();
+    $("#emt-context").innerHTML = networkContextHtml({ plot: true });
+    bindContextPlot();
     if (!state.network) return;
     if (this.names && this.names.version === state.version) return;
     const sel = $("#emt-perturb");
@@ -175,32 +182,85 @@ const EmtPage = {
       const r = await netPost("states");
       if (version !== state.version) return;
       this.names = { version, data: r };
-      const prevSel = sel.value;
-      sel.innerHTML = `<optgroup label="States (initial-condition offset)">${r.state_names.map(n => `<option value="${esc(n)}" data-kind="state">${esc(n)}</option>`).join("")}</optgroup>
-        <optgroup label="Inputs (step held from T0)">${r.input_names.map(n => `<option value="${esc(n)}" data-kind="input">${esc(n)}</option>`).join("")}</optgroup>`;
-      const firstDw = r.state_names.find(n => n.includes("dw_r"));
-      sel.value = [...sel.options].some(o => o.value === prevSel) ? prevSel : (firstDw || r.state_names[0]);
-      sel.disabled = false;
       if (this.dist === "event") this.fillEventOptions();
       this.measInfo = Object.fromEntries((r.measurements || []).map(m => [m.name, m]));
-      // Every signal this model has, keyed "<kind>:<name>".
-      this.options = [
-        ...r.state_names.map(n => ({ name: `s:${n}`, group: "States" })),
-        ...r.input_names.map(n => ({ name: `i:${n}`, group: "Inputs" })),
-        ...r.output_names.map(n => ({ name: `o:${n}`, group: "Outputs" })),
-        ...(r.measurements || []).map(m => ({ name: `m:${m.name}`, group: `Measurements · ${m.group}`, label: `${m.label} (${m.unit})` })),
+      // Every signal this model has, keyed "<kind>:<name>"; "raw" is the model
+      // name, which says (see core.js) which element it belongs to.
+      this.allOptions = [
+        ...r.state_names.map(n => ({ name: `s:${n}`, raw: n, group: "States" })),
+        ...r.input_names.map(n => ({ name: `i:${n}`, raw: n, group: "Inputs" })),
+        ...r.output_names.map(n => ({ name: `o:${n}`, raw: n, group: "Outputs" })),
+        ...(r.measurements || []).map(m => ({ name: `m:${m.name}`, raw: m.name, group: `Measurements · ${m.group}`, label: `${m.label} (${m.unit})` })),
       ];
-      const valid = new Set(this.options.map(o => o.name));
+      const valid = new Set(this.allOptions.map(o => o.name));
       this.scopes.forEach(sc => { sc.signals = sc.signals.filter(k => valid.has(k)); });
       if (!this.scopes.length || this.scopes.every(sc => !sc.signals.length)) {
         const dw = r.state_names.filter(n => n.includes("dw_r")).slice(0, 8).map(n => `s:${n}`);
         this.scopes = [{ ...this.newScope(dw), title: "Rotor speed deviations" }];
       }
-      this.renderScopes();
+      this.refreshSignalOptions();
     } catch (e) {
       sel.innerHTML = `<option>unavailable</option>`;
       $("#emt-results").innerHTML = errorHtml(e);
     } finally { setSpinner($("#emt-spin"), ""); }
+  },
+
+  // The states of buses, lines and loads are hidden unless asked for: there
+  // are many of them (two per element) and a study rarely starts there. What
+  // is already plotted is never hidden away.
+  hideNetStates() { return $("#emt-hide-net")?.checked !== false; },
+
+  refreshSignalOptions() {
+    const all = this.allOptions || [];
+    const kept = new Set(this.scopes.flatMap(sc => sc.signals));
+    this.options = this.hideNetStates()
+      ? all.filter(o => !(o.name.startsWith("s:") && isNetworkElementSignal(o.raw)) || kept.has(o.name))
+      : all;
+    this.fillElementSelects();
+    this.fillPerturbSelect();
+    this.renderScopes();
+  },
+
+  // Only elements that actually have a perturbable signal are offered.
+  perturbOptions() {
+    const net = this.hideNetStates();
+    return (this.options || []).filter(o => (o.name.startsWith("s:") && !(net && isNetworkElementSignal(o.raw))) || o.name.startsWith("i:"));
+  },
+
+  fillElementSelects() {
+    const keys = new Set();
+    this.perturbOptions().forEach(o => { const e = signalElement(o.raw); if (e) keys.add(e.key); });
+    const kindSel = $("#emt-el-kind"), elSel = $("#emt-el");
+    if (!kindSel) return;
+    this.elKind = kindSel.value || "";
+    if (this.elKey && !keys.has(this.elKey)) this.elKey = "";
+    kindSel.innerHTML = elementKindOptionsHtml(this.elKind, keys);
+    this.elKind = kindSel.value;
+    elSel.innerHTML = elementOptionsHtml(this.elKey, { kind: this.elKind, keys });
+    this.elKey = elSel.value;
+  },
+
+  fillPerturbSelect() {
+    const sel = $("#emt-perturb");
+    if (!sel) return;
+    const prev = sel.value;
+    const match = o => {
+      const e = signalElement(o.raw);
+      if (this.elKey) return e && e.key === this.elKey;
+      if (this.elKind) return e && e.kind === this.elKind;
+      return true;
+    };
+    const opts = this.perturbOptions().filter(match);
+    const group = (kind, label) => {
+      const list = opts.filter(o => o.name.startsWith(kind));
+      return list.length ? `<optgroup label="${label}">${list.map(o => `<option value="${esc(o.raw)}" data-kind="${kind === "s:" ? "state" : "input"}">${esc(o.raw)}</option>`).join("")}</optgroup>` : "";
+    };
+    sel.innerHTML = group("s:", "States (initial-condition offset)") + group("i:", "Inputs (step held from T0)");
+    if (!sel.options.length) { sel.innerHTML = `<option value="">(no state or input here)</option>`; sel.disabled = true; return; }
+    sel.disabled = false;
+    const wanted = [...sel.options].some(o => o.value === prev) ? prev
+      : ([...sel.options].find(o => o.value.includes("dw_r")) || sel.options[0]).value;
+    sel.value = wanted;
   },
 
   // How a signal reads to a person: measurements by their description.
@@ -224,7 +284,7 @@ const EmtPage = {
       node.querySelector("input[type=checkbox]").addEventListener("change", e => { sc.stacked = e.target.checked; });
       node.querySelector("button.ghost")?.addEventListener("click", () => { this.scopes.splice(idx, 1); this.renderScopes(); });
       new SignalPicker(node.querySelector(".scope-picker"), {
-        options: this.options || [], selected: sc.signals, colors: true, placeholder: "add signal",
+        options: this.options || [], selected: sc.signals, colors: true, placeholder: "add signal", byElement: true,
         display: key => sigName(key) + (sigKind(key) === "i" ? " (input)" : sigKind(key) === "o" ? " (output)" : ""),
         onChange: list => { sc.signals = list; this.checkTimestep(); },
       });

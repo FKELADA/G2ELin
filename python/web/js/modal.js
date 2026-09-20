@@ -20,6 +20,9 @@ const ModalPage = {
   pending: null,
   channels: { free: [], step: [] },
   channelNamesKey: null,
+  // Buses, lines and loads have two states each and are rarely what a study
+  // is about, so they are kept out of the pickers unless asked for.
+  hideNetStates: true,
 
   init() {
     if (this.inited) return;
@@ -43,7 +46,8 @@ const ModalPage = {
     this.view = MODAL_VIEWS[view] ? view : "eigenmap";
     $("#modal-title").textContent = MODAL_VIEWS[this.view].title;
     $("#modal-desc").textContent = MODAL_VIEWS[this.view].desc;
-    $("#modal-context").innerHTML = networkContextHtml();
+    $("#modal-context").innerHTML = networkContextHtml({ plot: true });
+    bindContextPlot();
     this.load(false);
   },
 
@@ -275,13 +279,24 @@ const ModalPage = {
     return { id: this._chId, input, amplitude: 0.1, tFinal: 2.0, subplots, result: null };
   },
 
+  // The states a channel offers: the units' own unless the network's are asked
+  // for. Whatever is already plotted or perturbed is always kept.
+  channelStates(keep = []) {
+    const names = state.modal.data.state_names;
+    if (!this.hideNetStates) return names;
+    const k = new Set(keep);
+    return names.filter(n => k.has(n) || !isNetworkElementSignal(n));
+  },
+
   viewChannels(kind) {
     this.resetChannelsIfNeeded();
     const body = $("#modal-body");
     body.innerHTML = `<div class="card"><div class="controls" style="align-items:center">
         <button id="ch-add">+ Add channel</button><button class="secondary" id="ch-plot-all">Plot all channels</button>
+        ${kind === "free" ? `<label class="check" title="Buses, lines and loads have a lot of states (voltages and currents) that are rarely the point of a study."><input type="checkbox" id="ch-hide-net"${this.hideNetStates ? " checked" : ""}> Hide bus, line and load states</label>` : ""}
         <span class="muted" style="font-size:0.8rem">A channel = one ${kind === "free" ? "initial-condition perturbation" : "input step"}; each subplot shows its own set of ${kind === "free" ? "states" : "outputs"} (crosshairs are synced within a channel).</span></div></div>
       <div id="ch-list"></div>`;
+    $("#ch-hide-net")?.addEventListener("change", e => { this.hideNetStates = e.target.checked; this.renderChannels(kind); });
     $("#ch-add").addEventListener("click", () => {
       const last = this.channels[kind][this.channels[kind].length - 1];
       const ch = this.newChannel(kind);
@@ -314,10 +329,13 @@ const ModalPage = {
       <div class="channel-head"><span class="ch-dot" style="background:${color}"></span><h3>Channel ${ci + 1}</h3><span class="muted" style="font-size:0.8rem" data-role="summary"></span><span class="spacer"></span>
         <span class="spinner" data-role="spin"></span><button class="small" data-role="plot">Plot</button>${this.channels[kind].length > 1 ? `<button class="ghost small" data-role="remove">Remove</button>` : ""}</div>
       <div class="channel-body">
-        <div class="controls">${kind === "free"
-          ? `<div class="field"><label>Perturbed state</label><select data-role="perturb">${m.state_names.map(n => `<option${n === ch.perturb ? " selected" : ""}>${esc(n)}</option>`).join("")}</select></div>
+        <div class="controls">
+          <div class="field"><label>Element type</label><select data-role="el-kind"></select></div>
+          <div class="field"><label>Element</label><select data-role="el" style="min-width:210px"></select></div>
+          ${kind === "free"
+          ? `<div class="field"><label>Perturbed state</label><select data-role="perturb" style="min-width:210px"></select></div>
              <div class="field"><label>Offset</label><input type="number" step="any" data-role="amp" value="${ch.offset}"></div>`
-          : `<div class="field"><label>Stepped input</label><select data-role="perturb">${m.input_names.map(n => `<option${n === ch.input ? " selected" : ""}>${esc(n)}</option>`).join("")}</select></div>
+          : `<div class="field"><label>Stepped input</label><select data-role="perturb" style="min-width:210px"></select></div>
              <div class="field"><label>Step amplitude</label><input type="number" step="any" data-role="amp" value="${ch.amplitude}"></div>`}
           <div class="field"><label>Duration (s, max 20)</label><input type="number" step="0.1" min="0.01" max="20" data-role="tf" value="${ch.tFinal}"></div>
         </div>
@@ -326,9 +344,40 @@ const ModalPage = {
         <div class="channel-plots" data-role="plots"></div>
       </div></div>`);
     const q = r => node.querySelector(`[data-role="${r}"]`);
-    const names = kind === "free" ? m.state_names : m.output_names;
+    const key = kind === "free" ? "perturb" : "input";
+    // What can be perturbed/stepped, and the elements those signals belong to.
+    const sigNames = kind === "free" ? this.channelStates([ch.perturb]) : m.input_names;
+    const names = kind === "free" ? this.channelStates(ch.subplots.flat()) : m.output_names;
+    const elKeys = new Set();
+    sigNames.forEach(n => { const e = signalElement(n); if (e) elKeys.add(e.key); });
+    // Element type -> element -> signal, so the list stays short and readable.
+    const fillPerturb = () => {
+      const list = sigNames.filter(n => {
+        const e = signalElement(n);
+        if (ch.elKey) return e && e.key === ch.elKey;
+        if (ch.elKind) return e && e.kind === ch.elKind;
+        return true;
+      });
+      q("perturb").innerHTML = list.length
+        ? list.map(n => `<option${n === ch[key] ? " selected" : ""}>${esc(n)}</option>`).join("")
+        : `<option value="">(none here)</option>`;
+      q("perturb").disabled = !list.length;
+      if (list.length && !list.includes(ch[key])) { ch[key] = list[0]; q("perturb").value = list[0]; }
+    };
+    const fillElements = () => {
+      q("el-kind").innerHTML = elementKindOptionsHtml(ch.elKind || "", elKeys);
+      ch.elKind = q("el-kind").value;
+      q("el").innerHTML = elementOptionsHtml(ch.elKey || "", { kind: ch.elKind, keys: elKeys });
+      ch.elKey = q("el").value;
+      fillPerturb();
+    };
+    // Start on the element of whatever the channel already perturbs.
+    if (ch.elKey === undefined) { const e = signalElement(ch[key]); ch.elKind = e ? e.kind : ""; ch.elKey = e ? e.key : ""; }
+    fillElements();
     const updateSummary = () => { q("summary").textContent = kind === "free" ? `— ${ch.perturb} + ${ch.offset}` : `— step ${ch.amplitude} in ${ch.input}`; };
     updateSummary();
+    q("el-kind").addEventListener("change", e => { ch.elKind = e.target.value; ch.elKey = ""; fillElements(); updateSummary(); });
+    q("el").addEventListener("change", e => { ch.elKey = e.target.value; fillPerturb(); updateSummary(); });
     q("perturb").addEventListener("change", e => { if (kind === "free") ch.perturb = e.target.value; else ch.input = e.target.value; updateSummary(); });
     q("amp").addEventListener("input", e => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) { if (kind === "free") ch.offset = v; else ch.amplitude = v; updateSummary(); } });
     q("tf").addEventListener("input", e => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) ch.tFinal = v; });
@@ -340,7 +389,8 @@ const ModalPage = {
       ch.subplots.forEach((sp, si) => {
         const row = el(`<div class="subplot-row"><span class="sp-tag">Subplot ${si + 1}</span><div class="sp-picker"></div>${ch.subplots.length > 1 ? `<button class="ghost small">Remove</button>` : ""}</div>`);
         new SignalPicker(row.querySelector(".sp-picker"), {
-          options: names, selected: sp, colors: true, placeholder: kind === "free" ? "add state" : "add output",
+          options: names, selected: sp, colors: true, byElement: true,
+          placeholder: kind === "free" ? "add state" : "add output",
           onChange: list => { ch.subplots[si] = list; },
         });
         const rm = row.querySelector("button.ghost");

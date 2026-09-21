@@ -358,6 +358,18 @@ perturbed is never hidden away.
   EMT(disturbed) − EMT(undisturbed) is what matches the linear response
   (checked in `tests/test_analysis_options.py`). *Trace live* streams the
   solver steps as before.
+  **Limits, and what happens at them.** A one-shot run is limited to
+  `analysis.EMT_MAX_N_POINTS` = 10 000 samples (each costs a Newton solve
+  when inputs, outputs or measurements are plotted), and a live stream to
+  `EMT_LIVE_MAX_STEPS` = 50 000 solver steps -- a bound on what one stream
+  may send, not a physical limit: how many steps an adaptive stiff solver
+  takes depends on the network, and a stiff one (CIGRE) takes far more than a
+  small one. Reaching the live limit is a normal end of the stream, not an
+  error: the final line carries a `truncated` message saying where it
+  stopped, and the page keeps every plot drawn so far with that message above
+  it. The same holds when the solver fails part-way through: the partial trace
+  stays, with the reason, and only a run that fails before its first step is
+  shown as a bare error.
   **Measurements** (`g2elin_core.timedomain.measurements`, requested with
   `plot_measurements`, listed by `.../states`) are computed from each
   element's own model variables at every sample: bus voltage magnitude

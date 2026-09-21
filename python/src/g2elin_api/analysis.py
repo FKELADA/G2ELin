@@ -76,7 +76,15 @@ from .schemas import (
 # translates to an unbounded request time.
 EMT_MAX_T_FINAL = 3.0
 EMT_MIN_N_POINTS = 10
-EMT_MAX_N_POINTS = 2000  # each extra sample costs one more Newton solve when plot_inputs/plot_outputs is set
+# One-shot runs: samples per trajectory. Each extra one costs a Newton solve
+# when inputs/outputs/measurements are plotted, so this is a cost bound.
+EMT_MAX_N_POINTS = 10000
+# Live runs: solver steps streamed to the browser. Not a physical limit -- how
+# many an adaptive stiff solver takes depends on the network, and a stiff one
+# (CIGRE) takes far more than a small one -- just a bound on what one stream
+# may send. Hitting it ends the run cleanly with what was traced
+# (see emt_live_stream), it never fails it.
+EMT_LIVE_MAX_STEPS = 50000
 EMT_DEFAULT_N_POINTS = 200  # -> default dt = t_final/199 when req.dt isn't given
 MODAL_MAX_T_FINAL = 20.0  # free/step response are cheap (linear algebra, no ODE solve) -- a looser bound
 EMT_SIMULATE_KWARGS = dict(rtol=1e-4, atol=1e-6, first_step=1e-8)
@@ -866,6 +874,7 @@ async def emt_live_stream(plan: _EmtLivePlan, perturb_kind: str, request: Reques
     fill = {n: _removed_fill(n) for n in meas_names if n not in present}
 
     n_steps = 0
+    truncated: str | None = None
     try:
         for step in simulate_steps(
             run.sim, (0.0, plan.t_final), x0=run.x0, u_exo_fn=run.u_exo_fn,
@@ -873,10 +882,16 @@ async def emt_live_stream(plan: _EmtLivePlan, perturb_kind: str, request: Reques
         ):
             if await request.is_disconnected():
                 return  # client hit "Stop" / navigated away -- stop computing, not an error
+            if n_steps >= EMT_LIVE_MAX_STEPS:
+                # Not an error: everything traced so far is a valid trajectory.
+                # End the stream normally and say where it stopped.
+                truncated = (
+                    f"stopped at t = {step.t:.4g} s of {plan.t_final:g} s: the trace reached the "
+                    f"{EMT_LIVE_MAX_STEPS}-step limit. Everything up to there is plotted; run a shorter "
+                    "duration, or the same run without live tracing, to see the rest."
+                )
+                break
             n_steps += 1
-            if n_steps > EMT_MAX_N_POINTS:
-                yield json.dumps({"error": f"exceeded {EMT_MAX_N_POINTS} steps; raise dt to see fewer, coarser updates"}) + "\n"
-                return
             meas = dict(fill)
             if measure is not None:
                 meas.update(smooth(step.t, measure(step.x, step.z, step.u)))
@@ -891,7 +906,11 @@ async def emt_live_stream(plan: _EmtLivePlan, perturb_kind: str, request: Reques
         yield json.dumps({"error": f"nonlinear solver did not converge for this perturbation ({e}); try a smaller offset"}) + "\n"
         return
     done: dict = {"done": True, "perturbed": run.name, "perturb_kind": perturb_kind, "n_steps": n_steps}
-    if plan.req.linear_overlay:
+    if truncated:
+        done["truncated"] = truncated
+    if plan.req.linear_overlay and truncated:
+        done["linear_error"] = "not computed: the trace was cut short, so there is no full span to overlay it on"
+    elif plan.req.linear_overlay:
         # Computed once the nonlinear run has finished, on an even grid over
         # the same span (the solver's own adaptive step times are too
         # irregular to be worth reproducing for a linear overlay).

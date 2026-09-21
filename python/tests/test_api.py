@@ -395,3 +395,43 @@ def test_emt_solver_failure_is_a_clean_422_not_a_500(monkeypatch):
     )
     assert r.status_code == 422
     assert "did not converge" in r.json()["detail"]
+
+
+def test_emt_live_step_limit_ends_the_run_without_losing_the_trace(monkeypatch):
+    """Reaching the live step limit used to send an ``error`` line, which the
+    page turned into a bare error box in place of every plot already drawn.
+    It is now a normal end of stream: the steps traced so far stand, and the
+    final line says where and why it stopped."""
+    from g2elin_api import analysis
+
+    monkeypatch.setattr(analysis, "EMT_LIVE_MAX_STEPS", 6)
+    r = client.post(
+        "/api/presets/wscc9_3sm/emt/live",
+        json={
+            "perturb_kind": "state", "perturb_name": "dw_r_{SM_2}", "perturb_offset": 0.02, "t_final": 1.0,
+            "plot_states": ["dw_r_{SM_2}"],
+        },
+    )
+    assert r.status_code == 200
+    lines = _read_ndjson(r)
+    *steps, last = lines
+    assert not any("error" in ln for ln in lines)          # not a failure
+    assert len(steps) == 6 and all("t" in s for s in steps)  # every step up to the limit was delivered
+    assert last["done"] is True and last["n_steps"] == 6
+    assert "6-step limit" in last["truncated"] and "stopped at t =" in last["truncated"]
+    assert steps[-1]["t"] < 1.0                              # it really was cut short
+
+
+def test_emt_live_below_the_limit_is_not_marked_truncated():
+    r = client.post(
+        "/api/presets/wscc9_3sm/emt/live",
+        json={"perturb_kind": "state", "perturb_name": "dw_r_{SM_2}", "perturb_offset": 0.02, "t_final": 0.05,
+              "plot_states": ["dw_r_{SM_2}"]},
+    )
+    assert "truncated" not in _read_ndjson(r)[-1]
+
+
+def test_emt_step_limits_are_raised():
+    from g2elin_api import analysis
+
+    assert analysis.EMT_LIVE_MAX_STEPS >= 20000 and analysis.EMT_MAX_N_POINTS >= 5000

@@ -10,6 +10,7 @@
 // The run requests every signal any scope uses.
 
 const EMT_T_PRE = 0.01;
+const EMT_MAX_SAMPLES = 10000;   // the server's per-run sample limit (analysis.EMT_MAX_N_POINTS)
 
 // Signal keys carry their kind, since names can repeat across kinds (e.g. an
 // SM's "theta" is both a state and an output).
@@ -332,9 +333,9 @@ const EmtPage = {
     const f = state.network.f_hz, tf = parseFloat($("#emt-tf").value) || 1;
     const want = 1 / (40 * f), cur = parseFloat($("#emt-dt").value);
     if (!(cur > 0) || cur > 1 / (20 * f)) {
-      const dt = Math.max(want, tf / 1999);
+      const dt = Math.max(want, tf / (EMT_MAX_SAMPLES - 1));
       $("#emt-dt").value = +dt.toPrecision(3);
-      note.innerHTML = `<span class="warn">Timestep set to ${fmtSmart(dt * 1000)} ms</span> so the 3-phase waveforms are resolved (~${Math.round(1 / (f * dt))} samples per cycle)${dt > want * 1.01 ? " — limited by the 2000-sample maximum; shorten the duration for a finer one" : ""}.`;
+      note.innerHTML = `<span class="warn">Timestep set to ${fmtSmart(dt * 1000)} ms</span> so the 3-phase waveforms are resolved (~${Math.round(1 / (f * dt))} samples per cycle)${dt > want * 1.01 ? " — limited by the ${EMT_MAX_SAMPLES}-sample maximum; shorten the duration for a finer one" : ""}.`;
     }
   },
 
@@ -407,7 +408,9 @@ const EmtPage = {
     let buf = "", done = null, error = null, lastDraw = 0;
     const draw = force => {
       const now = performance.now();
-      if (!force && now - lastDraw < 120) return;
+      // Redrawing every chart costs more the more points there are, so the
+      // pause between redraws grows with the trace (~120 ms early on).
+      if (!force && now - lastDraw < 120 + data.t.length / 40) return;
       lastDraw = now;
       this.renderResult({ ...data, perturb_kind: req.perturb_kind, perturbed: req.perturb_kind === "event" ? "(network event)" : req.perturb_name, dt: null }, req, ` · <span class="muted">tracing live — ${data.t.length} points</span>`);
     };
@@ -433,9 +436,18 @@ const EmtPage = {
       }
     } catch { if (!error) done = done || { stopped: true }; }
     finally { stop.style.display = "none"; }
-    if (error) throw new Error(error);
-    const note = done && !done.stopped ? ` · traced live, ${done.n_steps} solver steps` : ` · <span class="warn">stopped</span> — partial trace`;
+    // Nothing was received: there is nothing to keep, so the error stands alone.
+    if (error && !data.t.length) throw new Error(error);
+    // Otherwise everything traced so far stays on screen -- a limit, a stop or a
+    // solver failure part-way through ends the trace, it never erases it.
+    const note = error ? ` · <span class="bad">ended early</span> — partial trace`
+      : done && done.truncated ? ` · <span class="warn">cut short</span>, ${done.n_steps} solver steps`
+      : done && !done.stopped ? ` · traced live, ${done.n_steps} solver steps`
+      : ` · <span class="warn">stopped</span> — partial trace`;
     this.renderResult({ ...data, perturb_kind: req.perturb_kind, perturbed: (done && done.perturbed) || req.perturb_name, dt: null, linear: done && done.linear }, req, note);
-    if (done && done.linear_error) out.insertAdjacentHTML("afterbegin", `<div class="notice warn-bg">Linearised overlay unavailable: ${esc(done.linear_error)}</div>`);
+    const notice = (cls, html) => out.insertAdjacentHTML("afterbegin", `<div class="notice ${cls}">${html}</div>`);
+    if (error) notice("warn-bg", `<b>The run ended early:</b> ${esc(error)} <span class="muted">Everything traced up to that point is kept below.</span>`);
+    if (done && done.truncated) notice("warn-bg", `<b>The trace ${esc(done.truncated)}</b>`);
+    if (done && done.linear_error) notice("warn-bg", `Linearised overlay unavailable: ${esc(done.linear_error)}`);
   },
 };

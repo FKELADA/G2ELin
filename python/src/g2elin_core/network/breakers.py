@@ -64,6 +64,7 @@ class BlockLabels:
     line: list[int]
     load: list[int]
     transformer: list[int]
+    shunt: list[int]
     node_b_pu: float | None
 
 
@@ -79,6 +80,7 @@ def default_labels(network: Network) -> BlockLabels:
         line=list(range(len(network.lines))),
         load=list(range(len(network.loads))),
         transformer=list(range(len(network.transformers))),
+        shunt=list(range(len(network.shunts))),
         node_b_pu=network.lines[0].b_pu if network.lines else None,
     )
 
@@ -107,6 +109,7 @@ class ServiceState:
     lines: tuple[bool, ...]
     transformers: tuple[bool, ...]
     loads: tuple[bool, ...]
+    shunts: tuple[bool, ...] = ()
     der_units: dict[int, bool] = field(default_factory=dict)
 
     @property
@@ -134,6 +137,7 @@ def any_breaker_open(network: Network) -> bool:
         any(not (ln.from_closed and ln.to_closed) for ln in network.lines)
         or any(not (tr.hv_closed and tr.lv_closed) for tr in network.transformers)
         or any(not ld.closed for ld in network.loads)
+        or any(not sh.closed for sh in network.shunts)
         or any(not d.closed for d in network.der_units)
     )
 
@@ -185,6 +189,7 @@ def service_state(network: Network) -> ServiceState:
         lines=tuple(ln.from_closed and ln.to_closed and ln.from_bus in energized for ln in network.lines),
         transformers=tuple(tr.hv_closed and tr.lv_closed and tr.hv_bus in energized for tr in network.transformers),
         loads=tuple(ld.closed and ld.bus in energized for ld in network.loads),
+        shunts=tuple(sh.closed and sh.bus in energized for sh in network.shunts),
         der_units={d.id: d.closed and d.bus in energized for d in network.der_units},
     )
 
@@ -216,6 +221,7 @@ def energized_network(network: Network) -> Network:
     ]
     keep_ln = [i for i, ok in enumerate(st.lines) if ok]
     keep_ld = [i for i, ok in enumerate(st.loads) if ok]
+    keep_sh = [i for i, ok in enumerate(st.shunts) if ok]
     keep_der = [d for d in network.der_units if st.der_units[d.id]]
     # The reduced network needs exactly one unit marked as the slack (the
     # schema's own rule). It is the designated one while it is in service;
@@ -232,6 +238,7 @@ def energized_network(network: Network) -> Network:
         lines=[network.lines[i] for i in keep_ln],
         transformers=[network.transformers[j] for j in keep_tr],
         loads=[network.loads[i] for i in keep_ld],
+        shunts=[network.shunts[i] for i in keep_sh],
         der_units=keep_der,
     ))
     reduced._labels = BlockLabels(
@@ -239,6 +246,7 @@ def energized_network(network: Network) -> Network:
         line=[full.line[i] for i in keep_ln],
         load=[full.load[i] for i in keep_ld],
         transformer=[full.transformer[j] for j in keep_tr],
+        shunt=[full.shunt[i] for i in keep_sh],
         node_b_pu=full.node_b_pu,
     )
     return reduced
@@ -260,6 +268,93 @@ def frame_references(network: Network) -> dict[int, bool]:
 def node_b_pu(network: Network) -> float | None:
     """The susceptance every node uses (the full network's first line's)."""
     return block_labels(network).node_b_pu
+
+
+# A shunt reactor's resistance when it declares none: a typical X/R for one.
+# Exactly 0 would leave its resonance with the bus capacitance undamped.
+DEFAULT_SHUNT_REACTOR_XR = 50.0
+
+
+def shunt_is_reactor(shunt) -> bool:
+    """A reactor absorbs reactive power and needs a branch of its own; a
+    capacitor bank generates it and folds into the bus's own capacitance."""
+    return shunt.q_mvar > 0
+
+
+def shunt_reactor_rx(shunt, sn_mva: float) -> tuple[float, float]:
+    """``(r_pu, x_pu)`` of a shunt reactor's branch, on the network base.
+
+    ``q_mvar`` is its nameplate, the reactive power it absorbs at nominal
+    voltage through its reactance alone (Q = V^2/X). The resistance comes
+    from its X/R, so the branch also draws a little active power -- which is
+    why the power flow is given the P and Q of *this* R-X pair rather than
+    the nameplate, so both sides of the tool see the same device.
+    """
+    x_pu = sn_mva / shunt.q_mvar
+    r_pu = shunt.r_pu if shunt.r_pu is not None else x_pu / DEFAULT_SHUNT_REACTOR_XR
+    return r_pu, x_pu
+
+
+def shunt_reactor_pq_mw(shunt, sn_mva: float) -> tuple[float, float]:
+    """``(p_mw, q_mvar)`` a reactor's R-X branch actually draws at 1 pu."""
+    r_pu, x_pu = shunt_reactor_rx(shunt, sn_mva)
+    denom = r_pu**2 + x_pu**2
+    return sn_mva * r_pu / denom, sn_mva * x_pu / denom
+
+
+def node_capacitances(network: Network) -> dict[int, float]:
+    """Each bus's shunt capacitance ``Cl`` in per unit -- what its own dynamic
+    model integrates (``components/node.py``: ``C dv/dt = i - jwC v``).
+
+    Physically that is half the charging of every in-service line touching the
+    bus (a pi-model puts half at each end) plus any capacitor bank on it. With
+    ``Network.nodes_share_first_line_b`` every bus instead borrows the first
+    line's charging, which is what the MATLAB toolbox does and what the ported
+    presets keep so their numbers still match it.
+
+    Covers the buses that get a node block of their own, which is every bus
+    except a unit's own terminal bus -- that one lives inside the unit's model,
+    behind its step-up transformer, and has no node equation to divide by.
+
+    Counts every line and shunt the network still lists, open breakers
+    included, exactly as the blocks do: dropping what is out of service is
+    :func:`energized_network`'s job, and the reduced network it returns no
+    longer lists them.
+
+    Raises when a bus ends up with none and ``Network.min_node_b_pu`` says
+    nothing, rather than inventing a value to divide by.
+    """
+    modelled = [b.id for b in network.buses if b.id not in {d.bus for d in network.der_units}]
+    if network.nodes_share_first_line_b:
+        shared = block_labels(network).node_b_pu
+        if shared is None:
+            return {}
+        return {bus_id: shared for bus_id in modelled}
+
+    cap = {bus_id: 0.0 for bus_id in modelled}
+    for ln in network.lines:
+        half = ln.b_pu / 2
+        for end in (ln.from_bus, ln.to_bus):
+            if end in cap:
+                cap[end] += half
+    for sh in network.shunts:
+        if not shunt_is_reactor(sh) and sh.bus in cap:
+            cap[sh.bus] += (-sh.q_mvar) / network.sn_mva
+
+    empty = sorted(b for b, c in cap.items() if c <= 0.0)
+    if empty:
+        if network.min_node_b_pu is None:
+            raise ValueError(
+                f"bus(es) {empty} have no shunt capacitance: none of their in-service lines declare any "
+                f"charging (b_pu) and they carry no capacitor bank. Every bus's dynamic model integrates "
+                f"dv/dt = (wb/Cl)*(...), so Cl has to be greater than zero. Either give those lines their "
+                f"charging, add a capacitor bank, set Network.min_node_b_pu to the value you want used "
+                f"there (distribution-feeder data that omits charging is the usual reason), or set "
+                f"Network.nodes_share_first_line_b to reproduce the MATLAB toolbox's single shared value."
+            )
+        for b in empty:
+            cap[b] = network.min_node_b_pu
+    return cap
 
 
 def out_of_service_summary(network: Network) -> list[str]:
@@ -284,6 +379,9 @@ def out_of_service_summary(network: Network) -> list[str]:
     lds = [i for i, ok in enumerate(st.loads) if not ok]
     if lds:
         msgs.append(f"load(s) #{', #'.join(map(str, lds))} disconnected")
+    shs = [i for i, ok in enumerate(st.shunts) if not ok]
+    if shs:
+        msgs.append(f"shunt(s) #{', #'.join(map(str, shs))} disconnected")
     ders = [i for i, ok in st.der_units.items() if not ok]
     if ders:
         msgs.append(f"unit(s) id {', '.join(map(str, ders))} disconnected")

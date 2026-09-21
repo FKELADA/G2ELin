@@ -100,6 +100,38 @@ class Load(BaseModel):
     closed: bool = Field(default=True, description="Breaker between the load and its bus")
 
 
+class Shunt(BaseModel):
+    """A shunt compensation device at a bus: a capacitor bank or a reactor.
+
+    The sign convention is :class:`Load`'s (and pandapower's): ``q_mvar > 0``
+    absorbs reactive power (a reactor), ``q_mvar < 0`` generates it (a
+    capacitor bank).
+
+    The two are modelled very differently, because a bus's own dynamic model
+    (``components/node.py``) already *is* a capacitance to ground --
+    ``C dv/dt = i - jwC v``. A capacitor bank is simply more of that
+    capacitance, so it adds no states at all. A reactor is an inductor to
+    ground and cannot be folded in: a negative capacitance would flip the
+    sign of the node's dynamics, and netting the two against each other would
+    only be right at exactly the nominal frequency. It therefore gets a
+    branch of its own, the same RL branch a line uses with its far end at
+    zero volts.
+    """
+
+    bus: int
+    q_mvar: float = Field(
+        description="Reactive power at 1.0 pu voltage: > 0 absorbs (reactor), < 0 generates (capacitor bank)"
+    )
+    r_pu: float | None = Field(
+        default=None, ge=0,
+        description="Series resistance of a *reactor*, per unit on the network base. None derives one from "
+        "X/R = 50 (a typical shunt reactor); exactly 0 leaves its resonance with the bus capacitance "
+        "undamped. Ignored for a capacitor bank, which has no branch of its own.",
+    )
+    closed: bool = Field(default=True, description="Breaker between the device and its bus")
+    name: str = ""
+
+
 class DerUnit(BaseModel):
     """A dispatchable unit (infinite bus, GFM, GFL or synchronous machine).
 
@@ -125,6 +157,15 @@ class DerUnit(BaseModel):
     )
     xd_pu: float | None = Field(
         default=None, description="Equivalent transient reactance, used for SCR calculations only"
+    )
+    sn_mva: float | None = Field(
+        default=None, gt=0,
+        description="The unit's own rating, i.e. the base this unit's `params` are given on. Published "
+        "machine data is per unit of the machine's rating (Kundur's two-area machines are 900 MVA, while "
+        "the network base is 100 MVA), so with this set those overrides are converted to the network base "
+        "-- impedances x Sn_network/Sn_unit, inertia the other way. Leave it unset (the default) when the "
+        "overrides are already on the network base. It rebases `params` only: the built-in defaults and "
+        "the transformer impedance are on the network base either way.",
     )
     closed: bool = Field(default=True, description="Breaker between the unit and its bus")
     params: dict[str, float] = Field(
@@ -152,6 +193,19 @@ class Network(BaseModel):
         "transformer impedance (script_generic.m's Y_TR(1,:) convention) instead of its own. Off by "
         "default, so power flow and the dynamic models see the same transformer.",
     )
+    nodes_share_first_line_b: bool = Field(
+        default=False,
+        description="MATLAB-compatible mode: every bus's dynamic model uses the *first* line's charging "
+        "susceptance as its own capacitance, instead of the half-charging of the lines actually connected "
+        "to it plus its capacitor banks. Off by default, so each bus gets its own; the ported presets set "
+        "it so their numbers still match the MATLAB toolbox's (see network/breakers.node_capacitances).",
+    )
+    min_node_b_pu: float | None = Field(
+        default=None, gt=0,
+        description="The capacitance to give a bus whose in-service lines declare no charging at all, as "
+        "distribution-feeder data often does (IEEE 33/69). Without it such a network is refused rather "
+        "than run on an invented number, since a bus's dynamic model divides by its capacitance.",
+    )
     frame_follows_slack: bool = Field(
         default=False,
         description="MATLAB-compatible mode: the dynamic models' common dq frame turns with the slack "
@@ -163,6 +217,7 @@ class Network(BaseModel):
     lines: list[Line] = Field(default_factory=list)
     transformers: list[Transformer] = Field(default_factory=list)
     loads: list[Load] = Field(default_factory=list)
+    shunts: list[Shunt] = Field(default_factory=list)
     der_units: list[DerUnit] = Field(default_factory=list)
     # Set only on the reduced networks network.breakers.energized_network()
     # builds: the element numbering/labels of the network they came from, so
@@ -179,6 +234,8 @@ class Network(BaseModel):
             missing |= {tr.hv_bus, tr.lv_bus} - bus_ids
         for ld in self.loads:
             missing |= {ld.bus} - bus_ids
+        for sh in self.shunts:
+            missing |= {sh.bus} - bus_ids
         for der in self.der_units:
             missing |= {der.bus} - bus_ids
         if missing:

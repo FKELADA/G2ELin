@@ -145,7 +145,8 @@ def _breaker(model: NonlinearNetworkModel, ev: NetworkEvent) -> AppliedEvent:
 
     post = net.model_copy(update=dict(buses=buses, lines=lines, loads=loads, transformers=trs, der_units=ders))
     post._labels = BlockLabels(
-        der={d.id: lab.der[d.id] for d in ders}, line=line_l, load=load_l, transformer=tr_l, node_b_pu=lab.node_b_pu,
+        der={d.id: lab.der[d.id] for d in ders}, line=line_l, load=load_l, transformer=tr_l,
+        shunt=lab.shunt, node_b_pu=lab.node_b_pu,
     )
     new = rebuild(model, post)
     return AppliedEvent(new, new.initial_state(), what, None)
@@ -255,6 +256,10 @@ def rebuild(model: NonlinearNetworkModel, network: Network, replace: dict | None
         line_components=[comps[f"Ln_{n + 1}"] for n in lab.line],
         load_components=[comps[f"Ld_{n + 1}"] for n in lab.load],
         frame_components=frame_components,
+        shunt_components={
+            i: comps[f"Sh_{lab.shunt[i] + 1}"]
+            for i in range(len(network.shunts)) if f"Sh_{lab.shunt[i] + 1}" in comps
+        },
     )
     topology = compute_topology(blocks, wiring)
     z_offsets, off = [], 0

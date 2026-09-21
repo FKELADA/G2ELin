@@ -16,7 +16,7 @@ from g2elin_core.components.load import linearize_load
 from g2elin_core.components.node import linearize_node
 from g2elin_core.components.sm import linearize_sm
 from g2elin_core.interconnect import AssembledSystem, assemble_network
-from g2elin_core.network.breakers import frame_references, node_b_pu
+from g2elin_core.network.breakers import frame_references, node_capacitances
 from g2elin_core.network.schema import Network
 from g2elin_core.operating_point import compute_operating_point
 from g2elin_core.powerflow import PowerFlowResult
@@ -51,24 +51,20 @@ def linearize_network(network: Network, result: PowerFlowResult) -> AssembledSys
     if missing:
         raise NotImplementedError(f"unsupported DER unit type(s) for ids {sorted(missing)}")
 
-    # Node quirk: every node uses the *first* line's susceptance (see
-    # g2elin_core.components.sm module docstring) -- every bus's own dynamic
-    # model (components/node.py) needs this as a nonzero denominator
-    # (dv/dt = (wb/Cl)*(...)); a network with no lines at all (e.g.
-    # hand-built with only transformers) has no "line #1" to borrow a value
-    # from, and 0.0 isn't a safe fallback -- it's a real division by zero,
-    # not just an unrealistic approximation. validate_network() already
-    # catches this before it reaches here; this is the defensive backstop.
-    b_pu_quirk = node_b_pu(network)
-    if b_pu_quirk is None:
+    # Each bus's own capacitance: half the charging of the lines on it plus
+    # its capacitor banks, or -- in the MATLAB-compatible mode the ported
+    # presets use -- the first line's charging shared by every bus. Raises
+    # rather than divide by zero when a bus has none (node_capacitances).
+    node_b = node_capacitances(network)
+    if not node_b:
         raise ValueError(
-            "this network has no Line elements -- every bus's own dynamic model needs a line-charging "
-            "susceptance (b_pu) to linearize around, which this codebase always borrows from the first "
-            "Line in the network; a network built entirely from transformers has no such source and "
-            "can't run modal analysis or EMT. Add at least one Line (even a short one with a small b_pu)"
+            "this network has no Line elements -- with Network.nodes_share_first_line_b every bus's "
+            "dynamic model borrows the first Line's charging susceptance (b_pu), and a network built "
+            "entirely from transformers has no such source, so it can't run modal analysis or EMT. "
+            "Switch that option off to give each bus its own capacitance, or add at least one Line."
         )
     node_components = {
-        bus_id: linearize_node(wb_val=wb_val, b_pu=b_pu_quirk, wg0=1.0, vgd_g0=vgd, vgq_g0=vgq)
+        bus_id: linearize_node(wb_val=wb_val, b_pu=node_b[bus_id], wg0=1.0, vgd_g0=vgd, vgq_g0=vgq)
         for bus_id, (vgd, vgq) in op.node_vg.items()
     }
 
@@ -85,6 +81,17 @@ def linearize_network(network: Network, result: PowerFlowResult) -> AssembledSys
             linearize_load(wb_val=wb_val, r_pu=r_pu, x_pu=x_pu, wg0=1.0, vgd_g0=vgd, vgq_g0=vgq)
         )
 
+    # Shunt reactors: the same RL branch a line uses, with its far end at
+    # zero volts (the assembly wires it that way). Capacitor banks are
+    # already in node_b above, and add no block at all.
+    shunt_components = {
+        idx: linearize_line(
+            wb_val=wb_val, r_pu=rx[0], x_pu=rx[1], wg0=1.0,
+            ild_g0=op.shunt_i0[idx][0], ilq_g0=op.shunt_i0[idx][1],
+        )
+        for idx, rx in op.shunt_rx.items()
+    }
+
     return assemble_network(
         network,
         der_components=der_components,
@@ -92,4 +99,5 @@ def linearize_network(network: Network, result: PowerFlowResult) -> AssembledSys
         line_components=line_components,
         load_components=load_components,
         frame_components=frame_components,
+        shunt_components=shunt_components,
     )

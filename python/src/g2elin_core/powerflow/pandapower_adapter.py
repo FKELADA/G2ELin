@@ -15,7 +15,9 @@ from dataclasses import dataclass
 import pandapower as pp
 import pandas as pd
 
-from g2elin_core.network.breakers import NoReferenceUnit, service_state
+from g2elin_core.network.breakers import (
+    NoReferenceUnit, service_state, shunt_is_reactor, shunt_reactor_pq_mw,
+)
 from g2elin_core.network.schema import BusType, Network, UnitType
 
 _LARGE_Q_LIMIT_MVAR = 9999.0  # matches Power_Fl.m's default qg_max/qg_min when unspecified
@@ -100,6 +102,23 @@ def build_pandapower_net(network: Network) -> tuple[pp.pandapowerNet, dict[int, 
         pp.create_load(
             net, bus=bus_index[load.bus], p_mw=load.p_mw, q_mvar=load.q_mvar, name=load.name,
             in_service=st.loads[li],
+        )
+
+    # Shunts: pandapower's own sign convention is this schema's (q_mvar > 0
+    # absorbs), and its shunt is rated at the bus's nominal voltage, which is
+    # the voltage Shunt.q_mvar is quoted at.
+    for si, shunt in enumerate(network.shunts):
+        # A capacitor bank is a pure susceptance. A reactor has an X/R, and
+        # gets the P and Q of the very R-X branch its dynamic model uses
+        # (network/breakers.shunt_reactor_pq_mw), so power flow and dynamics
+        # agree on what it draws.
+        if shunt_is_reactor(shunt):
+            p_mw, q_mvar = shunt_reactor_pq_mw(shunt, network.sn_mva)
+        else:
+            p_mw, q_mvar = 0.0, shunt.q_mvar
+        pp.create_shunt(
+            net, bus=bus_index[shunt.bus], q_mvar=q_mvar, p_mw=p_mw, name=shunt.name,
+            in_service=st.shunts[si],
         )
 
     for der in network.der_units:

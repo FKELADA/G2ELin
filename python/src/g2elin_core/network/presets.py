@@ -105,6 +105,10 @@ def _wscc9_network(name: str, ders: list[_WsccDer]) -> Network:
     ]
     return Network(
         name=name, f_hz=60.0, sn_mva=_SN_MVA,
+        # These are ports of the MATLAB toolbox's own cases, so they keep its
+        # node convention (every bus uses the first line's charging) and their
+        # numbers still match it -- see network/breakers.node_capacitances.
+        nodes_share_first_line_b=True,
         buses=topo_buses + der_buses, lines=lines, transformers=transformers,
         loads=loads, der_units=der_units,
     )
@@ -339,6 +343,10 @@ def _cigre_network(name: str, ders: list[_CigreDer], terminal_names: list[str]) 
     ]
     return Network(
         name=name, f_hz=50.0, sn_mva=_CIGRE_SN_MVA,
+        # These are ports of the MATLAB toolbox's own cases, so they keep its
+        # node convention (every bus uses the first line's charging) and their
+        # numbers still match it -- see network/breakers.node_capacitances.
+        nodes_share_first_line_b=True,
         buses=raw_buses + der_buses, lines=lines, transformers=transformers,
         loads=loads, der_units=der_units,
     )
@@ -488,6 +496,10 @@ def _smib(
 
     return Network(
         name=f"{'SMIB' if grid_unit is UnitType.INFINITE_BUS else 'SMSM'}_{unit_type.value}",
+        # These are ports of the MATLAB toolbox's own cases, so they keep its
+        # node convention (every bus uses the first line's charging) and their
+        # numbers still match it -- see network/breakers.node_capacitances.
+        nodes_share_first_line_b=True,
         f_hz=50.0,
         sn_mva=_CIGRE_SN_MVA,
         buses=buses,
@@ -653,6 +665,10 @@ def cigre_interconnected_1sm_1gfm_1gfl() -> Network:
                      sn_mva=_CIGRE_SN_MVA, name="hv_mv_xfmr")]
     return Network(
         name="CIGRE_Interconnected_1SM_1GFM_1GFL", f_hz=50.0, sn_mva=_CIGRE_SN_MVA,
+        # These are ports of the MATLAB toolbox's own cases, so they keep its
+        # node convention (every bus uses the first line's charging) and their
+        # numbers still match it -- see network/breakers.node_capacitances.
+        nodes_share_first_line_b=True,
         buses=raw_buses + der_buses + [grid_bus], lines=lines, transformers=transformers,
         loads=loads, der_units=der_units,
     )

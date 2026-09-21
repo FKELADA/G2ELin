@@ -35,8 +35,13 @@ def build_blocks_and_wiring(
     line_components: list[PortSpec],
     load_components: list[PortSpec],
     frame_components: dict[int, PortSpec] | None = None,
+    shunt_components: dict[int, PortSpec] | None = None,
 ) -> tuple[list[Block], list[Wiring]]:
     """Wires one network's components together.
+
+    ``shunt_components`` are the shunt *reactors*, keyed by their index in
+    ``network.shunts``. A capacitor bank never appears here: it is part of its
+    bus's own capacitance (``network/breakers.node_capacitances``).
 
     ``frame_components`` (see ``components/frame.py``) are the dq reference
     frames everything is written in, one per island, keyed by the unit that
@@ -102,6 +107,12 @@ def build_blocks_and_wiring(
     load_blocks = [
         Block(name=f"Ld_{labels.load[i] + 1}", kind="load", comp=comp) for i, comp in enumerate(load_components)
     ]
+    # A reactor is an RL branch from its bus to zero volts, so it reuses the
+    # line component with its far end simply left unwired (below).
+    shunt_blocks: dict[int, Block] = {
+        idx: Block(name=f"Sh_{labels.shunt[idx] + 1}", kind="shunt", comp=comp)
+        for idx, comp in (shunt_components or {}).items()
+    }
 
     # Order matches script_generic.m's concatenation order: slack, other DGs,
     # nodes, lines, loads. Only cosmetic (state/output ordering), not required
@@ -115,6 +126,7 @@ def build_blocks_and_wiring(
         + [node_blocks[b.id] for b in network.buses if b.id in node_blocks]
         + line_blocks
         + load_blocks
+        + [shunt_blocks[i] for i in sorted(shunt_blocks)]
     )
 
     transformer_by_lv_bus = {tr.lv_bus: tr for tr in network.transformers}
@@ -158,6 +170,8 @@ def build_blocks_and_wiring(
         wiring.append(Wiring(b, "wg", [(frame_of(ln.from_bus), "wr", 1.0)]))
     for ld, b in zip(network.loads, load_blocks):
         wiring.append(Wiring(b, "wg", [(frame_of(ld.bus), "wr", 1.0)]))
+    for idx, b in shunt_blocks.items():
+        wiring.append(Wiring(b, "wg", [(frame_of(network.shunts[idx].bus), "wr", 1.0)]))
 
     # DG voltage input = its raw node's voltage output.
     for der in network.der_units:
@@ -174,6 +188,15 @@ def build_blocks_and_wiring(
         wiring.append(Wiring(block, "vgqj_g", [(from_node, "vgq_g", 1.0)]))
         wiring.append(Wiring(block, "vgdk_g", [(to_node, "vgd_g", 1.0)]))
         wiring.append(Wiring(block, "vgqk_g", [(to_node, "vgq_g", 1.0)]))
+
+    # A reactor sees its bus at one end and zero volts at the other: the
+    # far-end ports are wired to an empty sum, which is exactly ground.
+    for idx, block in shunt_blocks.items():
+        node_block = node_blocks[network.shunts[idx].bus]
+        wiring.append(Wiring(block, "vgdj_g", [(node_block, "vgd_g", 1.0)]))
+        wiring.append(Wiring(block, "vgqj_g", [(node_block, "vgq_g", 1.0)]))
+        wiring.append(Wiring(block, "vgdk_g", []))
+        wiring.append(Wiring(block, "vgqk_g", []))
 
     # Load voltage = its node's voltage output.
     for ld, block in zip(network.loads, load_blocks):
@@ -203,6 +226,10 @@ def build_blocks_and_wiring(
             if ld.bus == bus_id:
                 terms_d.append((block, "icd_g", -1.0))
                 terms_q.append((block, "icq_g", -1.0))
+        for idx, block in shunt_blocks.items():
+            if network.shunts[idx].bus == bus_id:
+                terms_d.append((block, "ild_g", -1.0))
+                terms_q.append((block, "ilq_g", -1.0))
         wiring.append(Wiring(node_block, "ishd_g", terms_d))
         wiring.append(Wiring(node_block, "ishq_g", terms_q))
 
@@ -217,6 +244,7 @@ def assemble_network(
     line_components: list[PortSpec],
     load_components: list[PortSpec],
     frame_components: dict[int, PortSpec] | None = None,
+    shunt_components: dict[int, PortSpec] | None = None,
 ) -> AssembledSystem:
     blocks, wiring = build_blocks_and_wiring(
         network,
@@ -225,5 +253,6 @@ def assemble_network(
         line_components=line_components,
         load_components=load_components,
         frame_components=frame_components,
+        shunt_components=shunt_components,
     )
     return assemble(blocks, wiring)

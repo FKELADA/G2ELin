@@ -74,3 +74,79 @@ def test_unknown_override_is_flagged_and_422():
     assert "NotAParam" in r.json()["detail"]
     # Power flow doesn't use dynamic parameters, so it still runs.
     assert client.post("/api/network/powerflow", json={"network": net}).json()["converged"]
+
+
+
+
+# --- DerUnit.sn_mva: machine data given on the machine's own base -------------
+import numpy as np
+
+from g2elin_core.network.presets import wscc9_3sm
+from g2elin_core.network.validation import validate_network
+from g2elin_core.pipeline import linearize_network
+def _rated(**params):
+    net = wscc9_3sm()
+    net.der_units[1].sn_mva = 900.0
+    net.der_units[1].params = params
+    return net
+
+
+def test_rated_unit_equals_hand_converted_params():
+    """A 900 MVA machine's own data must give exactly the model you get by
+    converting it to the 100 MVA network base by hand."""
+    machine = dict(H=6.5, Ra=0.0025, Ll=0.2, Lad=1.8, Laq=1.7, Lfd=0.165, KD=2.0)
+    k = 100.0 / 900.0
+    by_hand = {n: (v / k if n in ("H", "KD") else v * k) for n, v in machine.items()}
+
+    rated = _rated(**machine)
+    plain = wscc9_3sm()
+    plain.der_units[1].params = by_hand
+
+    A_rated = linearize_network(rated, run_power_flow(rated)).A
+    A_plain = linearize_network(plain, run_power_flow(plain)).A
+    assert np.allclose(A_rated, A_plain, rtol=0, atol=0)
+    assert by_hand["Lad"] == pytest.approx(0.2)     # 1.8 pu on 900 MVA is 0.2 pu on 100 MVA
+    assert by_hand["H"] == pytest.approx(58.5)      # 6.5 s of stored energy per 900 MVA
+
+
+def test_rating_actually_changes_the_model():
+    """Guards against the rebasing silently doing nothing."""
+    machine = dict(H=6.5, Lad=1.8)
+    rated = _rated(**machine)
+    as_is = wscc9_3sm()
+    as_is.der_units[1].params = dict(machine)
+    A_rated = linearize_network(rated, run_power_flow(rated)).A
+    A_as_is = linearize_network(as_is, run_power_flow(as_is)).A
+    assert not np.allclose(A_rated, A_as_is, rtol=1e-6, atol=1e-6)
+
+
+def test_rating_equal_to_the_network_base_is_a_no_op():
+    net = wscc9_3sm()
+    net.der_units[1].sn_mva = net.sn_mva
+    net.der_units[1].params = dict(H=6.5, Lad=1.8)
+    plain = wscc9_3sm()
+    plain.der_units[1].params = dict(H=6.5, Lad=1.8)
+    assert np.allclose(linearize_network(net, run_power_flow(net)).A,
+                       linearize_network(plain, run_power_flow(plain)).A, rtol=0, atol=0)
+
+
+def test_rebase_params_leaves_tuning_alone():
+    from g2elin_core.operating_point import rebase_params
+
+    out = rebase_params(dict(Lad=1.8, H=6.5, Ka=300.0, Tr=0.02), from_mva=900.0, to_mva=100.0)
+    assert out["Lad"] == pytest.approx(0.2) and out["H"] == pytest.approx(58.5)
+    assert out["Ka"] == 300.0 and out["Tr"] == 0.02       # gains/time constants are not machine data
+
+
+def test_validation_warns_when_a_gain_is_given_on_a_rated_unit():
+    net = _rated(H=6.5, Ka=250.0)
+    warnings_ = [i for i in validate_network(net) if i.severity == "warning" and "Ka" in i.message]
+    assert warnings_ and "taken as given" in warnings_[0].message
+    assert not [i for i in validate_network(net) if i.severity == "error"]
+
+
+def test_validation_warns_when_a_rating_has_no_effect():
+    net = wscc9_3sm()
+    net.der_units[1].sn_mva = 900.0
+    msgs = [i.message for i in validate_network(net) if i.severity == "warning"]
+    assert any("has no effect" in m for m in msgs)

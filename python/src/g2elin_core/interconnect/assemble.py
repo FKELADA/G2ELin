@@ -44,6 +44,10 @@ _UG_PORTS = {
     "gfl": {"theta_g": 0, "vgd_g": 1, "vgq_g": 2},  # GFL is never the slack
     "node": {"wg": 0, "ishd_g": 1, "ishq_g": 2},
     "line": {"wg": 0, "vgdj_g": 1, "vgqj_g": 2, "vgdk_g": 3, "vgqk_g": 4},
+    # A shunt reactor is the same RL branch with its "k" end held at zero
+    # volts, so it reads the line's ports (network_assembly wires k to an
+    # empty sum, which is ground).
+    "shunt": {"wg": 0, "vgdj_g": 1, "vgqj_g": 2, "vgdk_g": 3, "vgqk_g": 4},
     "load": {"wg": 0, "vgd_g": 1, "vgq_g": 2},
 }
 _OUTG_PORTS = {
@@ -59,6 +63,7 @@ _OUTG_PORTS = {
     "gfl": {"igd_g": 0, "igq_g": 1},
     "node": {"vgd_g": 0, "vgq_g": 1},
     "line": {"ild_g": 0, "ilq_g": 1},
+    "shunt": {"ild_g": 0, "ilq_g": 1},
     "load": {"icd_g": 0, "icq_g": 1},
 }
 

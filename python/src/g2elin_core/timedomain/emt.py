@@ -59,7 +59,7 @@ from g2elin_core.components.sm import (
     SmOperatingPoint, sm_dae, sm_nonlinear_funcs, sm_nonlinear_jacobians, sm_nonlinear_point,
 )
 from g2elin_core.interconnect import Block, build_blocks_and_wiring, compute_topology
-from g2elin_core.network.breakers import frame_references, node_b_pu
+from g2elin_core.network.breakers import frame_references, node_capacitances
 from g2elin_core.network.schema import Network
 from g2elin_core.operating_point import NetworkOperatingPoint, compute_operating_point
 from g2elin_core.powerflow import PowerFlowResult
@@ -469,11 +469,11 @@ def build_nonlinear_network(network: Network, result: PowerFlowResult) -> Nonlin
     if missing:
         raise NotImplementedError(f"unsupported DER unit type(s) for ids {sorted(missing)}")
 
-    # Falls back to 0 for a network with no lines at all -- see
-    # pipeline.linearize_network's identical guard for why.
-    b_pu_quirk = node_b_pu(network) or 0.0
+    # Each bus's own capacitance -- see pipeline.linearize_network, which
+    # builds the linear model from the same numbers.
+    node_b = node_capacitances(network)
     node_components = {
-        bus_id: nonlinear_node_block(wb_val=wb_val, b_pu=b_pu_quirk, wg0=1.0, vgd_g0=vgd, vgq_g0=vgq)
+        bus_id: nonlinear_node_block(wb_val=wb_val, b_pu=node_b[bus_id], wg0=1.0, vgd_g0=vgd, vgq_g0=vgq)
         for bus_id, (vgd, vgq) in op.node_vg.items()
     }
     line_components = [
@@ -500,6 +500,17 @@ def build_nonlinear_network(network: Network, result: PowerFlowResult) -> Nonlin
         ref: nonlinear_frame_block(wb_val=wb_val, theta0=op.theta_g_rad, driven=driven)
         for ref, driven in frame_references(network).items()
     }
+    # Shunt reactors: an RL branch to zero volts (capacitor banks are in
+    # node_b above and add no block).
+    shunt_components = {
+        idx: nonlinear_line_block(
+            wb_val=wb_val, r_pu=rx[0], x_pu=rx[1], wg0=1.0,
+            ild_g0=op.shunt_i0[idx][0], ilq_g0=op.shunt_i0[idx][1],
+            vgdj_g0=op.node_vg[network.shunts[idx].bus][0], vgqj_g0=op.node_vg[network.shunts[idx].bus][1],
+            vgdk_g0=0.0, vgqk_g0=0.0,
+        )
+        for idx, rx in op.shunt_rx.items()
+    }
     blocks, wiring = build_blocks_and_wiring(
         network,
         der_components=der_components,
@@ -507,6 +518,7 @@ def build_nonlinear_network(network: Network, result: PowerFlowResult) -> Nonlin
         line_components=line_components,
         load_components=load_components,
         frame_components=frame_components,
+        shunt_components=shunt_components,
     )
     topology = compute_topology(blocks, wiring)
 

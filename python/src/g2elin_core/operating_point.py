@@ -10,13 +10,14 @@ state spaces" section.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
 from g2elin_core.components.gfl import GflOperatingPoint
 from g2elin_core.components.gfm import GfmOperatingPoint
 from g2elin_core.components.sm import SmOperatingPoint
+from g2elin_core.network.breakers import shunt_is_reactor, shunt_reactor_rx
 from g2elin_core.network.schema import Network
 from g2elin_core.network.validation import validate_network
 from g2elin_core.powerflow.pandapower_adapter import PowerFlowResult
@@ -223,17 +224,61 @@ def unit_params(network: Network, der) -> dict:
         defaults = fn(**base, un_kv=network.bus(der.bus).vn_kv)
     else:
         return {}
-    return apply_param_overrides(der, defaults)
+    return apply_param_overrides(der, defaults, network.sn_mva)
 
 
-def apply_param_overrides(der, params: dict) -> dict:
+# --- Per-unit rebasing (DerUnit.sn_mva) --------------------------------------
+# Published machine data is per unit of the *machine's* rating, not the
+# network's. With Z_base = V^2/S: an impedance in pu of a 900 MVA machine is
+# 9x smaller once referred to a 100 MVA network (x_d = 1.8 -> 0.2), while
+# inertia goes the other way (H = 6.5 s -> 58.5 s), because H is energy per
+# unit of rating. Capacitance and admittance follow inertia (Y_base = S/V^2).
+#
+# Only quantities whose base is unambiguous are converted. Controller gains
+# and time constants are *tuning*, not machine data: a rise time is a rise
+# time on any base, and a gain's base depends on which signals it sits
+# between, so rebasing them by rule would be guesswork. validate_network()
+# warns when a rebased unit overrides one of those instead.
+_REBASE_AS_IMPEDANCE = frozenset({  # x Sn_network / Sn_unit
+    "Ra", "Ll", "Lad", "Laq", "Lfd", "Rfd", "L1d", "R1d", "L1q", "R1q", "L2q", "R2q",
+    "RL_pu", "Rf", "Lf", "Rt", "Lt", "mp", "nq",
+})
+_REBASE_AS_INERTIA = frozenset({  # x Sn_unit / Sn_network
+    "H", "KD", "Cf", "Cdc", "Gdc",
+})
+REBASED_PARAM_KEYS = _REBASE_AS_IMPEDANCE | _REBASE_AS_INERTIA
+
+
+def rebase_params(params: dict, *, from_mva: float, to_mva: float) -> dict:
+    """``params`` given per unit of ``from_mva``, expressed per unit of ``to_mva``."""
+    if from_mva == to_mva:
+        return dict(params)
+    k = to_mva / from_mva
+    out = dict(params)
+    for name, value in params.items():
+        if name in _REBASE_AS_IMPEDANCE:
+            out[name] = value * k
+        elif name in _REBASE_AS_INERTIA:
+            out[name] = value / k
+    return out
+
+
+def apply_param_overrides(der, params: dict, network_sn_mva: float | None = None) -> dict:
     """``params`` with ``der.params`` applied on top; raises on an override
     name this unit type doesn't have (validate_network() reports the same).
+
+    When the unit declares its own rating (``DerUnit.sn_mva``) its overrides
+    are read per unit of *that* rating and converted to the network's base
+    first -- see :func:`rebase_params`. ``params`` itself (the type's
+    defaults) is already on the network base and is left alone.
     """
     unknown = set(der.params) - overridable_param_keys(der.unit_type.value)
     if unknown:
         raise ValueError(f"unit id={der.id} ({der.unit_type.value}): unknown parameter override(s) {sorted(unknown)}")
-    return {**params, **der.params}
+    overrides = der.params
+    if der.sn_mva is not None and network_sn_mva is not None:
+        overrides = rebase_params(overrides, from_mva=der.sn_mva, to_mva=network_sn_mva)
+    return {**params, **overrides}
 
 
 def _rotate_to_global(v_pu: float, angle_rad: float, theta_g_rad: float) -> tuple[float, float]:
@@ -255,6 +300,11 @@ class NetworkOperatingPoint:
     node_vg: dict[int, tuple[float, float]]  # bus id -> (vgd_g0, vgq_g0)
     line_i0: list[tuple[float, float]]  # per Network.lines index -> (ild_g0, ilq_g0)
     load_rx: dict[int, tuple[float, float]]  # Load index -> (r_pu, x_pu)
+    # Shunt *reactors* only (a capacitor bank is part of its bus's own
+    # capacitance, not a branch): Network.shunts index -> (r_pu, x_pu) and
+    # the current it draws at the operating point.
+    shunt_rx: dict[int, tuple[float, float]] = field(default_factory=dict)
+    shunt_i0: dict[int, tuple[float, float]] = field(default_factory=dict)
 
 
 def compute_operating_point(network: Network, result: PowerFlowResult) -> NetworkOperatingPoint:
@@ -303,7 +353,9 @@ def compute_operating_point(network: Network, result: PowerFlowResult) -> Networ
     def build_sm_op(der, theta_g_rad: float) -> SmOperatingPoint:
         tr = transformer_by_lv_bus[der.bus]
         rt, lt = unit_transformer_rx(network, der)
-        params = apply_param_overrides(der, sm_params(sn_mva=network.sn_mva, f_hz=network.f_hz, rt_pu=rt, lt_pu=lt))
+        params = apply_param_overrides(
+            der, sm_params(sn_mva=network.sn_mva, f_hz=network.f_hz, rt_pu=rt, lt_pu=lt), network.sn_mva
+        )
         v_t, a_t = bus_vm_va(der.bus)
         p_net, q_net = bus_pq(der.bus)
         p_gross_pu = (p_net + der.p_cons_mw) / network.sn_mva
@@ -359,7 +411,7 @@ def compute_operating_point(network: Network, result: PowerFlowResult) -> Networ
             rt, lt = unit_transformer_rx(network, der)
             params = apply_param_overrides(der, gfm_params(
                 sn_mva=network.sn_mva, f_hz=network.f_hz, un_kv=un_kv, rt_pu=rt, lt_pu=lt,
-            ))
+            ), network.sn_mva)
             gfm_ops[der.id] = GfmOperatingPoint(
                 params=params, v_terminal_pu=v_t, angle_terminal_rad=a_t,
                 p_terminal_pu=p_pu, q_terminal_pu=q_pu,
@@ -369,7 +421,7 @@ def compute_operating_point(network: Network, result: PowerFlowResult) -> Networ
             rt, lt = unit_transformer_rx(network, der)
             params = apply_param_overrides(der, gfl_params(
                 sn_mva=network.sn_mva, f_hz=network.f_hz, un_kv=un_kv, rt_pu=rt, lt_pu=lt,
-            ))
+            ), network.sn_mva)
             gfl_ops[der.id] = GflOperatingPoint(
                 params=params, v_terminal_pu=v_t, angle_terminal_rad=a_t,
                 p_terminal_pu=p_pu, q_terminal_pu=q_pu,
@@ -419,6 +471,21 @@ def compute_operating_point(network: Network, result: PowerFlowResult) -> Networ
         ild0, ilq0 = np.linalg.solve(coeff, rhs)
         line_i0.append((float(ild0), float(ilq0)))
 
+    # Shunt reactors: an RL branch from the bus to zero volts. X comes from
+    # the reactive power it absorbs at 1 pu (Q = V^2/X), R from its X/R --
+    # exactly 0 would leave its resonance with the bus capacitance undamped.
+    shunt_rx: dict[int, tuple[float, float]] = {}
+    shunt_i0: dict[int, tuple[float, float]] = {}
+    for idx, sh in enumerate(network.shunts):
+        if not shunt_is_reactor(sh):
+            continue
+        r_pu, x_pu = shunt_reactor_rx(sh, network.sn_mva)
+        shunt_rx[idx] = (r_pu, x_pu)
+        vgd, vgq = node_vg[sh.bus]
+        coeff = np.array([[-r_pu, x_pu], [-x_pu, -r_pu]])
+        ish = np.linalg.solve(coeff, np.array([-vgd, -vgq]))
+        shunt_i0[idx] = (float(ish[0]), float(ish[1]))
+
     # Loads: constant-impedance equivalent at the operating voltage.
     # theta = acos(PF) (matching Functions/*.m's script_generic.m Load
     # Parameters section) only gives the correct sign of X for inductive
@@ -446,5 +513,5 @@ def compute_operating_point(network: Network, result: PowerFlowResult) -> Networ
 
     return NetworkOperatingPoint(
         theta_g_rad=theta_g_rad, sm_ops=sm_ops, gfm_ops=gfm_ops, gfl_ops=gfl_ops, ib_ops=ib_ops,
-        node_vg=node_vg, line_i0=line_i0, load_rx=load_rx
+        node_vg=node_vg, line_i0=line_i0, load_rx=load_rx, shunt_rx=shunt_rx, shunt_i0=shunt_i0,
     )

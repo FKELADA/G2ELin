@@ -191,9 +191,17 @@ def validate_network(network: Network) -> list[NetworkIssue]:
 
     # Parameter overrides must name a real parameter of that unit type -- a
     # typo would otherwise be silently ignored by the model.
-    from g2elin_core.operating_point import overridable_param_keys  # lazy: operating_point imports this module
+    from g2elin_core.operating_point import REBASED_PARAM_KEYS, overridable_param_keys  # lazy: it imports this module
 
     for der in network.der_units:
+        if der.sn_mva is not None and not der.params:
+            issues.append(NetworkIssue(
+                "warning",
+                f"unit id={der.id} declares sn_mva={der.sn_mva:g} MVA but overrides no parameters, so the "
+                f"rating has no effect -- it states the base of `params`, and the built-in defaults are "
+                f"already on the network base",
+                dynamics_caps,
+            ))
         if not der.params:
             continue
         unknown = sorted(set(der.params) - overridable_param_keys(der.unit_type.value))
@@ -203,6 +211,18 @@ def validate_network(network: Network) -> list[NetworkIssue]:
                 f"unit id={der.id} ({der.unit_type.value}) overrides parameter(s) it doesn't have: {unknown}",
                 dynamics_caps,
             ))
+        # Gains and time constants are tuning, not machine data, so they are
+        # taken as given on the network base (see operating_point.rebase_params).
+        if der.sn_mva is not None and der.sn_mva != network.sn_mva:
+            not_rebased = sorted(set(der.params) - set(unknown) - REBASED_PARAM_KEYS)
+            if not_rebased:
+                issues.append(NetworkIssue(
+                    "warning",
+                    f"unit id={der.id} is rated {der.sn_mva:g} MVA on a {network.sn_mva:g} MVA network, but "
+                    f"{not_rebased} are gains or time constants, which are taken as given rather than "
+                    f"converted between bases -- give them on the network base",
+                    dynamics_caps,
+                ))
 
     # Outside the MATLAB-compatible mode, a unit's Rt/Lt *are* its transformer
     # (see operating_point.unit_transformer_rx); an override would make the

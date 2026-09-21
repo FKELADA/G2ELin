@@ -14,9 +14,10 @@ part 8 (WSCC) or 4 (CIGRE) times over.
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
-from .schema import Bus, BusType, DerUnit, GfmController, Line, Load, Network, Transformer, UnitType
+from .schema import Bus, BusType, DerUnit, GfmController, Line, Load, Network, Shunt, Transformer, UnitType
 
 # Base values, from WSCC/script_WSCC.m Section II ("General network parameters"):
 #   f_hz = 60, Sn = 100 MVA, LV = 18 kV (generator terminals), HV = 230 kV (transmission)
@@ -672,3 +673,148 @@ def cigre_interconnected_1sm_1gfm_1gfl() -> Network:
         buses=raw_buses + der_buses + [grid_bus], lines=lines, transformers=transformers,
         loads=loads, der_units=der_units,
     )
+
+
+# --- Kundur two-area system ---------------------------------------------------
+# Kundur, *Power System Stability and Control*, Example 12.6: two areas of two
+# 900 MVA machines each, joined by a weak 220 km double-circuit tie. The
+# textbook case for inter-area oscillations and for what a PSS is for.
+#
+# Unlike every preset above this one is not a port of the MATLAB toolbox, so it
+# uses the tool's own conventions throughout: each bus gets its own capacitance
+# (nodes_share_first_line_b off) and each unit its own transformer.
+#
+# The published data is transcribed from the book; the operating point it
+# produces is checked against the book's own in tests/test_kundur.py (the
+# 400 MW tie flow and the three rotor-angle differences).
+_KUNDUR_SN_MVA = 100.0
+_KUNDUR_MACHINE_MVA = 900.0
+_KUNDUR_HV_KV, _KUNDUR_LV_KV = 230.0, 20.0
+# Per km on the 100 MVA / 230 kV base.
+_KUNDUR_R_KM, _KUNDUR_X_KM, _KUNDUR_B_KM = 0.0001, 0.001, 0.00175
+_KUNDUR_XFMR_X_PU = 0.15  # per unit of the machine's own rating
+
+
+def _kundur_line(from_bus: int, to_bus: int, km: float, name: str) -> Line:
+    return Line(
+        from_bus=from_bus, to_bus=to_bus, r_pu=_KUNDUR_R_KM * km, x_pu=_KUNDUR_X_KM * km,
+        b_pu=_KUNDUR_B_KM * km, length_km=km, name=name,
+    )
+
+
+def kundur_machine_params(h_s: float) -> dict[str, float]:
+    """Kundur's two-area machine, in this model's flux-linkage parameters.
+
+    The book gives the machine the usual way -- Xd/Xq/Xl, the transient and
+    subtransient reactances and their open-circuit time constants -- while
+    ``components/sm.py`` is written in mutual and leakage inductances with
+    explicit field and damper windings. The standard relations convert one to
+    the other:
+
+    * ``Lad = Xd - Xl`` and ``Laq = Xq - Xl`` (mutual = synchronous minus leakage)
+    * ``X' = Xl + Lad||Lfd`` and ``X'' = Xl + Lad||Lfd||L1d`` (a winding in
+      parallel shows up as a smaller effective reactance the faster you look)
+    * ``T'do = (Lad + Lfd) / (wb Rfd)``, and likewise for each damper
+
+    The result is per unit of the *machine's* 900 MVA rating, which is why the
+    units carry ``sn_mva`` -- the model rebases it onto the network's 100 MVA
+    (see ``operating_point.rebase_params``). ``tests/test_kundur.py`` inverts
+    these relations and checks the published numbers come back.
+    """
+    xd, xq, xl, ra = 1.8, 1.7, 0.2, 0.0025
+    xdp, xqp, xdpp, xqpp = 0.3, 0.55, 0.25, 0.25
+    td0p, tq0p, td0pp, tq0pp = 8.0, 0.4, 0.03, 0.05
+    wb = 2 * math.pi * 60.0
+
+    def par(*xs: float) -> float:
+        return 1.0 / sum(1.0 / x for x in xs)
+
+    lad, laq = xd - xl, xq - xl
+    lfd = lad * (xdp - xl) / (lad - (xdp - xl))
+    l1d = 1.0 / (1.0 / (xdpp - xl) - 1.0 / lad - 1.0 / lfd)
+    l1q = laq * (xqp - xl) / (laq - (xqp - xl))
+    l2q = 1.0 / (1.0 / (xqpp - xl) - 1.0 / laq - 1.0 / l1q)
+    return {
+        "Ra": ra, "Ll": xl, "Lad": lad, "Laq": laq,
+        "Lfd": lfd, "Rfd": (lad + lfd) / (wb * td0p),
+        "L1d": l1d, "R1d": (l1d + par(lad, lfd)) / (wb * td0pp),
+        "L1q": l1q, "R1q": (laq + l1q) / (wb * tq0p),
+        "L2q": l2q, "R2q": (l2q + par(laq, l1q)) / (wb * tq0pp),
+        "H": h_s, "KD": 0.0,
+    }
+
+
+# What the book's own study assumes, which the tool does not by default:
+# a fast static exciter, no power-system stabilizer, and constant mechanical
+# torque. The governor has no off switch, so its droop is set so large that it
+# does not respond -- without this its 0.5% droop adds a mode of its own near
+# 0.25 Hz and stiffens the inter-area mode (0.61 -> 0.71 Hz).
+_KUNDUR_CLASSIC_CONTROLS = {"K_PSS": 0.0, "Ka": 200.0, "Tr": 0.01, "mp": 1e6}
+
+
+def _kundur_two_area(name: str, extra_params: dict[str, float]) -> Network:
+    buses = (
+        [Bus(id=i, name=f"G{i}_terminal", vn_kv=_KUNDUR_LV_KV) for i in (1, 2, 3, 4)]
+        + [Bus(id=i, name=f"bus{i}", vn_kv=_KUNDUR_HV_KV) for i in range(5, 12)]
+    )
+    lines = [
+        _kundur_line(5, 6, 25.0, "5-6"),
+        _kundur_line(6, 7, 10.0, "6-7"),
+        _kundur_line(7, 8, 110.0, "7-8 ckt 1"),
+        _kundur_line(7, 8, 110.0, "7-8 ckt 2"),
+        _kundur_line(8, 9, 110.0, "8-9 ckt 1"),
+        _kundur_line(8, 9, 110.0, "8-9 ckt 2"),
+        _kundur_line(9, 10, 10.0, "9-10"),
+        _kundur_line(10, 11, 25.0, "10-11"),
+    ]
+    transformers = [
+        Transformer(hv_bus=hv, lv_bus=lv, r_pu=0.0, x_pu=_KUNDUR_XFMR_X_PU,
+                    sn_mva=_KUNDUR_MACHINE_MVA, name=f"G{lv}_xfmr")
+        for lv, hv in ((1, 5), (2, 6), (3, 11), (4, 10))
+    ]
+    loads = [
+        Load(bus=7, p_mw=967.0, q_mvar=100.0, name="area 1 load"),
+        Load(bus=9, p_mw=1767.0, q_mvar=100.0, name="area 2 load"),
+    ]
+    # The reactive support that holds the load buses up; without it this
+    # operating point does not stand. Negative q_mvar = generating (a bank).
+    shunts = [
+        Shunt(bus=7, q_mvar=-200.0, name="area 1 capacitors"),
+        Shunt(bus=9, q_mvar=-350.0, name="area 2 capacitors"),
+    ]
+    spec = [
+        (1, 1, BusType.SLACK, 700.0, 1.03, 6.5),
+        (2, 2, BusType.PV, 700.0, 1.01, 6.5),
+        (3, 3, BusType.PV, 719.0, 1.03, 6.175),
+        (4, 4, BusType.PV, 700.0, 1.01, 6.175),
+    ]
+    der_units = [
+        DerUnit(
+            id=i, bus=bus, unit_type=UnitType.SYNCHRONOUS_MACHINE, bus_type=bus_type,
+            v_set_pu=v, p_set_mw=p, xd_pu=0.3,
+            sn_mva=_KUNDUR_MACHINE_MVA,
+            params={**kundur_machine_params(h), **extra_params},
+        )
+        for i, bus, bus_type, p, v, h in spec
+    ]
+    return Network(
+        name=name, f_hz=60.0, sn_mva=_KUNDUR_SN_MVA,
+        buses=buses, lines=lines, transformers=transformers,
+        loads=loads, shunts=shunts, der_units=der_units,
+    )
+
+
+def kundur_two_area() -> Network:
+    """Kundur's two-area system with this tool's own controls (AVR, PSS and
+    governor on every machine), which damp the inter-area mode."""
+    return _kundur_two_area("Kundur_two_area", {})
+
+
+def kundur_two_area_classic() -> Network:
+    """Kundur's two-area system under the book's own assumptions: a fast static
+    exciter, no PSS and constant mechanical torque.
+
+    This is the case the example exists for -- the inter-area mode comes out
+    *negatively damped*, so the system is unstable until a stabilizer is added.
+    """
+    return _kundur_two_area("Kundur_two_area_classic", _KUNDUR_CLASSIC_CONTROLS)

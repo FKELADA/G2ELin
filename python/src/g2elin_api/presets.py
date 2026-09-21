@@ -32,6 +32,8 @@ from g2elin_core.network.presets import (
     wscc9_2sm_1gfl,
     wscc9_2sm_1gfm,
     wscc9_3gfm,
+    kundur_two_area,
+    kundur_two_area_classic,
     wscc9_3sm,
 )
 from g2elin_core.network.schema import Network
@@ -118,6 +120,16 @@ _PRESET_SPECS: list[tuple[str, str, str, Callable[[], Network]]] = [
      "Single grid-following converter against a synchronous machine acting as the grid. The GFL absorbs "
      "0.9 MVAr of the line charging -- at Q = 0 the under-excited grid machine is unstable (see gfl_smsm).",
      gfl_smsm),
+    ("kundur_two_area", "Kundur two-area (11-bus, 4 SM)",
+     "Kundur's two-area system (Power System Stability and Control, Example 12.6): two areas of two "
+     "900 MVA machines, a weak 220 km double-circuit tie carrying 400 MW, and the textbook case for "
+     "inter-area oscillations. With this tool's own controls (AVR, PSS and governor).",
+     kundur_two_area),
+    ("kundur_two_area_classic", "Kundur two-area (book's controls)",
+     "The same system under the book's own assumptions -- fast static exciter, no PSS, constant "
+     "mechanical torque -- where the inter-area mode near 0.6 Hz comes out negatively damped. The case "
+     "the example exists for.",
+     kundur_two_area_classic),
 ]
 
 PRESETS: dict[str, PresetInfo] = {

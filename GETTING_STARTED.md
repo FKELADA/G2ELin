@@ -57,6 +57,13 @@ starts in seconds.
 Every figure has **PNG / SVG / CSV** buttons in its corner, and every table a
 **CSV** one.
 
+**Keeping your work.** On the Network page, *My networks* saves whatever you
+have built or modified under a name, and brings it back next time — even after
+closing the browser. Unsaved edits are kept too and offered back on your next
+visit. Saved networks live in your browser, so use the same address each time
+(`http://127.0.0.1:8000`), and press **Export all (backup)** now and then: that
+file can be re-imported here or on another computer.
+
 There is a narrated video tour of the whole interface in
 [`Documentation/G2ELin_web_UI_tour.mp4`](Documentation/).
 

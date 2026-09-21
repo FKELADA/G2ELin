@@ -13,6 +13,8 @@ const state = {
   network: null,
   networkLabel: "",
   version: 0,             // bumped on every edit; results remember the version they were computed for
+  savedId: null,          // id of the saved network (saved_networks.js) currently open, if any
+  savedBaseline: null,    // JSON of it as last saved, to tell unsaved edits apart
   derInfo: {},            // bus id -> der_info (incl. derived control params) from /topology
   positions: {},          // bus id -> {x, y} in diagram units, shared by every network plot
   pf: null,               // {version, single|batch results}
@@ -53,9 +55,11 @@ function netPost(kind, extra = {}) {
 }
 
 // --- Network lifecycle ---------------------------------------------------------
-function setNetwork(network, { label, presetId = null, positions = null } = {}) {
+function setNetwork(network, { label, presetId = null, positions = null, savedId = null } = {}) {
   state.network = network;
   state.presetId = presetId;
+  state.savedId = savedId;
+  state.savedBaseline = savedId ? JSON.stringify(network) : null;
   state.presetBaseline = presetId ? JSON.stringify(network) : null;
   state.networkLabel = label || network.name;
   state.positions = positions || {};

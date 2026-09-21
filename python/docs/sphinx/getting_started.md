@@ -60,6 +60,13 @@ first pass:
 4. **EMT Simulation** — pick a disturbance and press *Run*. This is the slow
    one: a large network takes a few minutes.
 
+**Keeping your work.** On the Network page, *My networks* saves whatever you
+have built or modified under a name and brings it back next time, even after
+closing the browser; unsaved edits are kept too and offered back on your next
+visit. Saved networks live in your browser, so open the tool at the same
+address each time (`http://127.0.0.1:8000`), and press **Export all (backup)**
+now and then: that file can be re-imported here or on another computer.
+
 There is also a narrated video tour of the whole interface in the
 repository's `Documentation/` folder.
 

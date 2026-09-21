@@ -190,6 +190,25 @@ persisted server-side. Always light-themed.
   network-level settings) plus the unit's derived control parameters
   (read-only). Live validation (`/validate`), a bulk table view, and JSON
   import/export (network + diagram positions).
+  **My networks** (`web/js/saved_networks.js`): the network being edited —
+  a modified preset or one built from scratch — can be saved under a name
+  and loaded again later, after the tab or the browser has been closed. A
+  saved network keeps its diagram layout, remembers which preset it started
+  from, and can be renamed, deleted, saved again in place (*Save changes*) or
+  as a separate copy. Work that has not been saved is also kept, as a draft
+  written a moment after every edit: the next visit offers to restore it
+  (or discard it), so closing the tab mid-edit loses nothing.
+  Everything is stored in the **browser's own storage**, not on the server:
+  it is per user, needs no account, and works the same on a laptop and on
+  the hosted app (where a server folder would be shared by every visitor and
+  wiped by every redeploy). The flip side is that it belongs to one browser
+  profile *at one address* — `localhost:8000`, `127.0.0.1:8000` and
+  `127.0.0.1:8001` are three different places for it — and that clearing the
+  site's data removes it. **Export all (backup)** writes every saved network
+  to one JSON file, and **Import a backup** (or a single network file from
+  *Export JSON*) puts them back, on this or any other computer. If the
+  browser blocks storage (a private window does), the section says so and
+  the JSON export remains the way to keep a network.
   A unit's control & electrical parameters are editable: changed values are
   stored as overrides in `DerUnit.params` (only what differs from the
   default) and applied on top of `sm_params()`/`gfm_params()`/`gfl_params()`

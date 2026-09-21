@@ -392,6 +392,8 @@ details.card[open] > summary { margin-bottom: 0.8rem; }
 }
 .fig-tools button:hover { color: var(--accent); border-color: var(--accent); }
 .fig-tools button:disabled { opacity: 0.5; }
+/* A network diagram has its zoom buttons in the top-right corner: export goes top-left. */
+.net-host .fig-tools { right: auto; left: 8px; top: 8px; }
 
 /* Root locus: the plot, with the selected mode's participation beside it. */
 .rl-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; }

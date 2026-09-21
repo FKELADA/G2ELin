@@ -94,6 +94,7 @@ const NetworkPage = {
         </div>
         <div id="net-summary" style="margin-top:1rem"></div>
       </div>
+      <div class="card" id="net-saved"></div>
       <div class="workspace" id="net-workspace">
         <div class="card">
           <div class="canvas-tools">
@@ -152,6 +153,7 @@ const NetworkPage = {
     $("#net-tables").addEventListener("toggle", () => { if ($("#net-tables").open) this.renderTables(); });
     this.bindTableEvents();
     this.fillPresetSelect();
+    SavedNetworks.mount();
 
     on("network:loaded", () => { this.closeInspector(); this.refreshAll(); });
     on("network:layout", () => { this.view.render(); this.view.fit(); });

@@ -150,3 +150,20 @@ def test_validation_warns_when_a_rating_has_no_effect():
     net.der_units[1].sn_mva = 900.0
     msgs = [i.message for i in validate_network(net) if i.severity == "warning"]
     assert any("has no effect" in m for m in msgs)
+
+
+def test_topology_reports_the_rebased_parameters_not_the_raw_ones():
+    """/topology feeds the inspector's parameter panel. It built its own
+    defaults+overrides merge and so skipped the rebasing, showing a 900 MVA
+    machine's H as the 6.5 s typed in rather than the 58.5 s the model uses."""
+    net = wscc9_3sm().model_dump()
+    net["der_units"][1]["sn_mva"] = 900.0
+    net["der_units"][1]["params"] = {"H": 6.5, "Lad": 1.8}
+    nodes = client.post("/api/network/topology", json={"network": net}).json()["nodes"]
+    rated = [n for n in nodes if n.get("der_info") and n["der_info"].get("control_params", {}).get("H") != 5.0]
+    assert len(rated) == 1
+    params = rated[0]["der_info"]["control_params"]
+    assert params["H"] == pytest.approx(58.5)
+    assert params["Lad"] == pytest.approx(0.2)
+    # The defaults shown beside them stay on the network base.
+    assert rated[0]["der_info"]["control_params_default"]["H"] == pytest.approx(5.0)

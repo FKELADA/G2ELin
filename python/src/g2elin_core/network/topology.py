@@ -16,7 +16,9 @@ from dataclasses import dataclass, field
 
 import networkx as nx
 
-from g2elin_core.operating_point import gfl_params, gfm_params, overridable_param_keys, sm_params, unit_transformer_rx
+from g2elin_core.operating_point import (
+    gfl_params, gfm_params, overridable_param_keys, rebase_params, sm_params, unit_transformer_rx,
+)
 
 from .schema import DerUnit, Network
 
@@ -79,10 +81,16 @@ def _der_info(der: DerUnit, network: Network) -> dict:
     else:
         return info
     # control_params: what the model actually uses (defaults + this unit's
-    # valid overrides); control_params_default: the defaults alone, so the
-    # UI can show which values were changed and restore them.
+    # valid overrides, rebased when the unit states its own rating, exactly as
+    # operating_point.apply_param_overrides does for the model itself);
+    # control_params_default: the defaults alone, so the UI can show which
+    # values were changed and restore them. Unknown names are dropped rather
+    # than raised on here -- validate_network reports those.
     valid = overridable_param_keys(der.unit_type.value)
-    info["control_params"] = {**defaults, **{k: v for k, v in der.params.items() if k in valid}}
+    overrides = {k: v for k, v in der.params.items() if k in valid}
+    if der.sn_mva is not None:
+        overrides = rebase_params(overrides, from_mva=der.sn_mva, to_mva=network.sn_mva)
+    info["control_params"] = {**defaults, **overrides}
     info["control_params_default"] = defaults
     return info
 

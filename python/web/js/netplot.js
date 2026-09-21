@@ -100,6 +100,8 @@ class NetworkView {
     net.der_units.forEach(d => { derByBus[d.bus] = d; });
     const loadsByBus = {};
     net.loads.forEach((l, i) => { (loadsByBus[l.bus] ||= []).push([l, i]); });
+    const shuntsByBus = {};
+    (net.shunts || []).forEach((s, i) => { (shuntsByBus[s.bus] ||= []).push([s, i]); });
     const service = serviceState(net);
     const busR = id => (derByBus[id] ? 16 : 8);
     // Breaker offset from a bus centre along an edge (further out at a unit,
@@ -168,14 +170,28 @@ class NetworkView {
         t.textContent = UNIT_LABEL[der.unit_type] || "?";
         g.appendChild(t);
       }
-      // Loads: one stub each (fanned out when a bus has several), with its breaker.
-      const loads = loadsByBus[b.id] || [];
-      loads.forEach(([ld, li], k) => {
-        const dx = (k - (loads.length - 1) / 2) * 15;
-        const lg = svgEl("g", { class: service.loads[li] ? "" : "nd-out" });
+      // Loads and shunt compensation: one stub each under the bus, fanned out
+      // and sharing the fan so they never overlap, each with its own breaker.
+      const stubs = [
+        ...(loadsByBus[b.id] || []).map(([ld, li]) => ({ kind: "load", el: ld, index: li, on: service.loads[li] })),
+        ...(shuntsByBus[b.id] || []).map(([sh, si]) => ({ kind: "shunt", el: sh, index: si, on: service.shunts[si] })),
+      ];
+      stubs.forEach((stub, k) => {
+        const dx = (k - (stubs.length - 1) / 2) * 15;
+        const lg = svgEl("g", { class: stub.on ? "" : "nd-out" });
         lg.appendChild(svgEl("line", { x1: dx * 0.4, y1: r, x2: dx, y2: r + 17, stroke: "var(--text-secondary)", "stroke-width": 1.5 }));
-        lg.appendChild(svgEl("polygon", { class: "nd-load", points: `${dx - 5.5},${r + 16} ${dx + 5.5},${r + 16} ${dx},${r + 25}` }));
-        const bk = this.breakerNode({ kind: "load", index: li }, ld.closed !== false);
+        if (stub.kind === "load") {
+          lg.appendChild(svgEl("polygon", { class: "nd-load", points: `${dx - 5.5},${r + 16} ${dx + 5.5},${r + 16} ${dx},${r + 25}` }));
+        } else if (Number(stub.el.q_mvar) > 0) {
+          // A reactor: a coil, drawn as a filled bar on its stub.
+          lg.appendChild(svgEl("rect", { class: "nd-reactor", x: dx - 4, y: r + 16, width: 8, height: 10, rx: 2 }));
+        } else {
+          // A capacitor bank: the two plates of a capacitor.
+          lg.appendChild(svgEl("line", { class: "nd-cap", x1: dx - 6, y1: r + 18, x2: dx + 6, y2: r + 18 }));
+          lg.appendChild(svgEl("line", { class: "nd-cap", x1: dx - 6, y1: r + 23, x2: dx + 6, y2: r + 23 }));
+          lg.appendChild(svgEl("line", { x1: dx, y1: r + 23, x2: dx, y2: r + 26, stroke: "var(--text-secondary)", "stroke-width": 1.5 }));
+        }
+        const bk = this.breakerNode({ kind: stub.kind, index: stub.index }, stub.el.closed !== false);
         bk.setAttribute("transform", `translate(${dx * 0.7},${r + 9})`);
         lg.appendChild(bk);
         g.appendChild(lg);
@@ -329,6 +345,14 @@ function elementTooltip(sel) {
       rows.push({ sep: `Load${loads.length > 1 ? "s" : ""}` });
       loads.forEach(([l, i]) => rows.push([l.name || `load #${i}`, `${fmt(l.p_mw, 3)} MW, ${fmt(l.q_mvar, 3)} MVAr${l.closed === false ? " (open)" : ""}`]));
     }
+    const shunts = (net.shunts || []).map((s, i) => [s, i]).filter(([s]) => s.bus === b.id);
+    if (shunts.length) {
+      rows.push({ sep: "Shunt compensation" });
+      shunts.forEach(([s, i]) => rows.push([
+        s.name || `${Number(s.q_mvar) > 0 ? "reactor" : "capacitor"} #${i}`,
+        `${fmt(Math.abs(s.q_mvar), 3)} MVAr ${Number(s.q_mvar) > 0 ? "absorbed" : "generated"}${s.closed === false ? " (open)" : ""}`,
+      ]));
+    }
     return `<div class="tt-title">${esc(b.name || `bus${b.id}`)}</div>` + ttTable(rows);
   }
   const e = sel.kind === "line" ? net.lines[sel.index] : net.transformers[sel.index];
@@ -346,6 +370,8 @@ function unitLegendHtml() {
   return `<div class="legend">${Object.keys(UNIT_LABEL).map(u => `<span><span class="swatch" style="background:${UNIT_COLOR[u]}"></span>${UNIT_LABEL[u]} — ${UNIT_NAME[u]}</span>`).join("")}
     <span><span class="swatch" style="background:#77766f"></span>Network bus</span>
     <span><svg width="12" height="12" style="vertical-align:-2px;margin-right:0.3em"><polygon points="1,2 11,2 6,11" fill="var(--text-secondary)"/></svg>Load</span>
+    <span><svg width="14" height="12" style="vertical-align:-2px;margin-right:0.3em"><line x1="2" y1="4" x2="12" y2="4" class="nd-cap"/><line x1="2" y1="8" x2="12" y2="8" class="nd-cap"/></svg>Capacitor bank</span>
+    <span><svg width="12" height="12" style="vertical-align:-2px;margin-right:0.3em"><rect x="2" y="1" width="8" height="10" rx="2" class="nd-reactor"/></svg>Reactor</span>
     <span><svg width="20" height="12" style="vertical-align:-2px;margin-right:0.3em"><circle cx="7" cy="6" r="5" fill="#fff" stroke="#52514e"/><circle cx="13" cy="6" r="5" fill="#fff" stroke="#52514e" fill-opacity="0.6"/></svg>Transformer</span>
     <span><svg width="12" height="12" style="vertical-align:-2px;margin-right:0.3em"><rect x="2" y="2" width="8" height="8" rx="1" fill="var(--text-primary)"/></svg>Breaker closed</span>
     <span><svg width="14" height="14" style="vertical-align:-3px;margin-right:0.3em"><rect x="3" y="3" width="8" height="8" rx="1" fill="var(--surface-1)" stroke="var(--critical)" stroke-width="1.6"/><line x1="1" y1="13" x2="13" y2="1" stroke="var(--critical)" stroke-width="1.4"/></svg>Breaker open</span>

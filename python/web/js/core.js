@@ -91,7 +91,7 @@ function networkChanged() {
 // only while it still holds a unit that can set a voltage and a frequency.
 const GRID_FORMING = ["infinite_bus", "sm", "gfm"];
 function serviceState(net) {
-  const out = { energized: new Set(), islands: [], references: [], lines: [], transformers: [], loads: [], units: {} };
+  const out = { energized: new Set(), islands: [], references: [], lines: [], transformers: [], loads: [], shunts: [], units: {} };
   if (!net) return out;
   const adj = new Map(net.buses.map(b => [b.id, []]));
   const link = (a, b) => { adj.get(a)?.push(b); adj.get(b)?.push(a); };
@@ -117,19 +117,22 @@ function serviceState(net) {
   out.lines = net.lines.map(l => l.from_closed !== false && l.to_closed !== false && on(l.from_bus));
   out.transformers = net.transformers.map(t => t.hv_closed !== false && t.lv_closed !== false && on(t.hv_bus));
   out.loads = net.loads.map(l => l.closed !== false && on(l.bus));
+  out.shunts = (net.shunts || []).map(s => s.closed !== false && on(s.bus));
   net.der_units.forEach(d => { out.units[d.id] = d.closed !== false && on(d.bus); });
   return out;
 }
 
 // Breakers: {kind: "line"|"transformer", index, end: "from"|"to"|"hv"|"lv"} |
-// {kind: "load", index} | {kind: "unit", id}. Field holding its state:
+// {kind: "load"|"shunt", index} | {kind: "unit", id}. Field holding its state:
+const SINGLE_BREAKER_KINDS = ["load", "shunt", "unit"];
 function breakerField(br) {
-  return br.kind === "load" || br.kind === "unit" ? "closed" : `${br.end}_closed`;
+  return SINGLE_BREAKER_KINDS.includes(br.kind) ? "closed" : `${br.end}_closed`;
 }
 function breakerTarget(net, br) {
   if (br.kind === "line") return net.lines[br.index];
   if (br.kind === "transformer") return net.transformers[br.index];
   if (br.kind === "load") return net.loads[br.index];
+  if (br.kind === "shunt") return (net.shunts || [])[br.index];
   return net.der_units.find(d => d.id === br.id);
 }
 function breakerLabel(net, br) {
@@ -138,6 +141,7 @@ function breakerLabel(net, br) {
   if (br.kind === "line") return `Line #${br.index} (${o.from_bus} → ${o.to_bus}), ${br.end === "from" ? `from-bus end (bus ${o.from_bus})` : `to-bus end (bus ${o.to_bus})`}`;
   if (br.kind === "transformer") return `Transformer #${br.index} (${o.hv_bus} → ${o.lv_bus}), ${br.end === "hv" ? `HV end (bus ${o.hv_bus})` : `LV end (bus ${o.lv_bus})`}`;
   if (br.kind === "load") return `Load #${br.index} at bus ${o.bus}`;
+  if (br.kind === "shunt") return `${Number(o.q_mvar) > 0 ? "Reactor" : "Capacitor bank"} #${br.index} at bus ${o.bus}`;
   return `${UNIT_NAME[o.unit_type] || "Unit"} ${o.id} at bus ${o.bus}`;
 }
 // Toggles a breaker. Any of them may be opened, the slack unit's included:

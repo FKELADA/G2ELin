@@ -9,6 +9,10 @@ const FIELD_DEFS = {
     { key: "sn_mva", label: "Base power", unit: "MVA", type: "number", help: "All per-unit values are on this base." },
     { key: "units_use_first_transformer", label: "MATLAB-compatible transformers", type: "bool", full: true,
       help: "Off (default): each unit's dynamic model uses its own transformer — the one the power flow uses. On: every unit uses the network's first transformer, as the MATLAB tool does (to reproduce its results)." },
+    { key: "nodes_share_first_line_b", label: "MATLAB-compatible bus capacitance", type: "bool", full: true,
+      help: "Off (default): each bus's dynamic model uses its own capacitance — half the charging of the lines meeting at it, plus its capacitor banks. On: every bus uses the first line's charging, whatever is connected to it, as the MATLAB tool does. The ported presets have it on so they still reproduce that tool's numbers." },
+    { key: "min_node_b_pu", label: "Minimum bus capacitance", unit: "pu", type: "number", nullable: true, full: true,
+      help: "Only used for a bus whose lines declare no charging at all, as distribution-feeder data often does. Without it such a network is refused rather than run on an invented number, since every bus's dynamic model divides by its capacitance." },
   ],
   bus: [
     { key: "id", label: "Bus id", type: "readonly" },
@@ -32,6 +36,10 @@ const FIELD_DEFS = {
     { key: "r_pu", label: "Resistance R", unit: "pu", type: "number", help: "Per unit of the transformer's rating. Also the Rt of the unit on its LV side (modal analysis & EMT)." },
     { key: "x_pu", label: "Reactance X", unit: "pu", type: "number", help: "Also the Lt of the unit on its LV side (modal analysis & EMT)." },
     { key: "sn_mva", label: "Rating", unit: "MVA", type: "number" },
+    { key: "tap_ratio", label: "Tap ratio", unit: "pu", type: "number", branchOnly: true,
+      help: "Off-nominal turns ratio on the HV side: v_HV = tap × v_LV at no load. 1.0 is the ratio the two buses' nominal voltages already imply. Only for a transformer between two grid buses — a unit's step-up ratio is part of that unit's own model." },
+    { key: "shift_degree", label: "Phase shift", unit: "°", type: "number", branchOnly: true,
+      help: "Phase-shifting transformer: the angle from HV to LV. A few degrees moves a lot of active power. As for the tap, only for a transformer between two grid buses." },
     { key: "name", label: "Name", type: "text" },
     { key: "hv_closed", label: "Breaker at HV side closed", type: "bool", breaker: true },
     { key: "lv_closed", label: "Breaker at LV side closed", type: "bool", breaker: true, help: "Either breaker open takes the transformer out of service — for a unit's transformer, the unit too." },
@@ -41,6 +49,14 @@ const FIELD_DEFS = {
     { key: "q_mvar", label: "Reactive power Q", unit: "MVAr", type: "number" },
     { key: "name", label: "Name", type: "text", full: true },
     { key: "closed", label: "Breaker closed", type: "bool", breaker: true, full: true, help: "Open = the load is disconnected from its bus." },
+  ],
+  shunt: [
+    { key: "q_mvar", label: "Reactive power Q", unit: "MVAr", type: "number",
+      help: "At nominal voltage. Negative = a capacitor bank (generates reactive power, raises the voltage); positive = a reactor (absorbs it, lowers the voltage). Same sign convention as a load." },
+    { key: "r_pu", label: "Reactor resistance R", unit: "pu", type: "number", nullable: true,
+      help: "A reactor's series resistance. Empty derives one from X/R = 50, a typical shunt reactor; exactly 0 leaves its resonance with the bus undamped. A capacitor bank has no branch of its own, so this does nothing for one." },
+    { key: "name", label: "Name", type: "text", full: true },
+    { key: "closed", label: "Breaker closed", type: "bool", breaker: true, full: true, help: "Open = the device is disconnected from its bus." },
   ],
   der: [
     { key: "id", label: "Unit id", type: "readonly" },
@@ -53,6 +69,8 @@ const FIELD_DEFS = {
     { key: "q_cons_mvar", label: "Auxiliary load Q", unit: "MVAr", type: "number" },
     { key: "controller", label: "GFM outer control", type: "select", options: ["", "droop", "droop_filtered", "dvoc", "vsm", "matching"], gfmOnly: true },
     { key: "xd_pu", label: "Transient reactance Xd", unit: "pu", type: "number", nullable: true, help: "Used for SCR calculations only." },
+    { key: "sn_mva", label: "Unit rating", unit: "MVA", type: "number", nullable: true,
+      help: "The base this unit's parameter overrides are given on. Published machine data is per unit of the machine's own rating: set this to 900 to type a 900 MVA machine's x_d = 1.8 and H = 6.5 s in as published, and they become 0.2 pu and 58.5 s on a 100 MVA network. Leave empty when the overrides are already on the network base. Gains and time constants are taken as given either way." },
     { key: "closed", label: "Unit breaker closed", type: "bool", breaker: true, full: true, help: "Open = the unit is disconnected (with its transformer). The slack unit's breaker can't be opened." },
   ],
 };
@@ -63,10 +81,14 @@ const TABLE_KINDS = {
   lines: { label: "Lines", defs: FIELD_DEFS.line },
   transformers: { label: "Transformers", defs: FIELD_DEFS.transformer },
   loads: { label: "Loads", defs: [{ key: "bus", label: "Bus", type: "bus" }, ...FIELD_DEFS.load] },
+  shunts: { label: "Shunts", defs: [{ key: "bus", label: "Bus", type: "bus" }, ...FIELD_DEFS.shunt] },
   der_units: { label: "DER units", defs: [FIELD_DEFS.der[0], { key: "bus", label: "Bus", type: "bus" }, ...FIELD_DEFS.der.slice(1)] },
 };
 
-const TARGET_KIND = { net: "network", bus: "bus", der: "der", load: "load", line: "line", transformer: "transformer" };
+const TARGET_KIND = { net: "network", bus: "bus", der: "der", load: "load", shunt: "shunt", line: "line", transformer: "transformer" };
+
+// A capacitor bank or a reactor, from its sign (schema.Shunt).
+const shuntKindLabel = s => (Number(s.q_mvar) > 0 ? "Reactor" : "Capacitor bank");
 
 const NetworkPage = {
   view: null,
@@ -142,7 +164,7 @@ const NetworkPage = {
     $("#net-settings").addEventListener("click", () => this.openInspector({ kind: "network" }));
     $("#net-new").addEventListener("click", () => {
       if (state.network && !confirm("Start a new empty network? The current one is not saved.")) return;
-      setNetwork({ name: "custom_network", f_hz: 50.0, sn_mva: 100.0, buses: [], lines: [], transformers: [], loads: [], der_units: [] }, { label: "New network" });
+      setNetwork({ name: "custom_network", f_hz: 50.0, sn_mva: 100.0, buses: [], lines: [], transformers: [], loads: [], shunts: [], der_units: [] }, { label: "New network" });
       $("#net-preset").value = "";
     });
     $("#net-reset").addEventListener("click", () => { if (state.presetId) this.loadPreset(state.presetId); });
@@ -341,6 +363,9 @@ const NetworkPage = {
       }
       html += `<div class="insp-section"><h4>Loads at this bus<span class="spacer"></span><button class="secondary small" data-act="add-load">+ Add load</button></h4>
         ${loads.length ? loads.map(([l, i]) => `<div class="sub-card"><div class="controls" style="margin-bottom:0.4rem"><b style="font-size:0.8rem">Load #${i}</b><span style="flex:1"></span><button class="ghost small" data-act="delete-load" data-index="${i}">Remove</button></div>${this.formHtml("load", l, `load:${i}`)}</div>`).join("") : `<p class="empty">No load.</p>`}</div>`;
+      const shunts = (net.shunts || []).map((s, i) => [s, i]).filter(([s]) => s.bus === b.id);
+      html += `<div class="insp-section"><h4>Shunt compensation<span class="spacer"></span><button class="secondary small" data-act="add-cap">+ Capacitor bank</button><button class="secondary small" data-act="add-reactor">+ Reactor</button></h4>
+        ${shunts.length ? shunts.map(([s, i]) => `<div class="sub-card"><div class="controls" style="margin-bottom:0.4rem"><b style="font-size:0.8rem">${esc(shuntKindLabel(s))} #${i}</b><span style="flex:1"></span><button class="ghost small" data-act="delete-shunt" data-index="${i}">Remove</button></div>${this.formHtml("shunt", s, `shunt:${i}`)}</div>`).join("") : `<p class="empty">None. A capacitor bank raises this bus's voltage and adds to its own capacitance; a reactor lowers it and gets a branch of its own.</p>`}</div>`;
       const conns = [...net.lines.map((l, i) => ["line", i, l.from_bus === b.id ? l.to_bus : l.to_bus === b.id ? l.from_bus : null]),
         ...net.transformers.map((t, i) => ["transformer", i, t.hv_bus === b.id ? t.lv_bus : t.lv_bus === b.id ? t.hv_bus : null])].filter(c => c[2] !== null);
       html += `<div class="insp-section"><h4>Connections</h4>${conns.length ? `<div class="controls">${conns.map(([k, i, o]) => `<button class="secondary small" data-act="goto" data-kind="${k}" data-index="${i}">${k === "line" ? "Line" : "Trafo"} → bus ${o}</button>`).join("")}</div>` : `<p class="empty">Not connected — use “Draw line” / “Draw transformer”.</p>`}</div>`;
@@ -398,6 +423,7 @@ const NetworkPage = {
     if (kind === "bus") return net.buses.find(b => b.id === this.selected.id);
     if (kind === "der") return net.der_units[+idx];
     if (kind === "load") return net.loads[+idx];
+    if (kind === "shunt") return (net.shunts || [])[+idx];
     if (kind === "line") return net.lines[+idx];
     if (kind === "transformer") return net.transformers[+idx];
     return null;
@@ -488,6 +514,12 @@ const NetworkPage = {
     if (act === "goto") { this.openInspector({ kind: btn.dataset.kind, index: +btn.dataset.index }); return; }
     if (act === "add-load") { net.loads.push({ bus: sel.id, p_mw: 0.0, q_mvar: 0.001 * net.sn_mva, name: "" }); this.afterEdit(sel); return; }
     if (act === "delete-load") { net.loads.splice(+btn.dataset.index, 1); this.afterEdit(sel); return; }
+    if (act === "add-cap" || act === "add-reactor") {
+      const q = 0.05 * net.sn_mva;
+      (net.shunts ||= []).push({ bus: sel.id, q_mvar: act === "add-cap" ? -q : q, r_pu: null, closed: true, name: "" });
+      this.afterEdit(sel); return;
+    }
+    if (act === "delete-shunt") { net.shunts.splice(+btn.dataset.index, 1); this.afterEdit(sel); return; }
     if (act === "remove-der") { net.der_units.splice(+btn.dataset.index, 1); this.afterEdit(sel); return; }
     if (act === "attach-der") {
       const kind = $("#insp-attach-type").value;
@@ -559,7 +591,7 @@ const NetworkPage = {
     const body = $("#net-tables-body");
     if (!state.network) { body.innerHTML = `<p class="empty">No network loaded.</p>`; return; }
     body.innerHTML = Object.entries(TABLE_KINDS).map(([kind, { label, defs }]) => {
-      const rows = state.network[kind];
+      const rows = state.network[kind] || [];   // a network JSON saved before this kind existed
       const head = defs.map(f => `<th>${esc(f.label)}${f.unit ? ` (${f.unit})` : ""}</th>`).join("") + "<th></th>";
       const bodyRows = rows.map((row, idx) => `<tr>${defs.map(f => {
         const v = row[f.key];

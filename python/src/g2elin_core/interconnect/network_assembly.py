@@ -14,7 +14,9 @@ connects to which) doesn't care whether a block is linear or not.
 
 from __future__ import annotations
 
-from g2elin_core.network.breakers import TYPE_LABEL, block_labels, service_state
+import math
+
+from g2elin_core.network.breakers import TYPE_LABEL, block_labels, service_state, transformer_ratio
 from g2elin_core.network.schema import Network
 
 from .assemble import AssembledSystem, Block, PortSpec, Wiring, assemble
@@ -36,12 +38,18 @@ def build_blocks_and_wiring(
     load_components: list[PortSpec],
     frame_components: dict[int, PortSpec] | None = None,
     shunt_components: dict[int, PortSpec] | None = None,
+    transformer_components: dict[int, PortSpec] | None = None,
 ) -> tuple[list[Block], list[Wiring]]:
     """Wires one network's components together.
 
     ``shunt_components`` are the shunt *reactors*, keyed by their index in
     ``network.shunts``. A capacitor bank never appears here: it is part of its
     bus's own capacitance (``network/breakers.node_capacitances``).
+
+    ``transformer_components`` are the *branch* transformers -- those between
+    two grid buses -- keyed by their index in ``network.transformers``. A
+    unit's own step-up never appears here either: its impedance is inside that
+    unit's model, and its LV bus has no node of its own.
 
     ``frame_components`` (see ``components/frame.py``) are the dq reference
     frames everything is written in, one per island, keyed by the unit that
@@ -113,6 +121,10 @@ def build_blocks_and_wiring(
         idx: Block(name=f"Sh_{labels.shunt[idx] + 1}", kind="shunt", comp=comp)
         for idx, comp in (shunt_components or {}).items()
     }
+    transformer_blocks: dict[int, Block] = {
+        idx: Block(name=f"Tr_{labels.transformer[idx] + 1}", kind="line", comp=comp)
+        for idx, comp in (transformer_components or {}).items()
+    }
 
     # Order matches script_generic.m's concatenation order: slack, other DGs,
     # nodes, lines, loads. Only cosmetic (state/output ordering), not required
@@ -127,6 +139,7 @@ def build_blocks_and_wiring(
         + line_blocks
         + load_blocks
         + [shunt_blocks[i] for i in sorted(shunt_blocks)]
+        + [transformer_blocks[i] for i in sorted(transformer_blocks)]
     )
 
     transformer_by_lv_bus = {tr.lv_bus: tr for tr in network.transformers}
@@ -172,6 +185,8 @@ def build_blocks_and_wiring(
         wiring.append(Wiring(b, "wg", [(frame_of(ld.bus), "wr", 1.0)]))
     for idx, b in shunt_blocks.items():
         wiring.append(Wiring(b, "wg", [(frame_of(network.shunts[idx].bus), "wr", 1.0)]))
+    for idx, b in transformer_blocks.items():
+        wiring.append(Wiring(b, "wg", [(frame_of(network.transformers[idx].hv_bus), "wr", 1.0)]))
 
     # DG voltage input = its raw node's voltage output.
     for der in network.der_units:
@@ -188,6 +203,21 @@ def build_blocks_and_wiring(
         wiring.append(Wiring(block, "vgqj_g", [(from_node, "vgq_g", 1.0)]))
         wiring.append(Wiring(block, "vgdk_g", [(to_node, "vgd_g", 1.0)]))
         wiring.append(Wiring(block, "vgqk_g", [(to_node, "vgq_g", 1.0)]))
+
+    # A branch transformer is the same RL branch as a line, fed through its
+    # ideal ratio: with a complex ratio a*exp(j*phi) the series impedance sees
+    # v_hv/(a*exp(j*phi)), which in dq is a 1/a scaling and a rotation by -phi.
+    # Both are just coefficients on the wiring, so there is no new component
+    # maths -- the block itself is the line DAE.
+    for idx, block in transformer_blocks.items():
+        tr = network.transformers[idx]
+        a, phi = transformer_ratio(tr)
+        cos_p, sin_p = math.cos(phi) / a, math.sin(phi) / a
+        hv, lv = node_blocks[tr.hv_bus], node_blocks[tr.lv_bus]
+        wiring.append(Wiring(block, "vgdj_g", [(hv, "vgd_g", cos_p), (hv, "vgq_g", sin_p)]))
+        wiring.append(Wiring(block, "vgqj_g", [(hv, "vgd_g", -sin_p), (hv, "vgq_g", cos_p)]))
+        wiring.append(Wiring(block, "vgdk_g", [(lv, "vgd_g", 1.0)]))
+        wiring.append(Wiring(block, "vgqk_g", [(lv, "vgq_g", 1.0)]))
 
     # A reactor sees its bus at one end and zero volts at the other: the
     # far-end ports are wired to an empty sum, which is exactly ground.
@@ -230,6 +260,19 @@ def build_blocks_and_wiring(
             if network.shunts[idx].bus == bus_id:
                 terms_d.append((block, "ild_g", -1.0))
                 terms_q.append((block, "ilq_g", -1.0))
+        # The LV side takes the branch current as a line's "to" end does; the
+        # HV side gives back i*exp(j*phi)/a, the ideal transformer's current
+        # ratio, which is what keeps the power equal on the two sides.
+        for idx, block in transformer_blocks.items():
+            tr = network.transformers[idx]
+            a, phi = transformer_ratio(tr)
+            cos_p, sin_p = math.cos(phi) / a, math.sin(phi) / a
+            if tr.lv_bus == bus_id:
+                terms_d.append((block, "ild_g", 1.0))
+                terms_q.append((block, "ilq_g", 1.0))
+            if tr.hv_bus == bus_id:
+                terms_d.extend([(block, "ild_g", -cos_p), (block, "ilq_g", sin_p)])
+                terms_q.extend([(block, "ild_g", -sin_p), (block, "ilq_g", -cos_p)])
         wiring.append(Wiring(node_block, "ishd_g", terms_d))
         wiring.append(Wiring(node_block, "ishq_g", terms_q))
 
@@ -245,6 +288,7 @@ def assemble_network(
     load_components: list[PortSpec],
     frame_components: dict[int, PortSpec] | None = None,
     shunt_components: dict[int, PortSpec] | None = None,
+    transformer_components: dict[int, PortSpec] | None = None,
 ) -> AssembledSystem:
     blocks, wiring = build_blocks_and_wiring(
         network,
@@ -254,5 +298,6 @@ def assemble_network(
         load_components=load_components,
         frame_components=frame_components,
         shunt_components=shunt_components,
+        transformer_components=transformer_components,
     )
     return assemble(blocks, wiring)

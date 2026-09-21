@@ -37,6 +37,7 @@ removed -- whose model names stay those of the full network (see
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -279,6 +280,44 @@ def shunt_is_reactor(shunt) -> bool:
     """A reactor absorbs reactive power and needs a branch of its own; a
     capacitor bank generates it and folds into the bus's own capacitance."""
     return shunt.q_mvar > 0
+
+
+def unit_transformers(network: Network) -> dict[int, object]:
+    """``{unit's bus -> its step-up transformer}``.
+
+    A transformer is a unit step-up when a DER sits on its LV bus; its
+    impedance then belongs to that unit's model rather than to a branch of
+    its own. ``validate_network`` rejects two transformers claiming the same
+    LV bus, which would otherwise silently decide which grid bus a unit hangs
+    from by list order.
+    """
+    by_lv: dict[int, object] = {}
+    unit_buses = {d.bus for d in network.der_units}
+    for tr in network.transformers:
+        if tr.lv_bus in unit_buses:
+            by_lv.setdefault(tr.lv_bus, tr)
+    return by_lv
+
+
+def branch_transformer_indices(network: Network) -> list[int]:
+    """Indices of the transformers that are branches between two grid buses --
+    the ones needing a block of their own (everything else is a unit step-up).
+    """
+    unit_trs = {id(tr) for tr in unit_transformers(network).values()}
+    return [i for i, tr in enumerate(network.transformers) if id(tr) not in unit_trs]
+
+
+def transformer_ratio(tr) -> tuple[float, float]:
+    """``(a, phi)``: a branch transformer's off-nominal turns ratio and its
+    phase shift in radians, HV side to LV side."""
+    return tr.tap_ratio, math.radians(tr.shift_degree)
+
+
+def transformer_rx(tr, sn_mva: float) -> tuple[float, float]:
+    """A transformer's series impedance on the network base (its own r_pu/x_pu
+    are per unit of ``tr.sn_mva``)."""
+    k = sn_mva / tr.sn_mva
+    return tr.r_pu * k, tr.x_pu * k
 
 
 def shunt_reactor_rx(shunt, sn_mva: float) -> tuple[float, float]:

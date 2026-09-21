@@ -92,6 +92,16 @@ def linearize_network(network: Network, result: PowerFlowResult) -> AssembledSys
         for idx, rx in op.shunt_rx.items()
     }
 
+    # Branch transformers: the same RL branch a line uses, with the ideal
+    # transformer's ratio applied by the wiring (network_assembly).
+    transformer_components = {
+        idx: linearize_line(
+            wb_val=wb_val, r_pu=rx[0], x_pu=rx[1], wg0=1.0,
+            ild_g0=op.transformer_i0[idx][0], ilq_g0=op.transformer_i0[idx][1],
+        )
+        for idx, rx in op.transformer_rx.items()
+    }
+
     return assemble_network(
         network,
         der_components=der_components,
@@ -100,4 +110,5 @@ def linearize_network(network: Network, result: PowerFlowResult) -> AssembledSys
         load_components=load_components,
         frame_components=frame_components,
         shunt_components=shunt_components,
+        transformer_components=transformer_components,
     )

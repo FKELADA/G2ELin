@@ -132,14 +132,18 @@ def _breaker(model: NonlinearNetworkModel, ev: NetworkEvent) -> AppliedEvent:
     elif ev.element == "transformer":
         if ev.index not in tr_l:
             raise EventError(f"transformer #{ev.index} is already out of service (or doesn't exist)")
-        tr = trs[tr_l.index(ev.index)]
+        k = tr_l.index(ev.index)
+        tr = trs[k]
         der = next((d for d in ders if d.bus == tr.lv_bus), None)
         if der is None:
-            raise EventError(
-                f"transformer #{ev.index} doesn't connect a unit -- the dynamic model only has unit "
-                "transformers (inside each unit's model)"
-            )
-        what = f"transformer #{ev.index} opened: " + drop_unit(der.id)
+            # A branch transformer between two grid buses: a branch of its own,
+            # so it drops out exactly as a line does.
+            del trs[k], tr_l[k]
+            what = f"transformer #{ev.index} ({tr.hv_bus} - {tr.lv_bus}) opened"
+        else:
+            # A unit's step-up: its impedance is inside that unit's model, so
+            # opening it takes the unit with it.
+            what = f"transformer #{ev.index} opened: " + drop_unit(der.id)
     else:
         raise EventError(f"breaker element must be one of {list(BREAKER_ELEMENTS)}")
 
@@ -259,6 +263,10 @@ def rebuild(model: NonlinearNetworkModel, network: Network, replace: dict | None
         shunt_components={
             i: comps[f"Sh_{lab.shunt[i] + 1}"]
             for i in range(len(network.shunts)) if f"Sh_{lab.shunt[i] + 1}" in comps
+        },
+        transformer_components={
+            i: comps[f"Tr_{lab.transformer[i] + 1}"]
+            for i in range(len(network.transformers)) if f"Tr_{lab.transformer[i] + 1}" in comps
         },
     )
     topology = compute_topology(blocks, wiring)

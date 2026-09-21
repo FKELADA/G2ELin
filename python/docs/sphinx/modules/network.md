@@ -18,6 +18,7 @@ classDiagram
         +lines: list~Line~
         +transformers: list~Transformer~
         +loads: list~Load~
+        +shunts: list~Shunt~
         +der_units: list~DerUnit~
         +bus(bus_id) Bus
     }
@@ -97,6 +98,76 @@ reference in a `Line`/`Transformer`/`Load`/`DerUnit` resolves to a real
 guarantees the original MATLAB scripts relied on by convention, not
 schema — encoding them here means a malformed network fails fast at
 construction time rather than deep inside a solver.
+
+### Transformers: two roles, one element
+
+Whether a transformer is a **unit step-up** or a **branch** is decided by its
+LV bus, not by a flag (`breakers.unit_transformers` /
+`breakers.branch_transformer_indices`):
+
+| | unit step-up | branch transformer |
+| --- | --- | --- |
+| LV bus | carries a DER unit | an ordinary grid bus |
+| dynamic model | inside the unit's own model, as its `Rt`/`Lt` -- the classic machine behind a transformer impedance | a block of its own, the same RL branch a line uses |
+| its LV bus | never appears; it lives inside the unit | an ordinary node |
+| `tap_ratio` / `shift_degree` | not modelled (the unit's own ratio) | modelled |
+| opening its breaker | takes the unit with it | drops just the branch, as for a line |
+
+A branch transformer used to be absent from the dynamic model entirely while
+carrying power in the power flow, which left the operating point the model was
+linearized about not being an equilibrium at the two buses it joined -- ~450
+pu/s of drift at exactly those buses, with no validation error.
+
+The ratio needs no new component maths. A transformer branch is a series
+impedance behind an ideal ratio $a\,e^{j\varphi}$, so the series part sees
+
+$$v' = \frac{v_{hv}}{a\,e^{j\varphi}},\qquad i_{hv} = \frac{i\,e^{j\varphi}}{a}$$
+
+which in dq is a $1/a$ scaling and a rotation by $-\varphi$ -- plain
+coefficients on the wiring the interconnection already supports, and the same
+ones in the linear and nonlinear paths. Power is conserved across the ideal
+part: $v_{hv} i_{hv} = a v' \cdot i/a = v' i$. Two transformers claiming the
+same unit's LV bus are rejected, since that would decide by list order which
+grid bus the unit injects into.
+
+### Bus shunts
+
+A bus's own dynamic model (`components/node.py`) *is* a capacitance to
+ground, $C\,dv/dt = i - j\omega C v$, which makes the two kinds of shunt
+behave very differently:
+
+* a **capacitor bank** (`q_mvar < 0`) is simply more of that capacitance. It
+  adds no states and no block at all -- its current is already in the node
+  equation.
+* a **reactor** (`q_mvar > 0`) cannot be folded in: a negative capacitance
+  would flip the sign of the node's dynamics, and netting the two against each
+  other would only hold at exactly nominal frequency. It gets the line's RL
+  branch with its far end wired to an empty sum, which is ground.
+
+Its `q_mvar` is the nameplate ($Q = V^2/X$); the resistance comes from `r_pu`,
+or from $X/R = 50$ when that is not given. The power flow is handed the P and
+Q of that same R-X pair, so both sides of the tool agree on what the device
+draws.
+
+### Each bus's capacitance
+
+`breakers.node_capacitances` gives every bus half the charging of the lines
+meeting at it (a pi-model puts half at each end) plus its capacitor banks.
+
+`Network.nodes_share_first_line_b` restores the MATLAB toolbox's convention,
+where every bus instead borrows the *first line's* charging whatever is
+connected to it. The ported presets set it, so they still reproduce that
+tool's numbers. Measured, the borrowed value was 0.95x to 1.61x off across
+WSCC's buses and 0.06x to 1.28x across CIGRE's, and it was the whole reason
+the operating point was not an equilibrium: the predicted drift
+$\omega_b |v| (\text{ratio} - 1)$ matched the measured one at every bus.
+Giving each bus its own takes WSCC's drift from 178 to 0.085 pu/s, and makes
+EMT *faster* (7.9 s -> 1.1 s for 50 ms), because the solver no longer chases a
+transient that only existed because the starting point was wrong.
+
+A bus whose lines declare no charging at all -- distribution-feeder data
+routinely omits it -- is refused rather than divided by, naming
+`Network.min_node_b_pu` as the way to say what to use instead.
 
 ## Presets
 

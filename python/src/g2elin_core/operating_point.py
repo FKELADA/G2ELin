@@ -17,7 +17,10 @@ import numpy as np
 from g2elin_core.components.gfl import GflOperatingPoint
 from g2elin_core.components.gfm import GfmOperatingPoint
 from g2elin_core.components.sm import SmOperatingPoint
-from g2elin_core.network.breakers import shunt_is_reactor, shunt_reactor_rx
+from g2elin_core.network.breakers import (
+    branch_transformer_indices, shunt_is_reactor, shunt_reactor_rx, transformer_ratio, transformer_rx,
+    unit_transformers,
+)
 from g2elin_core.network.schema import Network
 from g2elin_core.network.validation import validate_network
 from g2elin_core.powerflow.pandapower_adapter import PowerFlowResult
@@ -201,7 +204,7 @@ def unit_transformer_rx(network: Network, der) -> tuple[float, float]:
     fails validation for modal/EMT anyway), and to placeholders when the
     network has no transformer at all.
     """
-    own = next((t for t in network.transformers if t.lv_bus == der.bus), None)
+    own = unit_transformers(network).get(der.bus)
     if network.units_use_first_transformer or own is None:
         first = network.transformers[0] if network.transformers else None
         return (first.r_pu, first.x_pu) if first else (0.0, 0.05)
@@ -305,6 +308,11 @@ class NetworkOperatingPoint:
     # the current it draws at the operating point.
     shunt_rx: dict[int, tuple[float, float]] = field(default_factory=dict)
     shunt_i0: dict[int, tuple[float, float]] = field(default_factory=dict)
+    # Branch transformers only (a unit's step-up is inside its unit's model):
+    # Network.transformers index -> (r_pu, x_pu) on the network base, and the
+    # current through its series impedance at the operating point.
+    transformer_rx: dict[int, tuple[float, float]] = field(default_factory=dict)
+    transformer_i0: dict[int, tuple[float, float]] = field(default_factory=dict)
 
 
 def compute_operating_point(network: Network, result: PowerFlowResult) -> NetworkOperatingPoint:
@@ -471,6 +479,29 @@ def compute_operating_point(network: Network, result: PowerFlowResult) -> Networ
         ild0, ilq0 = np.linalg.solve(coeff, rhs)
         line_i0.append((float(ild0), float(ilq0)))
 
+    # Branch transformers (between two grid buses, as opposed to a unit's own
+    # step-up, whose impedance lives inside that unit's model): the same RL
+    # branch a line uses, fed through the ideal transformer's ratio. With a
+    # complex ratio a*exp(j*phi), the voltage driving the series impedance is
+    # v_hv/(a*exp(j*phi)) -- in dq, a scaling by 1/a and a rotation by -phi.
+    transformer_i0: dict[int, tuple[float, float]] = {}
+    transformer_rx_pu: dict[int, tuple[float, float]] = {}
+    for idx in branch_transformer_indices(network):
+        tr = network.transformers[idx]
+        r_pu, x_pu = transformer_rx(tr, network.sn_mva)
+        a, phi = transformer_ratio(tr)
+        transformer_rx_pu[idx] = (r_pu, x_pu)
+        vj, aj = bus_vm_va(tr.hv_bus)
+        vk, ak = bus_vm_va(tr.lv_bus)
+        vgdj, vgqj = _rotate_to_global(vj, aj, theta_g_rad)
+        vgdk, vgqk = _rotate_to_global(vk, ak, theta_g_rad)
+        cos_p, sin_p = math.cos(phi), math.sin(phi)
+        vpd = (cos_p * vgdj + sin_p * vgqj) / a
+        vpq = (-sin_p * vgdj + cos_p * vgqj) / a
+        coeff = np.array([[-r_pu, x_pu], [-x_pu, -r_pu]])
+        itr = np.linalg.solve(coeff, np.array([-(vpd - vgdk), -(vpq - vgqk)]))
+        transformer_i0[idx] = (float(itr[0]), float(itr[1]))
+
     # Shunt reactors: an RL branch from the bus to zero volts. X comes from
     # the reactive power it absorbs at 1 pu (Q = V^2/X), R from its X/R --
     # exactly 0 would leave its resonance with the bus capacitance undamped.
@@ -514,4 +545,5 @@ def compute_operating_point(network: Network, result: PowerFlowResult) -> Networ
     return NetworkOperatingPoint(
         theta_g_rad=theta_g_rad, sm_ops=sm_ops, gfm_ops=gfm_ops, gfl_ops=gfl_ops, ib_ops=ib_ops,
         node_vg=node_vg, line_i0=line_i0, load_rx=load_rx, shunt_rx=shunt_rx, shunt_i0=shunt_i0,
+        transformer_rx=transformer_rx_pu, transformer_i0=transformer_i0,
     )

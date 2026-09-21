@@ -255,6 +255,24 @@ directly from its two end voltages; a load's equivalent series
 impedance is $Z=V^2/S$ at angle $\arccos(P/S)$ (inductive convention,
 $Q\ge0$).
 
+## Per-unit rebasing: `DerUnit.sn_mva`
+
+Published machine data is per unit of the *machine's* rating, not the
+network's. A unit may therefore declare its own `sn_mva`, which states the
+base its `params` overrides are given on; they are converted to the network
+base before use (`rebase_params`). With $Z_{base} = V^2/S$:
+
+| | scales by | example (900 MVA machine, 100 MVA network) |
+| --- | --- | --- |
+| impedances, reactances, droops | $S_{net}/S_{unit}$ | $x_d = 1.8 \to 0.2$ pu |
+| inertia, damping, capacitances | $S_{unit}/S_{net}$ | $H = 6.5 \to 58.5$ s |
+
+Gains and time constants are *tuning* rather than machine data -- a rise time
+is a rise time on any base, and a gain's base depends on which signals it sits
+between -- so they are taken as given, and `validate_network` warns when one
+is passed to a rated unit. A rated unit's model is bit-identical to the same
+machine converted by hand.
+
 ## Reference
 
 ```{eval-rst}

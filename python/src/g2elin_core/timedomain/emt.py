@@ -40,6 +40,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Iterator
 
+import math
+
 import numpy as np
 import scipy.integrate
 import scipy.optimize
@@ -59,7 +61,7 @@ from g2elin_core.components.sm import (
     SmOperatingPoint, sm_dae, sm_nonlinear_funcs, sm_nonlinear_jacobians, sm_nonlinear_point,
 )
 from g2elin_core.interconnect import Block, build_blocks_and_wiring, compute_topology
-from g2elin_core.network.breakers import frame_references, node_capacitances
+from g2elin_core.network.breakers import frame_references, node_capacitances, transformer_ratio
 from g2elin_core.network.schema import Network
 from g2elin_core.operating_point import NetworkOperatingPoint, compute_operating_point
 from g2elin_core.powerflow import PowerFlowResult
@@ -511,6 +513,21 @@ def build_nonlinear_network(network: Network, result: PowerFlowResult) -> Nonlin
         )
         for idx, rx in op.shunt_rx.items()
     }
+    # Branch transformers -- see pipeline.linearize_network, which builds the
+    # linear model from the same numbers. The "j" end is the HV voltage after
+    # the ideal ratio, which is what the wiring feeds this block.
+    transformer_components = {}
+    for idx, rx in op.transformer_rx.items():
+        tr = network.transformers[idx]
+        a, phi = transformer_ratio(tr)
+        vhd, vhq = op.node_vg[tr.hv_bus]
+        cos_p, sin_p = math.cos(phi) / a, math.sin(phi) / a
+        transformer_components[idx] = nonlinear_line_block(
+            wb_val=wb_val, r_pu=rx[0], x_pu=rx[1], wg0=1.0,
+            ild_g0=op.transformer_i0[idx][0], ilq_g0=op.transformer_i0[idx][1],
+            vgdj_g0=cos_p * vhd + sin_p * vhq, vgqj_g0=-sin_p * vhd + cos_p * vhq,
+            vgdk_g0=op.node_vg[tr.lv_bus][0], vgqk_g0=op.node_vg[tr.lv_bus][1],
+        )
     blocks, wiring = build_blocks_and_wiring(
         network,
         der_components=der_components,
@@ -519,6 +536,7 @@ def build_nonlinear_network(network: Network, result: PowerFlowResult) -> Nonlin
         load_components=load_components,
         frame_components=frame_components,
         shunt_components=shunt_components,
+        transformer_components=transformer_components,
     )
     topology = compute_topology(blocks, wiring)
 

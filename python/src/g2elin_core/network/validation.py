@@ -191,6 +191,39 @@ def validate_network(network: Network) -> list[NetworkIssue]:
 
     # Parameter overrides must name a real parameter of that unit type -- a
     # typo would otherwise be silently ignored by the model.
+    # Two transformers claiming the same LV bus: which grid bus a unit hangs
+    # from would then be decided by list order, silently.
+    lv_seen: dict[int, int] = {}
+    unit_buses = {d.bus for d in network.der_units}
+    for ti, tr in enumerate(network.transformers):
+        if tr.lv_bus in unit_buses:
+            if tr.lv_bus in lv_seen:
+                issues.append(NetworkIssue(
+                    "error",
+                    f"transformers #{lv_seen[tr.lv_bus]} and #{ti} both have their LV side on bus "
+                    f"{tr.lv_bus}, which carries a unit -- that unit's step-up has to be unambiguous, "
+                    f"since its impedance goes inside the unit's own model and decides which grid bus "
+                    f"the unit injects into",
+                    all_caps,
+                ))
+            lv_seen[tr.lv_bus] = ti
+        if tr.hv_bus == tr.lv_bus:
+            issues.append(NetworkIssue("error", f"transformer #{ti} has both sides on bus {tr.hv_bus}", all_caps))
+
+    for si, sh in enumerate(network.shunts):
+        if sh.q_mvar == 0:
+            issues.append(NetworkIssue(
+                "warning", f"shunt #{si} (bus {sh.bus}) is rated 0 MVAr, so it does nothing", all_caps,
+            ))
+        if sh.bus in unit_buses:
+            issues.append(NetworkIssue(
+                "error",
+                f"shunt #{si} sits on bus {sh.bus}, which is a unit's own terminal bus -- that bus is "
+                f"inside the unit's model and has no node of its own to attach to. Put it on the grid "
+                f"bus on the other side of the unit's transformer.",
+                dynamics_caps,
+            ))
+
     from g2elin_core.operating_point import REBASED_PARAM_KEYS, overridable_param_keys  # lazy: it imports this module
 
     for der in network.der_units:

@@ -88,10 +88,15 @@ def build_pandapower_net(network: Network) -> tuple[pp.pandapowerNet, dict[int, 
             hv_bus=bus_index[tr.hv_bus],
             lv_bus=bus_index[tr.lv_bus],
             sn_mva=tr.sn_mva,
-            vn_hv_kv=network.bus(tr.hv_bus).vn_kv,
+            # An off-nominal ratio is the HV winding rated above its bus:
+            # pandapower's ratio is vn_hv_kv/vn_lv_kv against the two buses'
+            # own nominal voltages, so scaling vn_hv_kv by tap_ratio is exactly
+            # the a of the dynamic model (network/breakers.transformer_ratio).
+            vn_hv_kv=network.bus(tr.hv_bus).vn_kv * tr.tap_ratio,
             vn_lv_kv=network.bus(tr.lv_bus).vn_kv,
             vkr_percent=vkr_percent,
             vk_percent=max(vk_percent, 1e-6),
+            shift_degree=tr.shift_degree,
             pfe_kw=0.0,
             i0_percent=0.0,
             name=tr.name,

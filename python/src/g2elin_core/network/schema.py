@@ -78,6 +78,15 @@ class Transformer(BaseModel):
 
     Matches ``Y_TR``'s simple R+jX model, built from a DER unit's
     ``TR_R`` / ``TR_XL`` columns.
+
+    Two quite different roles share this one element, told apart by whether a
+    unit sits on the LV bus (``network/breakers.unit_transformers``):
+
+    * a **unit step-up**, whose LV bus carries a DER. Its impedance is part of
+      that unit's own model -- the classic machine-behind-transformer-
+      impedance -- and its LV bus never appears in the dynamic model.
+    * a **branch transformer** between two grid buses, which is a branch of
+      the network like a line, and gets a block of its own.
     """
 
     hv_bus: int
@@ -85,6 +94,17 @@ class Transformer(BaseModel):
     r_pu: float = Field(ge=0)
     x_pu: float = Field(gt=0)
     sn_mva: float = Field(gt=0, description="Rating the r_pu/x_pu are referred to")
+    tap_ratio: float = Field(
+        default=1.0, gt=0,
+        description="Off-nominal turns ratio on the HV side, per unit: v_hv = tap_ratio * v_lv at no "
+        "load. 1.0 is the nominal ratio the two buses' vn_kv already imply. Only modelled for a branch "
+        "transformer; a unit step-up's ratio is part of its unit's model.",
+    )
+    shift_degree: float = Field(
+        default=0.0,
+        description="Phase shift from HV to LV (a phase-shifting transformer). Rotates the dq frame "
+        "between the two sides. Branch transformers only, as for tap_ratio.",
+    )
     name: str = ""
     hv_closed: bool = Field(default=True, description="Breaker at the HV end (open = transformer out of service)")
     lv_closed: bool = Field(default=True, description="Breaker at the LV end (open = transformer out of service)")

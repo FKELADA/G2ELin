@@ -219,3 +219,44 @@ def test_the_conversion_is_the_one_kundur_uses_too():
         xd=1.8, xq=1.7, xl=0.2, ra=0.0025, xdp=0.3, xqp=0.55, xdpp=0.25, xqpp=0.25,
         td0p=8.0, tq0p=0.4, td0pp=0.03, tq0pp=0.05, h=6.5, kd=0.0, f_hz=60.0,
     )
+
+
+# --- the diagram at this size -----------------------------------------------------
+@pytest.mark.parametrize("build,factory", CASES, ids=IDS)
+def test_unit_terminals_are_hung_off_their_grid_bus_not_laid_out(build, factory):
+    """A unit's terminal bus is a modelling device, not a place in the network.
+    Laying it out as a node of its own pulled the real topology apart and wasted
+    the space it took -- 54 extra nodes among 118 real ones on the 118-bus case,
+    whose labels overlapped 152 times before this."""
+    from g2elin_core.network.topology import _unit_terminal_buses, compute_topology_layout
+
+    net = build()
+    terminals = _unit_terminal_buses(net)
+    assert len(terminals) == len(net.der_units)
+
+    layout = compute_topology_layout(net)
+    at = {n.id: (n.x, n.y) for n in layout.nodes}
+    assert len(at) == len(net.buses)                      # every bus still gets a position
+    for terminal, grid_bus in terminals.items():
+        distance = math.hypot(at[terminal][0] - at[grid_bus][0], at[terminal][1] - at[grid_bus][1])
+        assert distance > 0, "a terminal must not sit exactly on its grid bus"
+        # Close to the bus it feeds, rather than wherever a spring layout put it.
+        spread = max(abs(x) for x, _ in at.values()) + max(abs(y) for _, y in at.values())
+        assert distance < 0.35 * spread
+
+
+def test_two_units_on_one_bus_do_not_land_on_top_of_each_other():
+    from g2elin_core.network.presets import wscc9_3sm
+    from g2elin_core.network.schema import DerUnit, Transformer, UnitType, BusType, Bus
+    from g2elin_core.network.topology import compute_topology_layout
+
+    net = wscc9_3sm()
+    host = net.der_units[1].bus          # already a terminal; use its grid bus instead
+    grid = next(t.hv_bus for t in net.transformers if t.lv_bus == host)
+    new_bus = max(b.id for b in net.buses) + 1
+    net.buses.append(Bus(id=new_bus, name="extra_terminal", vn_kv=20.0))
+    net.transformers.append(Transformer(hv_bus=grid, lv_bus=new_bus, r_pu=0.0, x_pu=0.05, sn_mva=100.0))
+    net.der_units.append(DerUnit(id=99, bus=new_bus, unit_type=UnitType.GFL, bus_type=BusType.PQ,
+                                 v_set_pu=1.0, p_set_mw=1.0))
+    at = {n.id: (n.x, n.y) for n in compute_topology_layout(net).nodes}
+    assert math.hypot(at[new_bus][0] - at[host][0], at[new_bus][1] - at[host][1]) > 1e-6

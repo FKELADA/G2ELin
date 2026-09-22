@@ -12,9 +12,11 @@ not a node of its own.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import networkx as nx
+import numpy as np
 
 from g2elin_core.operating_point import (
     gfl_params, gfm_params, overridable_param_keys, rebase_params, sm_params, unit_transformer_rx,
@@ -95,6 +97,25 @@ def _der_info(der: DerUnit, network: Network) -> dict:
     return info
 
 
+# How far a unit's terminal sits from the bus it feeds, in the layout's own
+# roughly [-1, 1] coordinates.
+_TERMINAL_OFFSET = 0.13
+
+
+def _unit_terminal_buses(network: Network) -> dict[int, int]:
+    """``{terminal bus -> the grid bus it feeds}`` for every unit that sits on
+    a bus of its own behind a single step-up, with no line or load on it."""
+    line_buses = {b for ln in network.lines for b in (ln.from_bus, ln.to_bus)}
+    load_buses = {ld.bus for ld in network.loads}
+    out: dict[int, int] = {}
+    for der in network.der_units:
+        touching = [t for t in network.transformers if der.bus in (t.lv_bus, t.hv_bus)]
+        if len(touching) == 1 and der.bus not in line_buses and der.bus not in load_buses:
+            tr = touching[0]
+            out[der.bus] = tr.hv_bus if tr.lv_bus == der.bus else tr.lv_bus
+    return out
+
+
 def compute_topology_layout(network: Network) -> NetworkTopology:
     """Kamada-Kawai layout (a graph-distance-preserving spring layout, reads
     well for the mostly-tree-like/lightly-meshed topologies these presets
@@ -103,18 +124,43 @@ def compute_topology_layout(network: Network) -> NetworkTopology:
     disconnected graph, which none of the current presets produce, but
     nothing here assumes it can't happen for a future one).
     """
+    # A unit's own terminal bus -- the LV side of its step-up, carrying nothing
+    # else -- is a modelling device, not a place in the network. Laying it out
+    # as a node of its own pulls the real topology apart and wastes the space
+    # it takes: on the 118-bus case that is 54 extra nodes among 118 real ones.
+    # So the layout is computed over the network proper, and each terminal is
+    # then hung just off the bus it feeds.
+    terminal_of = _unit_terminal_buses(network)
+
     graph = nx.Graph()
     for bus in network.buses:
-        graph.add_node(bus.id)
+        if bus.id not in terminal_of:
+            graph.add_node(bus.id)
     for line in network.lines:
         graph.add_edge(line.from_bus, line.to_bus)
     for tr in network.transformers:
-        graph.add_edge(tr.hv_bus, tr.lv_bus)
+        if tr.lv_bus not in terminal_of:
+            graph.add_edge(tr.hv_bus, tr.lv_bus)
 
     try:
         pos = nx.kamada_kawai_layout(graph)
     except (nx.NetworkXException, ZeroDivisionError):
         pos = nx.spring_layout(graph, seed=0)
+
+    # Fan the terminals around their grid bus so two machines on one bus do not
+    # land on top of each other.
+    per_grid_bus: dict[int, list[int]] = {}
+    for terminal, grid_bus in terminal_of.items():
+        per_grid_bus.setdefault(grid_bus, []).append(terminal)
+    for grid_bus, terminals in per_grid_bus.items():
+        anchor = pos.get(grid_bus)
+        if anchor is None:
+            continue
+        for k, terminal in enumerate(sorted(terminals)):
+            angle = 2 * math.pi * (k + 0.5) / len(terminals) + 0.6 * grid_bus
+            pos[terminal] = anchor + _TERMINAL_OFFSET * np.array(
+                [math.cos(angle), math.sin(angle)]
+            )
 
     der_by_bus = {der.bus: der for der in network.der_units}
     load_p_by_bus: dict[int, float] = {}

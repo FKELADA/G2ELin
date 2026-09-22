@@ -10,6 +10,10 @@
 // with opts.onBreaker they toggle on click. Whatever open breakers take out of
 // service is drawn dashed / faded (serviceState in core.js).
 
+// Above these many buses the diagram drops detail rather than overlap itself.
+const BUS_LABEL_LIMIT = 40;
+const BREAKER_DETAIL_LIMIT = 60;
+
 class NetworkView {
   constructor(host, opts = {}) {
     this.host = host;
@@ -98,12 +102,35 @@ class NetworkView {
 
     const derByBus = {};
     net.der_units.forEach(d => { derByBus[d.bus] = d; });
+    // A unit's own terminal bus: the LV side of its step-up, with nothing else
+    // on it. It is a modelling device (the transformer's impedance goes inside
+    // the unit's model), not a place in the network anyone thinks about, so it
+    // is never labelled -- the unit's own glyph already says what is there.
+    const terminalBuses = new Set(
+      net.der_units.map(d => d.bus).filter(bus =>
+        !net.lines.some(l => l.from_bus === bus || l.to_bus === bus)
+        && !net.loads.some(l => l.bus === bus)
+        && net.transformers.filter(t => t.lv_bus === bus || t.hv_bus === bus).length === 1)
+    );
+
+    // How much detail a network of this size can carry, counting the buses
+    // that are really places in it. A 9-bus preset shows every name and every
+    // breaker; the 118-bus case cannot -- its 226 labels overlapped 152 times
+    // before this -- so it falls back to bus numbers, which are still enough
+    // to find one by. Open breakers are drawn whatever the size: they change
+    // what the network *is*, so they are never noise.
+    const nBus = net.buses.length - terminalBuses.size;
+    const detail = {
+      fullNames: nBus <= BUS_LABEL_LIMIT,
+      closedBreakers: nBus <= BREAKER_DETAIL_LIMIT,
+      scale: nBus > BUS_LABEL_LIMIT ? Math.max(0.55, Math.sqrt(BUS_LABEL_LIMIT / nBus)) : 1,
+    };
     const loadsByBus = {};
     net.loads.forEach((l, i) => { (loadsByBus[l.bus] ||= []).push([l, i]); });
     const shuntsByBus = {};
     (net.shunts || []).forEach((s, i) => { (shuntsByBus[s.bus] ||= []).push([s, i]); });
     const service = serviceState(net);
-    const busR = id => (derByBus[id] ? 16 : 8);
+    const busR = id => (derByBus[id] ? 16 : 8) * detail.scale;
     // Breaker offset from a bus centre along an edge (further out at a unit,
     // whose own breaker badge sits right against its circle).
     const brkGap = id => busR(id) + (derByBus[id] ? 19 : 9);
@@ -121,14 +148,16 @@ class NetworkView {
       g.append(main, hit, hov);
       let c1 = null, c2 = null;
       if (kind === "transformer") {
-        c1 = svgEl("circle", { class: "nd-trafo", r: 6 });
-        c2 = svgEl("circle", { class: "nd-trafo", r: 6 });
+        c1 = svgEl("circle", { class: "nd-trafo", r: 6 * detail.scale });
+        c2 = svgEl("circle", { class: "nd-trafo", r: 6 * detail.scale });
         g.append(c1, c2);
       }
       const [endA, endB] = kind === "line" ? ["from", "to"] : ["hv", "lv"];
-      const bkA = this.breakerNode({ kind, index, end: endA }, e[`${endA}_closed`] !== false);
-      const bkB = this.breakerNode({ kind, index, end: endB }, e[`${endB}_closed`] !== false);
-      g.append(bkA, bkB);
+      const openA = e[`${endA}_closed`] === false, openB = e[`${endB}_closed`] === false;
+      const bkA = (detail.closedBreakers || openA) ? this.breakerNode({ kind, index, end: endA }, !openA) : null;
+      const bkB = (detail.closedBreakers || openB) ? this.breakerNode({ kind, index, end: endB }, !openB) : null;
+      if (bkA) g.append(bkA);
+      if (bkB) g.append(bkB);
       const upd = () => {
         const p = pos(a), q = pos(b);
         [main, hit, hov].forEach(l => { l.setAttribute("x1", p.x); l.setAttribute("y1", p.y); l.setAttribute("x2", q.x); l.setAttribute("y2", q.y); });
@@ -136,13 +165,14 @@ class NetworkView {
         const ux = (q.x - p.x) / L, uy = (q.y - p.y) / L;
         if (c1) {
           const mx = (p.x + q.x) / 2, my = (p.y + q.y) / 2;
-          c1.setAttribute("cx", mx - ux * 4); c1.setAttribute("cy", my - uy * 4);
-          c2.setAttribute("cx", mx + ux * 4); c2.setAttribute("cy", my + uy * 4);
+          const sep = 4 * detail.scale;
+          c1.setAttribute("cx", mx - ux * sep); c1.setAttribute("cy", my - uy * sep);
+          c2.setAttribute("cx", mx + ux * sep); c2.setAttribute("cy", my + uy * sep);
         }
         // Breakers near each end, unless the edge is too short to fit them.
         const ga = Math.min(brkGap(a), L * 0.3), gb = Math.min(brkGap(b), L * 0.3);
-        bkA.setAttribute("transform", `translate(${p.x + ux * ga},${p.y + uy * ga})`);
-        bkB.setAttribute("transform", `translate(${q.x - ux * gb},${q.y - uy * gb})`);
+        if (bkA) bkA.setAttribute("transform", `translate(${p.x + ux * ga},${p.y + uy * ga})`);
+        if (bkB) bkB.setAttribute("transform", `translate(${q.x - ux * gb},${q.y - uy * gb})`);
       };
       upd();
       addUpd(a, upd); addUpd(b, upd);
@@ -157,7 +187,7 @@ class NetworkView {
     net.buses.forEach(b => {
       const der = derByBus[b.id];
       const st = (style.bus && style.bus(b, der)) || {};
-      const r = der ? 16 : 8;
+      const r = (der ? 16 : 8) * detail.scale;
       const dead = !service.energized.has(b.id) || (der && !service.units[der.id]);
       const g = svgEl("g", { class: `nd-bus${isSel("bus", b.id) ? " sel" : ""}${dead ? " nd-out" : ""}`, "data-bus-id": b.id });
       g.appendChild(svgEl("circle", { class: "ring", r: r + 5, fill: "none", stroke: "none" }));
@@ -167,6 +197,7 @@ class NetworkView {
       g.appendChild(core);
       if (der) {
         const t = svgEl("text", { class: "nd-unit-label", fill: st.fill ? (isDark(st.fill) ? "#fff" : "#111") : "#fff" });
+        if (detail.scale < 1) t.setAttribute("style", `font-size:${(10 * detail.scale).toFixed(1)}px`);
         t.textContent = UNIT_LABEL[der.unit_type] || "?";
         g.appendChild(t);
       }
@@ -191,13 +222,15 @@ class NetworkView {
           lg.appendChild(svgEl("line", { class: "nd-cap", x1: dx - 6, y1: r + 23, x2: dx + 6, y2: r + 23 }));
           lg.appendChild(svgEl("line", { x1: dx, y1: r + 23, x2: dx, y2: r + 26, stroke: "var(--text-secondary)", "stroke-width": 1.5 }));
         }
-        const bk = this.breakerNode({ kind: stub.kind, index: stub.index }, stub.el.closed !== false);
-        bk.setAttribute("transform", `translate(${dx * 0.7},${r + 9})`);
-        lg.appendChild(bk);
+        if (detail.closedBreakers || stub.el.closed === false) {
+          const bk = this.breakerNode({ kind: stub.kind, index: stub.index }, stub.el.closed !== false);
+          bk.setAttribute("transform", `translate(${dx * 0.7},${r + 9})`);
+          lg.appendChild(bk);
+        }
         g.appendChild(lg);
       });
       // A unit's own breaker: a badge on its circle, towards its transformer.
-      if (der) {
+      if (der && (detail.closedBreakers || der.closed === false)) {
         const tr = net.transformers.find(t => t.lv_bus === b.id);
         const bk = this.breakerNode({ kind: "unit", id: der.id }, der.closed !== false);
         const place = () => {
@@ -210,9 +243,13 @@ class NetworkView {
         if (tr) addUpd(tr.hv_bus, place);
         g.appendChild(bk);
       }
-      if (this.opts.showLabels !== false) {
+      // A terminal bus is never labelled -- the unit's own glyph already says
+      // what is there, and its name ("gen110_terminal") is the longest string
+      // on the diagram.
+      if (this.opts.showLabels !== false && !terminalBuses.has(b.id)) {
         const lab = svgEl("text", { class: "nd-bus-label", x: r + 4, y: -r + 1 });
-        lab.textContent = b.name || `bus${b.id}`;
+        if (detail.scale < 1) lab.setAttribute("style", `font-size:${(11 * detail.scale).toFixed(1)}px`);
+        lab.textContent = detail.fullNames ? (b.name || `bus${b.id}`) : String(b.id);
         g.appendChild(lab);
       }
       const upd = () => { const p = pos(b.id); g.setAttribute("transform", `translate(${p.x},${p.y})`); };

@@ -171,7 +171,7 @@ routinely omits it -- is refused rather than divided by, naming
 
 ## Presets
 
-15 networks in 4 families. The first two are transcribed line-by-line
+21 networks in 5 families. The first two are transcribed line-by-line
 from a complete MATLAB script, with exact numeric values and source-line
 comments tying each field back to the `.m` file it came from — each
 shares one raw topology across every DER-mix variant in its family
@@ -214,6 +214,47 @@ exercise `g2elin_core.components.ib` (the infinite-bus component, built
 early in this project but never wired into the interconnection until
 these presets needed a real slack for it — see {doc}`interconnect
 <interconnect>`).
+
+### Kundur two-area
+
+`kundur_two_area()` and `kundur_two_area_classic()` are the first presets
+that are **not** ports of the MATLAB toolbox: two areas of two 900 MVA
+machines joined by a weak 220 km double-circuit tie, from Kundur's *Power
+System Stability and Control*, Example 12.6 — the textbook case for
+inter-area oscillations and for what a stabilizer is for. They use this
+tool's own conventions throughout (each bus its own capacitance, each unit
+its own transformer), and they are the first to need three of the things
+added for them: unit ratings, capacitor banks, and per-bus capacitance.
+
+The book publishes the machine as `Xd`/`Xq`/`Xl` with transient and
+subtransient reactances and open-circuit time constants, while
+{doc}`components <components>` is written in mutual and leakage inductances
+with explicit field and damper windings. `kundur_machine_params()` converts
+between them; `tests/test_kundur.py` inverts the conversion and checks all
+eight published quantities come back.
+
+Checked against the book's own operating point: the tie carries 400.4 MW
+(published 400), and the rotor angles come out 9.77°, 27.08° and 37.27°
+behind G1 against the published 9.7°, 27.0° and 37.2°.
+
+There are two of them because the mode *frequencies* depend on controls this
+tool models differently:
+
+| | inter-area | local (area 1 / area 2) |
+| --- | --- | --- |
+| `kundur_two_area` (this tool's AVR + PSS + governor) | 0.71 Hz, +12.9% | 1.23 / 1.26 Hz |
+| `kundur_two_area_classic` (the book's: fast exciter, no PSS, constant torque) | **0.61 Hz, −2.5%** | 1.12 / 1.15 Hz |
+| Kundur, published | ~0.55 Hz, negative | ~1.1 Hz |
+
+The `classic` variant reproduces what the example exists to show: without a
+stabilizer the inter-area mode is *unstable*. The governor turned out to
+move it most — its 0.5% droop stiffens the mode from 0.61 to 0.71 Hz and adds
+one of its own near 0.25 Hz — so `classic` sets a droop large enough that it
+does not respond, the SM model having no governor off switch. The residual
+offset from the published frequency is the exciter and stabilizer structure,
+which is this tool's and not the book's; the tests assert the mode structure
+and the sign of the damping rather than frequencies the model cannot be
+expected to reproduce exactly.
 
 ## Topology layout
 

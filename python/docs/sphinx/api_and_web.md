@@ -209,6 +209,17 @@ persisted server-side. Always light-themed.
   *Export JSON*) puts them back, on this or any other computer. If the
   browser blocks storage (a private window does), the section says so and
   the JSON export remains the way to keep a network.
+  Elements added for the networks above are edited the same way: a unit's
+  **rating** (`sn_mva`, the base its overrides are given on), a transformer's
+  **tap ratio** and **phase shift** (branch transformers only), and a bus's
+  **shunt compensation** — a button each for a capacitor bank and a reactor,
+  a table of their own, and a symbol on the diagram (two plates for a bank, a
+  bar for a reactor) carrying a breaker like any other element.
+  **Changing a unit's type** drops the parameter overrides the new type does
+  not have and keeps those it does — a machine's flux linkages mean nothing to
+  a converter, while the two converter types share their filter and inner
+  current loop — and names what it dropped, rather than leaving a network that
+  fails validation.
   A unit's control & electrical parameters are editable: changed values are
   stored as overrides in `DerUnit.params` (only what differs from the
   default) and applied on top of `sm_params()`/`gfm_params()`/`gfl_params()`

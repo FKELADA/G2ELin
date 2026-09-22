@@ -1,0 +1,640 @@
+{
+ "name": "IEEE_14_bus",
+ "f_hz": 60.0,
+ "sn_mva": 100.0,
+ "units_use_first_transformer": false,
+ "nodes_share_first_line_b": false,
+ "min_node_b_pu": 0.0034353315667004385,
+ "frame_follows_slack": false,
+ "buses": [
+  {
+   "id": 0,
+   "name": "1",
+   "vn_kv": 135.0
+  },
+  {
+   "id": 1,
+   "name": "2",
+   "vn_kv": 135.0
+  },
+  {
+   "id": 2,
+   "name": "3",
+   "vn_kv": 135.0
+  },
+  {
+   "id": 3,
+   "name": "4",
+   "vn_kv": 135.0
+  },
+  {
+   "id": 4,
+   "name": "5",
+   "vn_kv": 135.0
+  },
+  {
+   "id": 5,
+   "name": "6",
+   "vn_kv": 0.208
+  },
+  {
+   "id": 6,
+   "name": "7",
+   "vn_kv": 14.0
+  },
+  {
+   "id": 7,
+   "name": "8",
+   "vn_kv": 12.0
+  },
+  {
+   "id": 8,
+   "name": "9",
+   "vn_kv": 0.208
+  },
+  {
+   "id": 9,
+   "name": "10",
+   "vn_kv": 0.208
+  },
+  {
+   "id": 10,
+   "name": "11",
+   "vn_kv": 0.208
+  },
+  {
+   "id": 11,
+   "name": "12",
+   "vn_kv": 0.208
+  },
+  {
+   "id": 12,
+   "name": "13",
+   "vn_kv": 0.208
+  },
+  {
+   "id": 13,
+   "name": "14",
+   "vn_kv": 0.208
+  },
+  {
+   "id": 14,
+   "name": "slack_terminal",
+   "vn_kv": 20.0
+  },
+  {
+   "id": 15,
+   "name": "gen1_terminal",
+   "vn_kv": 20.0
+  },
+  {
+   "id": 16,
+   "name": "gen2_terminal",
+   "vn_kv": 20.0
+  },
+  {
+   "id": 17,
+   "name": "gen5_terminal",
+   "vn_kv": 20.0
+  },
+  {
+   "id": 18,
+   "name": "gen7_terminal",
+   "vn_kv": 20.0
+  }
+ ],
+ "lines": [
+  {
+   "from_bus": 0,
+   "to_bus": 1,
+   "r_pu": 0.019379999999999998,
+   "x_pu": 0.05916999999999999,
+   "b_pu": 0.0528,
+   "length_km": 1.0,
+   "name": "line 0-1",
+   "from_closed": true,
+   "to_closed": true
+  },
+  {
+   "from_bus": 0,
+   "to_bus": 4,
+   "r_pu": 0.05403,
+   "x_pu": 0.22304,
+   "b_pu": 0.0492,
+   "length_km": 1.0,
+   "name": "line 0-4",
+   "from_closed": true,
+   "to_closed": true
+  },
+  {
+   "from_bus": 1,
+   "to_bus": 2,
+   "r_pu": 0.046990000000000004,
+   "x_pu": 0.19797,
+   "b_pu": 0.043800000000000006,
+   "length_km": 1.0,
+   "name": "line 1-2",
+   "from_closed": true,
+   "to_closed": true
+  },
+  {
+   "from_bus": 1,
+   "to_bus": 3,
+   "r_pu": 0.058109999999999995,
+   "x_pu": 0.17632,
+   "b_pu": 0.03400000000000001,
+   "length_km": 1.0,
+   "name": "line 1-3",
+   "from_closed": true,
+   "to_closed": true
+  },
+  {
+   "from_bus": 1,
+   "to_bus": 4,
+   "r_pu": 0.05695,
+   "x_pu": 0.17388,
+   "b_pu": 0.034600000000000006,
+   "length_km": 1.0,
+   "name": "line 1-4",
+   "from_closed": true,
+   "to_closed": true
+  },
+  {
+   "from_bus": 2,
+   "to_bus": 3,
+   "r_pu": 0.06701,
+   "x_pu": 0.17103,
+   "b_pu": 0.012800000000000002,
+   "length_km": 1.0,
+   "name": "line 2-3",
+   "from_closed": true,
+   "to_closed": true
+  },
+  {
+   "from_bus": 3,
+   "to_bus": 4,
+   "r_pu": 0.01335,
+   "x_pu": 0.04211,
+   "b_pu": 0.015540958687500002,
+   "length_km": 1.0,
+   "name": "line 3-4",
+   "from_closed": true,
+   "to_closed": true
+  },
+  {
+   "from_bus": 5,
+   "to_bus": 10,
+   "r_pu": 0.09498,
+   "x_pu": 0.19890000000000002,
+   "b_pu": 4.1366198681600005e-13,
+   "length_km": 1.0,
+   "name": "line 5-10",
+   "from_closed": true,
+   "to_closed": true
+  },
+  {
+   "from_bus": 5,
+   "to_bus": 11,
+   "r_pu": 0.12291,
+   "x_pu": 0.25581,
+   "b_pu": 5.320204768597333e-13,
+   "length_km": 1.0,
+   "name": "line 5-11",
+   "from_closed": true,
+   "to_closed": true
+  },
+  {
+   "from_bus": 5,
+   "to_bus": 12,
+   "r_pu": 0.06615,
+   "x_pu": 0.13027,
+   "b_pu": 2.7092884375324443e-13,
+   "length_km": 1.0,
+   "name": "line 5-12",
+   "from_closed": true,
+   "to_closed": true
+  },
+  {
+   "from_bus": 8,
+   "to_bus": 9,
+   "r_pu": 0.031810000000000005,
+   "x_pu": 0.08449999999999999,
+   "b_pu": 1.7573875256888886e-13,
+   "length_km": 1.0,
+   "name": "line 8-9",
+   "from_closed": true,
+   "to_closed": true
+  },
+  {
+   "from_bus": 8,
+   "to_bus": 13,
+   "r_pu": 0.12711,
+   "x_pu": 0.27038,
+   "b_pu": 5.623224132494223e-13,
+   "length_km": 1.0,
+   "name": "line 8-13",
+   "from_closed": true,
+   "to_closed": true
+  },
+  {
+   "from_bus": 9,
+   "to_bus": 10,
+   "r_pu": 0.08205,
+   "x_pu": 0.19207000000000002,
+   "b_pu": 3.9945730421191114e-13,
+   "length_km": 1.0,
+   "name": "line 9-10",
+   "from_closed": true,
+   "to_closed": true
+  },
+  {
+   "from_bus": 11,
+   "to_bus": 12,
+   "r_pu": 0.22092,
+   "x_pu": 0.19988,
+   "b_pu": 4.157001403960889e-13,
+   "length_km": 1.0,
+   "name": "line 11-12",
+   "from_closed": true,
+   "to_closed": true
+  },
+  {
+   "from_bus": 12,
+   "to_bus": 13,
+   "r_pu": 0.17093,
+   "x_pu": 0.34802,
+   "b_pu": 7.237940907576888e-13,
+   "length_km": 1.0,
+   "name": "line 12-13",
+   "from_closed": true,
+   "to_closed": true
+  }
+ ],
+ "transformers": [
+  {
+   "hv_bus": 3,
+   "lv_bus": 6,
+   "r_pu": 0.0,
+   "x_pu": 20.70288,
+   "sn_mva": 9900.0,
+   "tap_ratio": 0.978,
+   "shift_degree": 0.0,
+   "name": "trafo 3-6",
+   "hv_closed": true,
+   "lv_closed": true
+  },
+  {
+   "hv_bus": 3,
+   "lv_bus": 8,
+   "r_pu": 0.0,
+   "x_pu": 55.06182,
+   "sn_mva": 9900.0,
+   "tap_ratio": 0.969,
+   "shift_degree": 0.0,
+   "name": "trafo 3-8",
+   "hv_closed": true,
+   "lv_closed": true
+  },
+  {
+   "hv_bus": 4,
+   "lv_bus": 5,
+   "r_pu": 0.0,
+   "x_pu": 24.94998,
+   "sn_mva": 9900.0,
+   "tap_ratio": 0.9319999999999999,
+   "shift_degree": 0.0,
+   "name": "trafo 4-5",
+   "hv_closed": true,
+   "lv_closed": true
+  },
+  {
+   "hv_bus": 6,
+   "lv_bus": 7,
+   "r_pu": 0.0,
+   "x_pu": 17.43885,
+   "sn_mva": 9900.0,
+   "tap_ratio": 1.0,
+   "shift_degree": 0.0,
+   "name": "trafo 6-7",
+   "hv_closed": true,
+   "lv_closed": true
+  },
+  {
+   "hv_bus": 6,
+   "lv_bus": 8,
+   "r_pu": 0.0,
+   "x_pu": 10.890989999999999,
+   "sn_mva": 9900.0,
+   "tap_ratio": 1.0,
+   "shift_degree": 0.0,
+   "name": "trafo 6-8",
+   "hv_closed": true,
+   "lv_closed": true
+  },
+  {
+   "hv_bus": 0,
+   "lv_bus": 14,
+   "r_pu": 0.0,
+   "x_pu": 0.15,
+   "sn_mva": 273.4038498254261,
+   "tap_ratio": 1.0,
+   "shift_degree": 0.0,
+   "name": "slack_xfmr",
+   "hv_closed": true,
+   "lv_closed": true
+  },
+  {
+   "hv_bus": 1,
+   "lv_bus": 15,
+   "r_pu": 0.0,
+   "x_pu": 0.15,
+   "sn_mva": 50.0,
+   "tap_ratio": 1.0,
+   "shift_degree": 0.0,
+   "name": "gen1_xfmr",
+   "hv_closed": true,
+   "lv_closed": true
+  },
+  {
+   "hv_bus": 2,
+   "lv_bus": 16,
+   "r_pu": 0.0,
+   "x_pu": 0.15,
+   "sn_mva": 40.0,
+   "tap_ratio": 1.0,
+   "shift_degree": 0.0,
+   "name": "gen2_xfmr",
+   "hv_closed": true,
+   "lv_closed": true
+  },
+  {
+   "hv_bus": 5,
+   "lv_bus": 17,
+   "r_pu": 0.0,
+   "x_pu": 0.15,
+   "sn_mva": 24.0,
+   "tap_ratio": 1.0,
+   "shift_degree": 0.0,
+   "name": "gen5_xfmr",
+   "hv_closed": true,
+   "lv_closed": true
+  },
+  {
+   "hv_bus": 7,
+   "lv_bus": 18,
+   "r_pu": 0.0,
+   "x_pu": 0.15,
+   "sn_mva": 24.0,
+   "tap_ratio": 1.0,
+   "shift_degree": 0.0,
+   "name": "gen7_xfmr",
+   "hv_closed": true,
+   "lv_closed": true
+  }
+ ],
+ "loads": [
+  {
+   "bus": 1,
+   "p_mw": 21.7,
+   "q_mvar": 12.7,
+   "name": "load at 1",
+   "closed": true
+  },
+  {
+   "bus": 2,
+   "p_mw": 94.2,
+   "q_mvar": 19.0,
+   "name": "load at 2",
+   "closed": true
+  },
+  {
+   "bus": 3,
+   "p_mw": 47.8,
+   "q_mvar": -3.9,
+   "name": "load at 3",
+   "closed": true
+  },
+  {
+   "bus": 4,
+   "p_mw": 7.6,
+   "q_mvar": 1.6,
+   "name": "load at 4",
+   "closed": true
+  },
+  {
+   "bus": 5,
+   "p_mw": 11.2,
+   "q_mvar": 7.5,
+   "name": "load at 5",
+   "closed": true
+  },
+  {
+   "bus": 8,
+   "p_mw": 29.5,
+   "q_mvar": 16.6,
+   "name": "load at 8",
+   "closed": true
+  },
+  {
+   "bus": 9,
+   "p_mw": 9.0,
+   "q_mvar": 5.8,
+   "name": "load at 9",
+   "closed": true
+  },
+  {
+   "bus": 10,
+   "p_mw": 3.5,
+   "q_mvar": 1.8,
+   "name": "load at 10",
+   "closed": true
+  },
+  {
+   "bus": 11,
+   "p_mw": 6.1,
+   "q_mvar": 1.6,
+   "name": "load at 11",
+   "closed": true
+  },
+  {
+   "bus": 12,
+   "p_mw": 13.5,
+   "q_mvar": 5.8,
+   "name": "load at 12",
+   "closed": true
+  },
+  {
+   "bus": 13,
+   "p_mw": 14.9,
+   "q_mvar": 5.0,
+   "name": "load at 13",
+   "closed": true
+  }
+ ],
+ "shunts": [
+  {
+   "bus": 8,
+   "q_mvar": -19.0,
+   "r_pu": null,
+   "closed": true,
+   "name": "shunt at 8"
+  }
+ ],
+ "der_units": [
+  {
+   "id": 1,
+   "bus": 14,
+   "unit_type": "sm",
+   "bus_type": "slack",
+   "v_set_pu": 1.05816493745307,
+   "p_set_mw": 0.0,
+   "q_set_mvar": 0.0,
+   "p_cons_mw": 0.0,
+   "q_cons_mvar": 0.0,
+   "controller": null,
+   "xd_pu": 0.3,
+   "sn_mva": 273.4038498254261,
+   "closed": true,
+   "params": {
+    "Ra": 0.003,
+    "Ll": 0.15,
+    "Lad": 1.6500000000000001,
+    "Laq": 1.6,
+    "Lfd": 0.16499999999999998,
+    "Rfd": 0.000687776718361405,
+    "L1d": 0.13125000000000003,
+    "R1d": 0.021315394164093126,
+    "L1q": 0.5333333333333333,
+    "R1q": 0.011317684842090336,
+    "L2q": 0.08484848484848485,
+    "R2q": 0.018372865003393402,
+    "H": 4.0,
+    "KD": 0.0
+   }
+  },
+  {
+   "id": 2,
+   "bus": 15,
+   "unit_type": "sm",
+   "bus_type": "pv",
+   "v_set_pu": 1.173863052527439,
+   "p_set_mw": 40.0,
+   "q_set_mvar": 0.0,
+   "p_cons_mw": 0.0,
+   "q_cons_mvar": 0.0,
+   "controller": null,
+   "xd_pu": 0.3,
+   "sn_mva": 50.0,
+   "closed": true,
+   "params": {
+    "Ra": 0.003,
+    "Ll": 0.15,
+    "Lad": 1.6500000000000001,
+    "Laq": 1.6,
+    "Lfd": 0.16499999999999998,
+    "Rfd": 0.000687776718361405,
+    "L1d": 0.13125000000000003,
+    "R1d": 0.021315394164093126,
+    "L1q": 0.5333333333333333,
+    "R1q": 0.011317684842090336,
+    "L2q": 0.08484848484848485,
+    "R2q": 0.018372865003393402,
+    "H": 4.0,
+    "KD": 0.0
+   }
+  },
+  {
+   "id": 3,
+   "bus": 16,
+   "unit_type": "sm",
+   "bus_type": "pv",
+   "v_set_pu": 1.1019387470534021,
+   "p_set_mw": 0.0,
+   "q_set_mvar": 0.0,
+   "p_cons_mw": 0.0,
+   "q_cons_mvar": 0.0,
+   "controller": null,
+   "xd_pu": 0.3,
+   "sn_mva": 40.0,
+   "closed": true,
+   "params": {
+    "Ra": 0.003,
+    "Ll": 0.15,
+    "Lad": 1.6500000000000001,
+    "Laq": 1.6,
+    "Lfd": 0.16499999999999998,
+    "Rfd": 0.000687776718361405,
+    "L1d": 0.13125000000000003,
+    "R1d": 0.021315394164093126,
+    "L1q": 0.5333333333333333,
+    "R1q": 0.011317684842090336,
+    "L2q": 0.08484848484848485,
+    "R2q": 0.018372865003393402,
+    "H": 4.0,
+    "KD": 0.0
+   }
+  },
+  {
+   "id": 4,
+   "bus": 17,
+   "unit_type": "sm",
+   "bus_type": "pv",
+   "v_set_pu": 1.1424658600580209,
+   "p_set_mw": 0.0,
+   "q_set_mvar": 0.0,
+   "p_cons_mw": 0.0,
+   "q_cons_mvar": 0.0,
+   "controller": null,
+   "xd_pu": 0.3,
+   "sn_mva": 24.0,
+   "closed": true,
+   "params": {
+    "Ra": 0.003,
+    "Ll": 0.15,
+    "Lad": 1.6500000000000001,
+    "Laq": 1.6,
+    "Lfd": 0.16499999999999998,
+    "Rfd": 0.000687776718361405,
+    "L1d": 0.13125000000000003,
+    "R1d": 0.021315394164093126,
+    "L1q": 0.5333333333333333,
+    "R1q": 0.011317684842090336,
+    "L2q": 0.08484848484848485,
+    "R2q": 0.018372865003393402,
+    "H": 4.0,
+    "KD": 0.0
+   }
+  },
+  {
+   "id": 5,
+   "bus": 18,
+   "unit_type": "sm",
+   "bus_type": "pv",
+   "v_set_pu": 1.1902228541952322,
+   "p_set_mw": 0.0,
+   "q_set_mvar": 0.0,
+   "p_cons_mw": 0.0,
+   "q_cons_mvar": 0.0,
+   "controller": null,
+   "xd_pu": 0.3,
+   "sn_mva": 24.0,
+   "closed": true,
+   "params": {
+    "Ra": 0.003,
+    "Ll": 0.15,
+    "Lad": 1.6500000000000001,
+    "Laq": 1.6,
+    "Lfd": 0.16499999999999998,
+    "Rfd": 0.000687776718361405,
+    "L1d": 0.13125000000000003,
+    "R1d": 0.021315394164093126,
+    "L1q": 0.5333333333333333,
+    "R1q": 0.011317684842090336,
+    "L2q": 0.08484848484848485,
+    "R2q": 0.018372865003393402,
+    "H": 4.0,
+    "KD": 0.0
+   }
+  }
+ ]
+}

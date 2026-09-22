@@ -15,7 +15,10 @@ part 8 (WSCC) or 4 (CIGRE) times over.
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import NamedTuple
+
+from .machine_data import flux_linkage_params
 
 from .schema import Bus, BusType, DerUnit, GfmController, Line, Load, Network, Shunt, Transformer, UnitType
 
@@ -721,27 +724,12 @@ def kundur_machine_params(h_s: float) -> dict[str, float]:
     (see ``operating_point.rebase_params``). ``tests/test_kundur.py`` inverts
     these relations and checks the published numbers come back.
     """
-    xd, xq, xl, ra = 1.8, 1.7, 0.2, 0.0025
-    xdp, xqp, xdpp, xqpp = 0.3, 0.55, 0.25, 0.25
-    td0p, tq0p, td0pp, tq0pp = 8.0, 0.4, 0.03, 0.05
-    wb = 2 * math.pi * 60.0
-
-    def par(*xs: float) -> float:
-        return 1.0 / sum(1.0 / x for x in xs)
-
-    lad, laq = xd - xl, xq - xl
-    lfd = lad * (xdp - xl) / (lad - (xdp - xl))
-    l1d = 1.0 / (1.0 / (xdpp - xl) - 1.0 / lad - 1.0 / lfd)
-    l1q = laq * (xqp - xl) / (laq - (xqp - xl))
-    l2q = 1.0 / (1.0 / (xqpp - xl) - 1.0 / laq - 1.0 / l1q)
-    return {
-        "Ra": ra, "Ll": xl, "Lad": lad, "Laq": laq,
-        "Lfd": lfd, "Rfd": (lad + lfd) / (wb * td0p),
-        "L1d": l1d, "R1d": (l1d + par(lad, lfd)) / (wb * td0pp),
-        "L1q": l1q, "R1q": (laq + l1q) / (wb * tq0p),
-        "L2q": l2q, "R2q": (l2q + par(laq, l1q)) / (wb * tq0pp),
-        "H": h_s, "KD": 0.0,
-    }
+    return flux_linkage_params(
+        xd=1.8, xq=1.7, xl=0.2, ra=0.0025,
+        xdp=0.3, xqp=0.55, xdpp=0.25, xqpp=0.25,
+        td0p=8.0, tq0p=0.4, td0pp=0.03, tq0pp=0.05,
+        h=h_s, kd=0.0, f_hz=60.0,
+    )
 
 
 # What the book's own study assumes, which the tool does not by default:
@@ -818,3 +806,38 @@ def kundur_two_area_classic() -> Network:
     *negatively damped*, so the system is unstable until a stabilizer is added.
     """
     return _kundur_two_area("Kundur_two_area_classic", _KUNDUR_CLASSIC_CONTROLS)
+
+
+# --- IEEE test cases ----------------------------------------------------------
+# Converted from pandapower's own copies of the cases by
+# tools/build_ieee_presets.py, which writes the JSON these load. The conversion
+# is not done here because it is slow: every generator's voltage setpoint has to
+# be retuned until the grid bus it feeds sits where the published case put it,
+# which is tens of power-flow solves (40 s for the 118-bus case).
+#
+# What each carries beyond its source case -- a terminal bus and step-up per
+# generator, assumed machine ratings, estimated line charging -- is listed in
+# network/pandapower_import.py, and the generator prints it on every run.
+_DATA_DIR = Path(__file__).resolve().parent / "data"
+
+
+def _from_data(stem: str) -> Network:
+    return Network.model_validate_json((_DATA_DIR / f"{stem}.json").read_text(encoding="utf-8"))
+
+
+def ieee14() -> Network:
+    """IEEE 14-bus test case: 5 machines (two of them synchronous condensers),
+    three tapped transformers and a capacitor bank."""
+    return _from_data("ieee14")
+
+
+def ieee39() -> Network:
+    """IEEE 39-bus "New England" test case: 10 machines, 34 lines and 11 tapped
+    transformers -- the standard mid-size case for transient stability."""
+    return _from_data("ieee39")
+
+
+def ieee118() -> Network:
+    """IEEE 118-bus test case: 54 machines and 14 shunts. Large enough that
+    modal analysis is slow and EMT is impractical; power flow is quick."""
+    return _from_data("ieee118")

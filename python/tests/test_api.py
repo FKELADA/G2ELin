@@ -28,6 +28,7 @@ def test_list_presets():
         "cigre_islanded_2sm_2gfm_2gfl", "cigre_interconnected_1sm_1gfm_1gfl",
         "sm_smib", "gfm_smib", "gfl_smib", "sm_smsm", "gfm_smsm", "gfl_smsm",
         "kundur_two_area", "kundur_two_area_classic",
+        "ieee14", "ieee39", "ieee118",
     }
 
 

@@ -32,6 +32,9 @@ from g2elin_core.network.presets import (
     wscc9_2sm_1gfl,
     wscc9_2sm_1gfm,
     wscc9_3gfm,
+    ieee14,
+    ieee39,
+    ieee118,
     kundur_two_area,
     kundur_two_area_classic,
     wscc9_3sm,
@@ -130,6 +133,19 @@ _PRESET_SPECS: list[tuple[str, str, str, Callable[[], Network]]] = [
      "mechanical torque -- where the inter-area mode near 0.6 Hz comes out negatively damped. The case "
      "the example exists for.",
      kundur_two_area_classic),
+    ("ieee14", "IEEE 14-bus",
+     "IEEE 14-bus test case, converted from pandapower. Power flow matches the published case; the "
+     "machines carry generic dynamic data, since a power-flow case has none.",
+     ieee14),
+    ("ieee39", "IEEE 39-bus (New England)",
+     "IEEE 39-bus 'New England' case, 10 machines -- the standard mid-size transient-stability network. "
+     "Power flow matches the published case; the machine data is generic, so its modes are indicative only "
+     "(one local mode is negatively damped with it).",
+     ieee39),
+    ("ieee118", "IEEE 118-bus",
+     "IEEE 118-bus case, 54 machines. Power flow is quick; modal analysis is slow and EMT impractical at "
+     "this size. Machine data is generic.",
+     ieee118),
 ]
 
 PRESETS: dict[str, PresetInfo] = {

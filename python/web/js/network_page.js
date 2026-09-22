@@ -356,6 +356,7 @@ const NetworkPage = {
         const di = net.der_units.indexOf(der);
         html += `<div class="insp-section"><h4><span class="swatch" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${UNIT_COLOR[der.unit_type]}"></span>${esc(UNIT_NAME[der.unit_type] || "Unit")}<span class="spacer"></span><button class="ghost small" data-act="remove-der" data-index="${di}">Remove unit</button></h4>
           ${this.formHtml("der", der, `der:${di}`)}
+          ${this.retypeNoteHtml(der)}
           <div id="insp-ctrl"></div></div>`;
       } else {
         html += `<div class="insp-section"><h4>Generation unit</h4><div class="controls" style="align-items:center"><select id="insp-attach-type">${Object.keys(UNIT_LABEL).map(u => `<option value="${u}">${UNIT_NAME[u]}</option>`).join("")}</select><button class="secondary small" data-act="attach-der">Attach to this bus</button></div>
@@ -431,6 +432,17 @@ const NetworkPage = {
 
   // Applies one form edit to the network; returns true when the inspector
   // needs re-rendering (fields that change what else is editable).
+  // Shown once, right after a type change dropped overrides (retypeUnitParams).
+  retypeNoteHtml(der) {
+    const note = this.retypeNote;
+    if (!note || note.id !== der.id || note.unit_type !== der.unit_type) return "";
+    this.retypeNote = null;
+    return `<div class="notice warn-bg" style="margin-top:0.7rem;font-size:0.78rem">
+      <b>${note.dropped.length} parameter override${note.dropped.length === 1 ? "" : "s"} dropped</b> —
+      a ${esc(UNIT_NAME[der.unit_type] || der.unit_type)} has no ${esc(note.dropped.slice(0, 6).join(", "))}${note.dropped.length > 6 ? ", …" : ""}.
+      This unit now uses its own type's defaults; set them again below if you need to.</div>`;
+  },
+
   applyField(obj, field, input) {
     let v = input.value;
     if (input.dataset.type === "bool") v = input.checked;
@@ -454,11 +466,35 @@ const NetworkPage = {
     if (field === "unit_type") {
       if (v === "gfm" && !obj.controller) obj.controller = "droop";
       if (v !== "gfm") obj.controller = null;
+      this.retypeUnitParams(obj);
     }
     if (field === "bus_type" && v === "slack") {
       state.network.der_units.forEach(d => { if (d !== obj && d.bus_type === "slack") d.bus_type = "pv"; });
     }
     return rerender;
+  },
+
+  // Changing a unit's type makes parameter overrides written for the old one
+  // meaningless -- a machine's flux linkages say nothing to a converter -- and
+  // the network then fails validation ("overrides parameter(s) it doesn't
+  // have"). So drop the ones the new type hasn't got, and keep those it shares
+  // (the two converter types share their filter and inner current loop). What
+  // was dropped is reported in the inspector rather than thrown away quietly.
+  async retypeUnitParams(der) {
+    if (!der.params || !Object.keys(der.params).length) return;
+    let valid;
+    try {
+      valid = new Set(Object.keys((await UnitParams.defaultsFor(der)).defaults));
+    } catch {
+      return;   // server unreachable, or the network is too incomplete to say
+    }
+    const kept = Object.fromEntries(Object.entries(der.params).filter(([k]) => valid.has(k)));
+    const dropped = Object.keys(der.params).filter(k => !(k in kept));
+    if (!dropped.length) return;
+    der.params = kept;
+    this.retypeNote = { id: der.id, unit_type: der.unit_type, dropped };
+    networkChanged();
+    if (this.selected) this.openInspector(this.selected);
   },
 
   // Refresh pu inputs (e.g. impedances rescaled by a length change) and the

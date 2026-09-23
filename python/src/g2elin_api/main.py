@@ -46,6 +46,8 @@ from . import analysis
 from .network_routes import router as network_router
 from .presets import PRESETS, get_preset
 from .schemas import (
+    ModelLevelsResponse,
+    SolversResponse,
     BatchPowerFlowRequest,
     BatchPowerFlowResponse,
     EmtRequest,
@@ -156,6 +158,22 @@ def get_topology(preset_id: str) -> TopologyResponse:
 def list_powerflow_algorithms() -> dict[str, str]:
     """Solver ids accepted by ``PowerFlowOptions.algorithm`` -> display label."""
     return analysis.POWERFLOW_ALGORITHMS
+
+
+@app.get("/api/solvers", response_model=SolversResponse)
+def list_solvers() -> SolversResponse:
+    """The time-domain integrators this build offers, with what each one is
+    good for, plus the default tolerances. Static, like /api/model-levels."""
+    return analysis.solvers_response()
+
+
+@app.get("/api/model-levels", response_model=ModelLevelsResponse)
+def list_model_levels() -> ModelLevelsResponse:
+    """The model-order reduction catalogue: every element type's named
+    levels and the state groups they are built from. Static, so the web UI
+    fetches it once and builds its level pickers and per-state controls
+    from it rather than hard-coding either."""
+    return analysis.model_levels_response()
 
 
 @app.post("/api/units/defaults", response_model=UnitDefaultsResponse)

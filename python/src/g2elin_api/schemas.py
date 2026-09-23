@@ -7,7 +7,9 @@ choice, not an accident of what happened to be easy to `dict()`.
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from typing import Literal
+
+from pydantic import BaseModel, Field
 
 from g2elin_core.network.schema import Network
 
@@ -61,6 +63,14 @@ class PowerFlowResponse(BaseModel):
     solve_time_s: float | None = None
 
 
+class ModeCategoryInfo(BaseModel):
+    """One of the kinds a mode can be (g2elin_core.reduction.CATEGORIES)."""
+
+    id: str
+    label: str
+    note: str
+
+
 class ModeRow(BaseModel):
     mode: int
     real: float
@@ -68,6 +78,13 @@ class ModeRow(BaseModel):
     undamped_hz: float
     damped_hz: float
     damping_pct: float
+    # What kind of mode this is, from which states participate in it
+    # (g2elin_core.modal.classify). "share" is how much of the mode that
+    # category accounts for; "shares" gives every category's, so the map can
+    # show the full breakdown rather than only the verdict.
+    category: str = "mixed"
+    category_share: float = 0.0
+    category_shares: dict[str, float] = {}
     state1: str
     part1_pct: float
     state2: str
@@ -85,6 +102,9 @@ class ModalResponse(BaseModel):
     input_names: list[str]
     output_names: list[str]
     participation: list[list[float]]  # [state][mode], each column sums to 1 -- see ModalAnalysisResult
+    # The catalogue behind ModeRow.category, so the UI labels and explains
+    # the groups without hard-coding either.
+    categories: list[ModeCategoryInfo] = []
     # Modes that are only the model's free reference angle(s) (see
     # modal.reference_angle_modes): marginal by construction, so they are left
     # out of "stable"/"max_real_part".
@@ -285,6 +305,39 @@ class EmtRequest(BaseModel):
     # (same equilibrium, same state/input/output names), for overlaying.
     linear_overlay: bool = False
 
+    # --- solver ---------------------------------------------------------------
+    # How the trajectory is integrated. The defaults are what this tool used
+    # before any of these were settable, so leaving them alone changes
+    # nothing; see g2elin_core.timedomain.emt.SOLVERS for what each one is
+    # good for, and GET /api/solvers for the same catalogue as data.
+    stepping: Literal["variable", "fixed"] = "variable"
+    solver: str = "Radau"  # variable stepping only
+    rtol: float = Field(default=1e-4, gt=0, le=1e-1)
+    atol: float = Field(default=1e-6, gt=0, le=1e-1)
+    # Largest step the adaptive solver may take. None = unbounded, which is
+    # what it should normally be: capping it makes the solver take steps it
+    # didn't need, and the sample spacing is `dt`'s job, not this one's.
+    max_step: float | None = Field(default=None, gt=0)
+    # Fixed stepping only: the step held for the whole run. None picks the
+    # output spacing, so "fixed step" means "one step per plotted point".
+    fixed_step: float | None = Field(default=None, gt=0)
+
+
+class SolverInfo(BaseModel):
+    id: str
+    label: str
+    note: str
+    implicit: bool
+
+
+class SolversResponse(BaseModel):
+    """The integrators the time-domain page offers, and the defaults."""
+
+    solvers: list[SolverInfo]
+    default: str
+    default_rtol: float
+    default_atol: float
+
 
 class LinearOverlay(BaseModel):
     t: list[float]
@@ -448,3 +501,120 @@ class ValidateResponse(BaseModel):
     ok: bool  # true iff there are no "error"-severity issues (warnings don't block anything)
     issues: list[NetworkIssueRow]
     service: ServiceInfo | None = None
+
+
+# --- Model-order reduction ----------------------------------------------------
+
+
+class StateGroupInfo(BaseModel):
+    """One switchable approximation of an element type (g2elin_core.reduction)."""
+
+    id: str
+    label: str
+    states: list[str]  # the state names this group covers, for display
+    allowed: list[str]  # which of dynamic/algebraic/frozen this group accepts
+    default: str
+    locked: bool  # true = dynamic only, the group can never be removed
+    # Groups that must be algebraic before this one can be (a control loop
+    # needs what it regulates to be an unknown). The UI carries these along
+    # rather than letting the user pick a combination the server refuses.
+    requires: list[str] = []
+    note: str
+
+
+class ModelLevelInfo(BaseModel):
+    id: str
+    label: str
+    note: str
+    modes: dict[str, str]  # group id -> mode
+
+
+class ElementModelInfo(BaseModel):
+    kind: str  # "network" | "sm" | "gfm" | "gfl"
+    label: str
+    default_level: str
+    levels: list[ModelLevelInfo]
+    groups: list[StateGroupInfo]
+
+
+class ModelLevelsResponse(BaseModel):
+    """The whole reduction catalogue -- what the web UI builds its level
+    pickers and per-state-group controls from, so nothing about the
+    available choices is hard-coded in the frontend."""
+
+    elements: list[ElementModelInfo]
+
+
+class UnitModelRow(BaseModel):
+    """One unit's resolved model settings, after network defaults and the
+    unit's own overrides."""
+
+    id: int
+    unit_type: str
+    label: str
+    level: str | None  # None = a custom combination matching no named level
+    modes: dict[str, str]  # group id -> mode
+    n_states: int
+
+
+class ModelSummaryResponse(BaseModel):
+    """What the current settings add up to: the model class the run will
+    produce, and the size it will be."""
+
+    model_class: str  # "EMT" | "RMS" | "Mixed"
+    network_level: str | None
+    network_modes: dict[str, str]
+    network_frequency: str
+    units: list[UnitModelRow]
+    n_states: int
+    n_states_full: int
+
+
+class StateRiskRow(BaseModel):
+    state: str
+    group: str
+    mode_hz: float
+    mode_damping_pct: float
+    participation: float
+
+
+class ModePairRow(BaseModel):
+    full_hz: float
+    full_damping_pct: float
+    reduced_hz: float | None
+    reduced_damping_pct: float | None
+    matched: bool
+    # An unmatched mode that was made of the removed states themselves --
+    # the reduction doing what was asked, not losing something.
+    expected_loss: bool = False
+    removed_share: float = 0.0
+    d_hz: float | None
+    d_damping_pct: float | None
+
+
+class AdequacyRequest(BaseModel):
+    network: Network
+    band_hz: float = Field(
+        default=5.0, gt=0, le=1000,
+        description="The frequency band the reduced model is expected to reproduce. "
+        "Electromechanical studies use a few Hz; converter interaction studies need more.",
+    )
+
+
+class AdequacyResponse(BaseModel):
+    """Whether this network's chosen reduction is safe for this network --
+    see g2elin_core.modal.adequacy."""
+
+    verdict: str  # "safe" | "check" | "unsafe" | "full_order"
+    band_hz: float
+    n_states_full: int
+    n_states_reduced: int
+    removed_states: list[str]
+    risks: list[StateRiskRow]
+    modes: list[ModePairRow]
+    max_d_hz: float
+    max_d_damping_pct: float
+    unmatched: int
+    stiffness_full: float
+    stiffness_reduced: float
+    notes: list[str]

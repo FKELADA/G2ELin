@@ -19,24 +19,29 @@ import numpy as np
 import scipy.signal
 from fastapi import HTTPException, Request
 
+from g2elin_core import reduction
 from g2elin_core.interconnect import AssembledSystem
 from g2elin_core.modal import (
-    ModalAnalysisResult, analyze, eigenvalue_sensitivity, free_response, mode_shape, reference_angle_modes,
-    step_response,
+    ModalAnalysisResult, analyze, check_adequacy, classify_modes, eigenvalue_sensitivity,
+    free_response, mode_shape, reference_angle_modes, step_response,
 )
-from g2elin_core.network.breakers import NoReferenceUnit, energized_network, service_state
+from g2elin_core.network.breakers import TYPE_LABEL, NoReferenceUnit, energized_network, service_state
 from g2elin_core.network.schema import Network
 from g2elin_core.network.topology import compute_topology_layout
 from g2elin_core.network.validation import validate_network
 from g2elin_core.pipeline import linearize_network
 from g2elin_core.powerflow import run_power_flow
 from g2elin_core.powerflow.pandapower_adapter import PowerFlowResult
-from g2elin_core.timedomain import NonlinearNetworkModel, build_nonlinear_network, find_state_index, simulate, simulate_steps
+from g2elin_core.timedomain import (
+    DEFAULT_SOLVER, SOLVERS, NonlinearNetworkModel, build_nonlinear_network, find_state_index,
+    simulate, simulate_fixed_step, simulate_steps,
+)
 from g2elin_core.timedomain.events import EventError, NetworkEvent, apply_event
 from g2elin_core.timedomain.measurements import MeasurementSet
 from g2elin_core.timeseries import Snapshot, apply_snapshot, run_time_series, scale_loads
 
 from .schemas import (
+    AdequacyResponse,
     BatchPowerFlowRequest,
     BatchPowerFlowResponse,
     BatchSnapshot,
@@ -46,19 +51,27 @@ from .schemas import (
     EmtResponse,
     FreeResponseRequest,
     FreeResponseResponse,
+    ElementModelInfo,
     LinearOverlay,
     MeasurementInfo,
     ModalResponse,
+    ModeCategoryInfo,
+    ModelLevelsResponse,
+    ModelSummaryResponse,
+    ModePairRow,
     ModeRow,
     ModeShapeRequest,
     ModeShapeResponse,
     NetworkIssueRow,
     PowerFlowOptions,
     PowerFlowResponse,
+    IslandRow,
     SensitivityEntryRow,
     SensitivityRequest,
-    IslandRow,
     SensitivityResponse,
+    SolverInfo,
+    SolversResponse,
+    StateRiskRow,
     ServiceInfo,
     StatesResponse,
     StepResponseRequest,
@@ -67,6 +80,7 @@ from .schemas import (
     TimeSeriesSnapshot,
     TopologyEdgeRow,
     TopologyResponse,
+    UnitModelRow,
     ValidateResponse,
 )
 
@@ -87,7 +101,16 @@ EMT_MAX_N_POINTS = 10000
 EMT_LIVE_MAX_STEPS = 50000
 EMT_DEFAULT_N_POINTS = 200  # -> default dt = t_final/199 when req.dt isn't given
 MODAL_MAX_T_FINAL = 20.0  # free/step response are cheap (linear algebra, no ODE solve) -- a looser bound
-EMT_SIMULATE_KWARGS = dict(rtol=1e-4, atol=1e-6, first_step=1e-8)
+# The solver settings a request doesn't override. ``first_step`` is small on
+# purpose: the full EMT model's fastest modes are ~1e7 rad/s, and an adaptive
+# solver that opens with too big a step spends its first dozen steps being
+# rejected. With the analytic Jacobian in place it matters much less than it
+# did, but it costs nothing to start carefully.
+EMT_FIRST_STEP = 1e-8
+EMT_SIMULATE_KWARGS = dict(rtol=1e-4, atol=1e-6, first_step=EMT_FIRST_STEP)
+# What a fixed-step run will not do: one that would take more steps than this
+# is refused up front rather than left to time the request out.
+EMT_MAX_FIXED_STEPS = 200_000
 EMT_MAX_T_PRE = 1.0
 BATCH_MAX_STEPS = 100
 BATCH_MAX_SCALE = 5.0
@@ -348,6 +371,8 @@ def mode_or_422(modal: ModalAnalysisResult, mode: int) -> None:
 def modal_response(network: Network) -> ModalResponse:
     system, modal = build_modal_from_network(network)
     table = modal.summary_table().sort_values("real", ascending=False)
+    # What kind of mode each one is -- the eigenvalue map groups by it.
+    kinds = {c.mode: c for c in classify_modes(modal)}
     # The reference-angle modes are the model's own coordinates, marginal by
     # construction (see modal.reference_angle_modes), so the verdict and the
     # worst real part are read off the physical ones.
@@ -360,7 +385,19 @@ def modal_response(network: Network) -> ModalResponse:
         stable=bool((physical.real < 1e-6).all()),
         max_real_part=float(physical.real.max()),
         reference_modes=reference,
-        modes=[ModeRow(**row) for row in table.to_dict(orient="records")],
+        modes=[
+            ModeRow(
+                **row,
+                category=kinds[row["mode"]].category,
+                category_share=kinds[row["mode"]].share,
+                category_shares=kinds[row["mode"]].shares,
+            )
+            for row in table.to_dict(orient="records")
+        ],
+        categories=[
+            ModeCategoryInfo(id=k, label=v["label"], note=v["note"])
+            for k, v in reduction.CATEGORIES.items()
+        ],
         state_names=system.state_names,
         input_names=system.input_names,
         output_names=system.output_names,
@@ -716,6 +753,57 @@ def _trajectories(
     return {n: x[idx[n], :].tolist() if n in idx else [None] * len(t) for n in names}
 
 
+def _solver_kwargs(req: EmtRequest, with_max_step: bool = True) -> dict:
+    """The integrator settings one request asks for.
+
+    ``max_step`` is left out entirely when the request doesn't set it: SciPy
+    reads it as "no bound", and passing a bound the user didn't ask for makes
+    the solver take steps it didn't need. ``with_max_step=False`` leaves it
+    out either way, for the live stream, which passes its own (see
+    :func:`prepare_emt_live`) and would otherwise get it twice.
+    """
+    if req.solver not in SOLVERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown solver {req.solver!r}; available: {sorted(SOLVERS)}",
+        )
+    kwargs = dict(method=req.solver, rtol=req.rtol, atol=req.atol, first_step=EMT_FIRST_STEP)
+    if with_max_step and req.max_step is not None:
+        kwargs["max_step"] = req.max_step
+    return kwargs
+
+
+def _fixed_step_or_422(req: EmtRequest, n_points: int) -> float:
+    """The fixed step a request asks for, defaulting to one step per plotted
+    point, and refused up front if it would take an unreasonable number."""
+    step = req.fixed_step if req.fixed_step is not None else req.t_final / max(n_points - 1, 1)
+    n_steps = req.t_final / step
+    if n_steps > EMT_MAX_FIXED_STEPS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"a {step:g} s step over {req.t_final:g} s is {n_steps:.0f} steps, past this "
+                f"endpoint's {EMT_MAX_FIXED_STEPS:,} limit. Use a larger step, a shorter run, or "
+                "variable stepping, which spends steps only where the trajectory needs them."
+            ),
+        )
+    return step
+
+
+def solvers_response() -> SolversResponse:
+    """The integrator catalogue -- what the time-domain page's solver picker
+    is built from, so it never hard-codes a method name or a default."""
+    return SolversResponse(
+        solvers=[
+            SolverInfo(id=k, label=v["label"], note=v["note"], implicit=v["implicit"])
+            for k, v in SOLVERS.items()
+        ],
+        default=DEFAULT_SOLVER,
+        default_rtol=EMT_SIMULATE_KWARGS["rtol"],
+        default_atol=EMT_SIMULATE_KWARGS["atol"],
+    )
+
+
 def emt_response(network: Network, req: EmtRequest) -> EmtResponse:
     n_points = _validate_emt_t_final_and_n_points(req)
     model = build_nonlinear_model_from_network(network)
@@ -727,7 +815,16 @@ def emt_response(network: Network, req: EmtRequest) -> EmtResponse:
 
     t_eval = np.linspace(0.0, req.t_final, n_points)
     try:
-        sim = simulate(run.sim, (0.0, req.t_final), x0=run.x0, u_exo_fn=run.u_exo_fn, t_eval=t_eval, **EMT_SIMULATE_KWARGS)
+        if req.stepping == "fixed":
+            step = _fixed_step_or_422(req, n_points)
+            sim = simulate_fixed_step(
+                run.sim, (0.0, req.t_final), step, x0=run.x0, u_exo_fn=run.u_exo_fn
+            )
+        else:
+            sim = simulate(
+                run.sim, (0.0, req.t_final), x0=run.x0, u_exo_fn=run.u_exo_fn, t_eval=t_eval,
+                **_solver_kwargs(req),
+            )
     except RuntimeError as e:
         # The coupled Newton solve (see timedomain/emt.py) can fail to
         # converge for a large enough perturbation -- a trajectory that
@@ -822,7 +919,12 @@ def prepare_emt_live(network: Network, req: EmtRequest) -> _EmtLivePlan:
     model = build_nonlinear_model_from_network(network)
     ms = _check_measurements(network, req.plot_measurements)
     run = _resolve_emt_run(model, req)
+    # A live run caps its step so the trace arrives smoothly rather than in
+    # a few big jumps -- that is a display concern, not the user's solver
+    # setting, so when they have set one too, the tighter of the two wins.
     max_step = req.dt if req.dt else req.t_final / EMT_DEFAULT_N_POINTS
+    if req.max_step is not None:
+        max_step = min(max_step, req.max_step)
     return _EmtLivePlan(
         run, _plot_state_names(model, req),
         _check_names(req.plot_inputs, model.input_names, "input"),
@@ -878,7 +980,7 @@ async def emt_live_stream(plan: _EmtLivePlan, perturb_kind: str, request: Reques
     try:
         for step in simulate_steps(
             run.sim, (0.0, plan.t_final), x0=run.x0, u_exo_fn=run.u_exo_fn,
-            max_step=plan.max_step, **EMT_SIMULATE_KWARGS,
+            max_step=plan.max_step, **_solver_kwargs(plan.req, with_max_step=False),
         ):
             if await request.is_disconnected():
                 return  # client hit "Stop" / navigated away -- stop computing, not an error
@@ -927,3 +1029,117 @@ async def emt_live_stream(plan: _EmtLivePlan, perturb_kind: str, request: Reques
             except HTTPException as e:
                 done["linear_error"] = str(e.detail)
     yield json.dumps(done) + "\n"
+
+
+# --- Model-order reduction ----------------------------------------------------
+
+
+def model_levels_response() -> ModelLevelsResponse:
+    """The reduction catalogue. Static -- it describes the models this
+    build knows how to make, not anything about a particular network -- so
+    the web UI fetches it once at boot and never hard-codes a level name or
+    a state group of its own.
+    """
+    return ModelLevelsResponse(
+        elements=[ElementModelInfo(**reduction.describe(kind)) for kind in reduction.ELEMENTS]
+    )
+
+
+def model_summary_response(network: Network) -> ModelSummaryResponse:
+    """What the network's current settings add up to.
+
+    The model class is derived, never chosen: a run is EMT when the passive
+    network still integrates and every unit keeps its own fast electrical
+    states, RMS when neither does, and Mixed in between. Naming it here
+    rather than in the UI keeps the one definition in one place -- it is
+    also what decides whether the time-domain page offers instantaneous
+    3-phase waveforms, which mean nothing in a quasi-stationary model.
+    """
+    models = network.models
+    net_group_modes = models.group_modes_for("network")
+    network_dynamic = models.network_is_dynamic
+
+    units: list[UnitModelRow] = []
+    unit_fast_dynamic = False
+    for der in network.der_units:
+        kind = der.unit_type.value
+        if kind not in reduction.ELEMENTS:
+            continue
+        group_modes = network.unit_group_modes(der)
+        fast = "trafo_current" if kind == "sm" else "trafo_current"
+        if group_modes.get(fast) == reduction.DYNAMIC:
+            unit_fast_dynamic = True
+        n_states = sum(
+            len(reduction.element(kind).group(gid).symbols)
+            for gid, mode in group_modes.items() if mode == reduction.DYNAMIC
+        )
+        units.append(UnitModelRow(
+            id=der.id,
+            unit_type=kind,
+            label=f"{TYPE_LABEL.get(kind, kind)} (unit {der.id})",
+            level=network.unit_level(der),
+            modes=group_modes,
+            n_states=n_states,
+        ))
+
+    if network_dynamic and unit_fast_dynamic:
+        model_class = "EMT"
+    elif not network_dynamic and not unit_fast_dynamic:
+        model_class = "RMS"
+    else:
+        model_class = "Mixed"
+
+    # Both counts come from the blocks that were actually built, never from
+    # a sum done by hand here -- but from the *nonlinear* model, which is
+    # cheap to build (a fraction of a second even at 118 buses) and already
+    # cached for the states endpoint. Linearising a second time just to
+    # count the full-order states would put a 20-second build behind a badge
+    # that is drawn on every page view; the full-order model is built once,
+    # deliberately, by the adequacy check.
+    model = build_nonlinear_model_from_network(network)
+    n_states = sum(b.comp.n_states for b in model.blocks)
+    n_full = 0
+    for block in model.blocks:
+        kind = block.kind.removesuffix("_slack")
+        if kind in reduction.ELEMENTS:
+            n_full += sum(len(g.symbols) for g in reduction.element(kind).groups)
+        elif kind in ("node", "line", "load", "shunt"):
+            n_full += 2  # every passive element is a dq pair at full order
+        else:
+            n_full += block.comp.n_states  # a frame or an infinite bus: nothing reducible
+
+    return ModelSummaryResponse(
+        model_class=model_class,
+        network_level=reduction.element("network").matching_level(net_group_modes),
+        network_modes=net_group_modes,
+        network_frequency=models.network_frequency,
+        units=units,
+        n_states=n_states,
+        n_states_full=n_full,
+    )
+
+
+def adequacy_response(network: Network, band_hz: float) -> AdequacyResponse:
+    """Judge the chosen reduction against this network's own full-order
+    model (g2elin_core.modal.adequacy). Builds two linearizations and two
+    eigendecompositions, so it is the most expensive endpoint here -- it is
+    meant to be run once when a level is chosen, not on every page view.
+    """
+    net = energized_or_422(network)
+    result = run_power_flow(net)
+    if not result.converged:
+        raise HTTPException(
+            status_code=422, detail="power flow did not converge; can't check the model against it"
+        )
+    try:
+        report = check_adequacy(net, result, band_hz=band_hz)
+    except NotImplementedError as e:
+        raise HTTPException(status_code=501, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    data = report.as_dict()
+    return AdequacyResponse(
+        **{k: v for k, v in data.items() if k not in ("risks", "modes")},
+        risks=[StateRiskRow(**r) for r in data["risks"]],
+        modes=[ModePairRow(**m) for m in data["modes"]],
+    )

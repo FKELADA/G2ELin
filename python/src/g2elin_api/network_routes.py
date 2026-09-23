@@ -29,10 +29,13 @@ from fastapi.responses import StreamingResponse
 
 from . import analysis, sweep
 from .schemas import (
+    AdequacyRequest,
+    AdequacyResponse,
     BatchPowerFlowResponse,
     EmtResponse,
     FreeResponseResponse,
     ModalResponse,
+    ModelSummaryResponse,
     ModeShapeResponse,
     NetworkBatchPowerFlowRequest,
     NetworkEmtRequest,
@@ -63,6 +66,22 @@ def network_validate(req: NetworkRequest) -> ValidateResponse:
     network's problems can be shown all at once.
     """
     return analysis.validate_network_response(req.network)
+
+
+@router.post("/model", response_model=ModelSummaryResponse)
+def network_model(req: NetworkRequest) -> ModelSummaryResponse:
+    """What the network's model-order settings add up to: the resulting
+    model class (EMT / RMS / Mixed), each unit's resolved level, and the
+    state count against the full-order one."""
+    return analysis.model_summary_response(req.network)
+
+
+@router.post("/model/adequacy", response_model=AdequacyResponse)
+def network_model_adequacy(req: AdequacyRequest) -> AdequacyResponse:
+    """Is this reduction safe for this network? Compares the chosen model
+    against the same network at full order -- which of the removed states
+    mattered, and how far the surviving modes actually moved."""
+    return analysis.adequacy_response(req.network, req.band_hz)
 
 
 @router.post("/topology", response_model=TopologyResponse)

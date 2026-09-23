@@ -174,6 +174,87 @@ $\dot x = f(x,z,u)$ is the right-hand side `scipy.integrate.solve_ivp`
 evaluation the ODE integrator requests, warm-started from the previous
 step's $(z,u)$.
 
+## Choosing a solver
+
+The integration settings live on the request (`EmtRequest`), not the
+network: they are about how a trajectory is computed, not about what is
+being modelled. `GET /api/solvers` serves the catalogue the web UI's picker
+is built from.
+
+### The Jacobian, first
+
+Radau, BDF and LSODA are implicit, so each needs `d(xdot)/dx`. Given none,
+SciPy finite-differences it — **one full coupled Newton solve per state**,
+and SciPy does not count those in `sol.nfev`, so the cost is invisible in
+the diagnostics. Measured on WSCC-9 at full order: 257 real RHS evaluations
+against a reported `nfev` of 81, so 68% of the work was building a matrix.
+
+{meth}`~g2elin_core.timedomain.emt.NonlinearNetworkModel.ode_jacobian`
+assembles it instead. Differentiating the constraints along the trajectory
+gives a linear system whose matrix is the *same* Newton Jacobian the
+algebraic solve already factorises, so it costs one sparse factorisation
+plus `n_x` back-substitutions. It is passed automatically to every implicit
+method; there is no setting for it.
+
+What that changed, measured:
+
+| Case | Before | After |
+|---|---|---|
+| WSCC-9, full order, Radau | 650 s (320,714 RHS calls) | 0.84 s (141 calls) |
+| IEEE-39, full order | 456 s | 267 s |
+| IEEE-118, full order | did not finish in 30 min | 189 s |
+
+The first row is the pathology in miniature: without a usable Jacobian,
+Radau's inner Newton fails, it rejects the step, shrinks it, rebuilds the
+Jacobian, and spirals.
+
+### Method
+
+| Method | When |
+|---|---|
+| `Radau` | the default. L-stable, copes with the full model's 1e7 rad/s modes. |
+| `BDF` | usually the fastest. Measured 1.4–5× quicker than Radau on the same run. Less robust across a sharp event. |
+| `LSODA` | detects stiffness and switches. A reasonable "don't know" choice. |
+| `RK45`, `DOP853` | explicit, no Jacobian at all — but they must resolve every fast mode. |
+
+```{warning}
+The explicit methods are offered for completeness and were slower in every
+case measured. On the full EMT model they diverge outright; even on a
+quasi-stationary model whose fastest mode is ~6 krad/s, RK45 took 952 steps
+and 61 s where BDF took 39 steps and 1.5 s. Model-order reduction removes
+several orders of stiffness but not enough to make an explicit method
+competitive.
+```
+
+### Tolerance
+
+`rtol` is the largest single lever after the method. Loosening it from 1e-4
+to 1e-3 roughly halved one run's time — and moved the peak of the signal by
+7%, which is the trade in one sentence. 1e-3 for screening, 1e-6 for a
+number that goes in a paper.
+
+`max_step` is best left unset. It bounds the solver's step, which only
+forces steps it did not need; the *output* spacing is a separate setting.
+
+### Fixed stepping
+
+{func}`~g2elin_core.timedomain.emt.simulate_fixed_step` integrates on a step
+you choose, with the trapezoidal rule — how an EMT program works. It gives
+up error control and gets back a cost you can predict before starting, output
+exactly on the grid you asked for with no interpolation, and a result that
+does not move when a tolerance is nudged.
+
+It is not usually *faster*: on a smooth trajectory a variable-step solver
+takes big steps where nothing happens and wins easily (measured: 5.2 s at a
+2 ms fixed step against 2.8 s for BDF over the same run). Reach for it when
+you want reproducibility, a direct comparison against PSCAD or EMTP, or a
+run whose duration you can promise.
+
+Trapezoidal is A-stable, so too large a step cannot make it blow up — but it
+can make it *ring*, the numerical oscillation EMT programs damp
+deliberately. A trace oscillating at exactly two samples per cycle is that,
+and the fix is a smaller step, not a smaller tolerance.
+
 ## Reference
 
 ```{eval-rst}

@@ -45,7 +45,10 @@ import math
 import numpy as np
 import scipy.integrate
 import scipy.optimize
+import scipy.sparse
+import scipy.sparse.linalg
 
+from g2elin_core.components.base import DYNAMIC, mode_key
 from g2elin_core.components.frame import frame_dae, frame_nonlinear_funcs, frame_nonlinear_jacobians, frame_nonlinear_point
 from g2elin_core.components.gfl import (
     GflOperatingPoint, gfl_dae, gfl_nonlinear_funcs, gfl_nonlinear_jacobians, gfl_nonlinear_point,
@@ -95,6 +98,11 @@ class NonlinearBlockComp:
     Hz: Callable[[Vec, Vec, Vec], Vec]
     Hx: Callable[[Vec, Vec, Vec], Vec]
     Hu: Callable[[Vec, Vec, Vec], Vec]
+    # d(f)/d(x, z, u) — only an implicit ODE solver needs these, to build
+    # d(xdot)/dx without finite-differencing it (see ode_jacobian).
+    Fx: Callable[[Vec, Vec, Vec], Vec]
+    Fz: Callable[[Vec, Vec, Vec], Vec]
+    Fu: Callable[[Vec, Vec, Vec], Vec]
     state_names: list[str]
     input_names: list[str]
     output_names: list[str]
@@ -121,6 +129,9 @@ def _bind(dae, funcs, jacs, point) -> NonlinearBlockComp:
         Hz=lambda x, z, u: jacs.Hz(x, z, u, p0),
         Hx=lambda x, z, u: jacs.Hx(x, z, u, p0),
         Hu=lambda x, z, u: jacs.Hu(x, z, u, p0),
+        Fx=lambda x, z, u: jacs.Fx(x, z, u, p0),
+        Fz=lambda x, z, u: jacs.Fz(x, z, u, p0),
+        Fu=lambda x, z, u: jacs.Fu(x, z, u, p0),
         state_names=list(dae.state_names),
         input_names=list(dae.input_names),
         output_names=list(dae.output_names),
@@ -130,19 +141,28 @@ def _bind(dae, funcs, jacs, point) -> NonlinearBlockComp:
     )
 
 
-def nonlinear_sm_block(op: SmOperatingPoint) -> NonlinearBlockComp:
+def nonlinear_sm_block(op: SmOperatingPoint, modes=None) -> NonlinearBlockComp:
+    key = mode_key(modes)
     return _bind(
-        sm_dae(op.is_slack), sm_nonlinear_funcs(op.is_slack), sm_nonlinear_jacobians(op.is_slack),
-        sm_nonlinear_point(op),
+        sm_dae(op.is_slack, key), sm_nonlinear_funcs(op.is_slack, key),
+        sm_nonlinear_jacobians(op.is_slack, key), sm_nonlinear_point(op, modes),
     )
 
 
-def nonlinear_gfm_block(op: GfmOperatingPoint) -> NonlinearBlockComp:
-    return _bind(gfm_dae(), gfm_nonlinear_funcs(), gfm_nonlinear_jacobians(), gfm_nonlinear_point(op))
+def nonlinear_gfm_block(op: GfmOperatingPoint, modes=None) -> NonlinearBlockComp:
+    key = mode_key(modes)
+    return _bind(
+        gfm_dae(key), gfm_nonlinear_funcs(key), gfm_nonlinear_jacobians(key),
+        gfm_nonlinear_point(op, modes),
+    )
 
 
-def nonlinear_gfl_block(op: GflOperatingPoint) -> NonlinearBlockComp:
-    return _bind(gfl_dae(), gfl_nonlinear_funcs(), gfl_nonlinear_jacobians(), gfl_nonlinear_point(op))
+def nonlinear_gfl_block(op: GflOperatingPoint, modes=None) -> NonlinearBlockComp:
+    key = mode_key(modes)
+    return _bind(
+        gfl_dae(key), gfl_nonlinear_funcs(key), gfl_nonlinear_jacobians(key),
+        gfl_nonlinear_point(op, modes),
+    )
 
 
 def nonlinear_ib_block(**kwargs) -> NonlinearBlockComp:
@@ -161,16 +181,34 @@ def nonlinear_frame_block(**kwargs) -> NonlinearBlockComp:
     )
 
 
+def _passive(kwargs) -> tuple[str, bool]:
+    """The (mode, fixed_frequency) pair a passive block's builders take,
+    read out of the same kwargs its operating-point helper gets."""
+    return kwargs.get("mode", DYNAMIC), kwargs.get("fixed_frequency", False)
+
+
 def nonlinear_line_block(**kwargs) -> NonlinearBlockComp:
-    return _bind(line_dae(), line_nonlinear_funcs(), line_nonlinear_jacobians(), line_nonlinear_point(**kwargs))
+    m, f = _passive(kwargs)
+    return _bind(
+        line_dae(m, f), line_nonlinear_funcs(m, f), line_nonlinear_jacobians(m, f),
+        line_nonlinear_point(**kwargs),
+    )
 
 
 def nonlinear_node_block(**kwargs) -> NonlinearBlockComp:
-    return _bind(node_dae(), node_nonlinear_funcs(), node_nonlinear_jacobians(), node_nonlinear_point(**kwargs))
+    m, f = _passive(kwargs)
+    return _bind(
+        node_dae(m, f), node_nonlinear_funcs(m, f), node_nonlinear_jacobians(m, f),
+        node_nonlinear_point(**kwargs),
+    )
 
 
 def nonlinear_load_block(**kwargs) -> NonlinearBlockComp:
-    return _bind(load_dae(), load_nonlinear_funcs(), load_nonlinear_jacobians(), load_nonlinear_point(**kwargs))
+    m, f = _passive(kwargs)
+    return _bind(
+        load_dae(m, f), load_nonlinear_funcs(m, f), load_nonlinear_jacobians(m, f),
+        load_nonlinear_point(**kwargs),
+    )
 
 
 @dataclass
@@ -205,6 +243,10 @@ class NonlinearNetworkModel:
     # Optional initial state replacing the blocks' own operating-point one
     # (a post-event model starts from the pre-event state).
     x_init: Vec | None = None
+    # Lazily-built sparse assembly plan for the Newton Jacobian (see
+    # _sparsity()). Depends only on the topology, so it's built once per
+    # model and reused for every solve.
+    _sparsity_plan: object = field(default=None, repr=False)
 
     @property
     def state_names(self) -> list[str]:
@@ -306,6 +348,299 @@ class NonlinearNetworkModel:
         bottom = np.hstack([-G @ dh_dz, np.eye(n_u) - G @ dh_du])
         return np.vstack([top, bottom])
 
+    def _sparsity(self) -> dict:
+        """The fixed assembly plan for the sparse Newton Jacobian.
+
+        The Jacobian's *structure* never changes during a run: which block's
+        ``Gz``/``Gu``/``Hz``/``Hu`` lands in which rows and columns is fixed
+        by the topology, and only the numbers in those dense per-block
+        sub-matrices vary with ``(x, z, u)``. So the (row, col) index arrays
+        are built once here and every later Jacobian evaluation only has to
+        refill the data array -- no index arithmetic, no reallocation of the
+        (n_z + n_u)-square matrix that made the dense version so expensive.
+
+        ``G`` is converted to CSR once for the same reason: it is a selector
+        matrix (a handful of +/-1 per row), so the ``G @ dh_dz`` products the
+        Jacobian needs are cheap sparse ones.
+        """
+        if self._sparsity_plan is not None:
+            return self._sparsity_plan
+
+        def index_arrays(spans: list[tuple[int, int, int, int]]) -> tuple[Vec, Vec]:
+            """(row_off, n_rows, col_off, n_cols) blocks -> flat row/col
+            indices in the same C order ``ndarray.ravel()`` produces, so the
+            data array is just the sub-matrices concatenated."""
+            rows, cols = [], []
+            for r0, nr, c0, nc in spans:
+                rr, cc = np.meshgrid(np.arange(r0, r0 + nr), np.arange(c0, c0 + nc), indexing="ij")
+                rows.append(rr.ravel())
+                cols.append(cc.ravel())
+            empty = np.zeros(0, dtype=np.int64)
+            return (np.concatenate(rows) if rows else empty, np.concatenate(cols) if cols else empty)
+
+        gz_spans, gu_spans, hz_spans, hu_spans = [], [], [], []
+        gx_spans, hx_spans = [], []
+        for b, zo in zip(self.blocks, self.z_offsets):
+            n_zi = b.comp.n_z
+            n_ui = b.comp.n_us + b.comp.n_ug
+            n_oi = b.comp.n_out_s + b.comp.n_out_g
+            n_xi = b.comp.n_states
+            if n_zi:
+                gz_spans.append((zo, n_zi, zo, n_zi))
+                gu_spans.append((zo, n_zi, b.input_off, n_ui))
+                hz_spans.append((b.output_off, n_oi, zo, n_zi))
+                gx_spans.append((zo, n_zi, b.state_off, n_xi))
+            hu_spans.append((b.output_off, n_oi, b.input_off, n_ui))
+            hx_spans.append((b.output_off, n_oi, b.state_off, n_xi))
+
+        plan = {
+            "gz": index_arrays(gz_spans),
+            "gu": index_arrays(gu_spans),
+            "hz": index_arrays(hz_spans),
+            "hu": index_arrays(hu_spans),
+            "gx": index_arrays(gx_spans),
+            "hx": index_arrays(hx_spans),
+            "G": scipy.sparse.csr_matrix(self.topology.G),
+        }
+        self._sparsity_plan = plan
+        return plan
+
+    def _residual_jacobian_sparse(self, zu_flat: Vec, x_list: list[Vec], u_exo: Vec):
+        """The same matrix :meth:`_residual_jacobian` builds, assembled
+        sparsely.
+
+        It is worth the extra code: the dense version allocates and
+        factorizes an ``(n_z + n_u)``-square matrix that is over 99.9% zeros
+        on any network past a handful of buses (measured: 0.055% density,
+        1.5 non-zeros per row, on the 118-bus case), and the cubic cost of
+        factorizing it dominated everything else in a run.
+        """
+        plan = self._sparsity()
+        z_list, u_list = self._unpack_z(zu_flat[: self.n_z]), self._unpack_u(zu_flat[self.n_z :])
+        n_z, n_u, n_y = self.n_z, self.topology.n_u, self.topology.n_y
+
+        gz_data, gu_data, hz_data, hu_data = [], [], [], []
+        for b, x_i, z_i, u_i in zip(self.blocks, x_list, z_list, u_list):
+            if b.comp.n_z:
+                gz_data.append(np.asarray(b.comp.Gz(x_i, z_i, u_i)).ravel())
+                gu_data.append(np.asarray(b.comp.Gu(x_i, z_i, u_i)).ravel())
+                hz_data.append(np.asarray(b.comp.Hz(x_i, z_i, u_i)).ravel())
+            hu_data.append(np.asarray(b.comp.Hu(x_i, z_i, u_i)).ravel())
+
+        def coo(key, data, shape):
+            rows, cols = plan[key]
+            flat = np.concatenate(data) if data else np.zeros(0)
+            return scipy.sparse.coo_matrix((flat, (rows, cols)), shape=shape).tocsr()
+
+        dg_dz = coo("gz", gz_data, (n_z, n_z))
+        dg_du = coo("gu", gu_data, (n_z, n_u))
+        dh_dz = coo("hz", hz_data, (n_y, n_z))
+        dh_du = coo("hu", hu_data, (n_y, n_u))
+
+        G = plan["G"]
+        return scipy.sparse.bmat(
+            [[dg_dz, dg_du], [-(G @ dh_dz), scipy.sparse.identity(n_u, format="csr") - G @ dh_du]],
+            format="csc",
+        )
+
+    def output_rates(self, x_all: Vec, z_all: Vec, u_all: Vec) -> Vec:
+        """``dy/dt`` for every block output, at an already-solved ``(x, z, u)``.
+
+        Differentiating the same two relations :meth:`solve_algebraic`
+        solves, along the trajectory, gives a linear system in
+        ``(zdot, udot)`` with *the Newton Jacobian itself* as its matrix:
+
+            Gz zdot + Gu udot         = -Gx xdot
+            udot - G (Hz zdot + Hu udot) =  G Hx xdot
+
+        so one extra sparse solve with a single right-hand side yields
+        exact output derivatives, rather than differencing the trajectory.
+
+        This is what a quasi-stationary bus's frequency is computed from:
+        once a node stops integrating ``C dv/dt``, its voltage has no
+        derivative of its own, but it still has an exact one through the
+        states that drive it (see ``timedomain/measurements.py``).
+
+        Exogenous inputs are taken as momentarily constant (``u_exo_dot =
+        0``), which is true except exactly at a step, where a derivative
+        isn't defined anyway.
+        """
+        x_list = self._unpack_x(x_all)
+        z_list, u_list = self._unpack_z(z_all), self._unpack_u(u_all)
+        plan = self._sparsity()
+        n_x, n_z = len(x_all), self.n_z
+        n_u, n_y = self.topology.n_u, self.topology.n_y
+
+        gx_data, hx_data = [], []
+        xdot_parts = []
+        for b, x_i, z_i, u_i in zip(self.blocks, x_list, z_list, u_list):
+            if b.comp.n_z:
+                gx_data.append(np.asarray(b.comp.Gx(x_i, z_i, u_i)).ravel())
+            hx_data.append(np.asarray(b.comp.Hx(x_i, z_i, u_i)).ravel())
+            if b.comp.n_states:
+                xdot_parts.append(b.comp.f(x_i, z_i, u_i))
+        xdot = np.concatenate(xdot_parts) if xdot_parts else np.zeros(0)
+
+        def coo(key, data, shape):
+            rows, cols = plan[key]
+            flat = np.concatenate(data) if data else np.zeros(0)
+            return scipy.sparse.coo_matrix((flat, (rows, cols)), shape=shape).tocsr()
+
+        dg_dx = coo("gx", gx_data, (n_z, n_x))
+        dh_dx = coo("hx", hx_data, (n_y, n_x))
+        G = plan["G"]
+
+        rhs = np.concatenate([-(dg_dx @ xdot), G @ (dh_dx @ xdot)])
+        J = self._residual_jacobian_sparse(np.concatenate([z_all, u_all]), x_list, None)
+        try:
+            sol = scipy.sparse.linalg.splu(J).solve(rhs)
+        except (RuntimeError, ValueError):
+            return np.full(n_y, np.nan)
+        zdot, udot = sol[:n_z], sol[n_z:]
+
+        # dy/dt = Hx xdot + Hz zdot + Hu udot, per block.
+        ydot = dh_dx @ xdot
+        for b, x_i, z_i, u_i, zo in zip(self.blocks, x_list, z_list, u_list, self.z_offsets):
+            n_oi = b.comp.n_out_s + b.comp.n_out_g
+            n_ui = b.comp.n_us + b.comp.n_ug
+            rows = slice(b.output_off, b.output_off + n_oi)
+            ydot[rows] += b.comp.Hu(x_i, z_i, u_i) @ udot[b.input_off : b.input_off + n_ui]
+            if b.comp.n_z:
+                ydot[rows] += b.comp.Hz(x_i, z_i, u_i) @ zdot[zo : zo + b.comp.n_z]
+        return ydot
+
+    # What the coupled Newton aims for, and what it will settle for. The two
+    # differ because the residual's components are in mixed units and some
+    # carry factors like wb/L ~ 1e5, so the floor double precision can reach
+    # is network-dependent: CIGRE's reduced model bottoms out around 1e-10,
+    # WSCC's at 1e-15. Aim at the tighter one, accept the looser -- still
+    # several orders below anything physically meaningful, and far below the
+    # integrator's own rtol.
+    NEWTON_TOL = 1e-10
+    NEWTON_ACCEPT_TOL = 1e-8
+
+    def ode_jacobian(self, x_all: Vec, u_exo: Vec, z_guess: Vec | None = None,
+                     u_guess: Vec | None = None) -> Vec:
+        """``d(xdot)/dx`` — the Jacobian an implicit ODE solver needs.
+
+        **Why this exists.** Radau and BDF are implicit, so they need this
+        matrix; given no ``jac``, SciPy finite-differences it, which costs
+        *one full coupled Newton solve per state*. That is invisible in
+        ``sol.nfev`` (SciPy doesn't count it) and dominated everything else:
+        measured on WSCC-9, 68% of all RHS evaluations in a run were spent
+        differencing this matrix, and on a 118-bus model it is over 800
+        Newton solves for every single Jacobian.
+
+        Assembled instead, exactly. Differentiating the constraints
+        ``g(x, z, u) = 0`` and ``u = F u_exo + G h(x, z, u)`` with respect to
+        ``x`` gives a linear system in ``(dz/dx, du/dx)`` whose matrix is the
+        *same* Newton Jacobian the algebraic solve already factorises:
+
+            J @ [dz/dx; du/dx] = [-Gx; G Hx]
+
+        so this is one sparse factorisation plus ``n_x`` back-substitutions --
+        microseconds each -- and then
+
+            dxdot/dx = Fx + Fz (dz/dx) + Fu (du/dx).
+        """
+        z_all, u_all = self.solve_algebraic(x_all, u_exo, z_guess, u_guess)
+        x_list = self._unpack_x(x_all)
+        z_list, u_list = self._unpack_z(z_all), self._unpack_u(u_all)
+        plan = self._sparsity()
+        n_x, n_z = len(x_all), self.n_z
+        n_u, n_y = self.topology.n_u, self.topology.n_y
+
+        gx_data, hx_data = [], []
+        for b, x_i, z_i, u_i in zip(self.blocks, x_list, z_list, u_list):
+            if b.comp.n_z:
+                gx_data.append(np.asarray(b.comp.Gx(x_i, z_i, u_i)).ravel())
+            hx_data.append(np.asarray(b.comp.Hx(x_i, z_i, u_i)).ravel())
+
+        def coo(key, data, shape):
+            rows, cols = plan[key]
+            flat = np.concatenate(data) if data else np.zeros(0)
+            return scipy.sparse.coo_matrix((flat, (rows, cols)), shape=shape).tocsr()
+
+        dg_dx = coo("gx", gx_data, (n_z, n_x))
+        dh_dx = coo("hx", hx_data, (n_y, n_x))
+        G = plan["G"]
+
+        rhs = np.vstack([-(dg_dx.toarray()), (G @ dh_dx).toarray()])
+        J = self._residual_jacobian_sparse(np.concatenate([z_all, u_all]), x_list, None)
+        try:
+            sol = scipy.sparse.linalg.splu(J).solve(rhs)
+        except (RuntimeError, ValueError):
+            return np.zeros((n_x, n_x))
+        dz_dx, du_dx = sol[:n_z], sol[n_z:]
+
+        jac = np.zeros((n_x, n_x))
+        for b, x_i, z_i, u_i, zo in zip(self.blocks, x_list, z_list, u_list, self.z_offsets):
+            if not b.comp.n_states:
+                continue
+            rows = slice(b.state_off, b.state_off + b.comp.n_states)
+            n_ui = b.comp.n_us + b.comp.n_ug
+            jac[rows, b.state_off : b.state_off + b.comp.n_states] += b.comp.Fx(x_i, z_i, u_i)
+            jac[rows, :] += b.comp.Fu(x_i, z_i, u_i) @ du_dx[b.input_off : b.input_off + n_ui, :]
+            if b.comp.n_z:
+                jac[rows, :] += b.comp.Fz(x_i, z_i, u_i) @ dz_dx[zo : zo + b.comp.n_z, :]
+        return jac
+
+    def _newton_sparse(
+        self, zu0: Vec, x_list: list[Vec], u_exo: Vec, tol: float | None = None, max_iter: int = 40
+    ) -> Vec | None:
+        """Damped Newton on the coupled system, with a sparse LU per step.
+
+        Returns ``None`` rather than raising when it doesn't converge --
+        :meth:`solve_algebraic` then falls back to the SciPy solvers, which
+        is what keeps this a pure speedup: the sparse path never has to be
+        the one that decides a solve is impossible.
+
+        The backtracking line search is what replaces ``hybr``'s trust
+        region. Without it a full Newton step overshoots on the same
+        badly-guessed starting points ``hybr`` struggled with (see
+        :meth:`solve_algebraic`).
+
+        **Running out of line search is not automatically failure.** Once the
+        residual is at the floor double precision can reach for this system,
+        no step reduces it any further, and a search for strict decrease
+        exhausts itself on a solution that is already correct. Giving up
+        there sent perfectly good solves to the dense fallback -- measured on
+        CIGRE's reduced model, 60% of them, at ten times the cost. So an
+        exhausted search (or an exhausted iteration count) returns the
+        iterate whenever it is inside :attr:`NEWTON_ACCEPT_TOL`, and only
+        gives up when it genuinely isn't.
+        """
+        tol = self.NEWTON_TOL if tol is None else tol
+        zu = np.asarray(zu0, dtype=np.float64).copy()
+        r = self._residual(zu, x_list, u_exo)
+        norm = float(np.max(np.abs(r))) if r.size else 0.0
+        for _ in range(max_iter):
+            if not np.isfinite(norm):
+                return None
+            if norm < tol:
+                return zu
+            J = self._residual_jacobian_sparse(zu, x_list, u_exo)
+            try:
+                step = scipy.sparse.linalg.splu(J).solve(-r)
+            except (RuntimeError, ValueError):  # singular Jacobian at this iterate
+                return zu if norm < self.NEWTON_ACCEPT_TOL else None
+            if not np.all(np.isfinite(step)):
+                return zu if norm < self.NEWTON_ACCEPT_TOL else None
+            # Backtracking: accept the first step length that reduces the
+            # residual, halving at most 20 times.
+            alpha = 1.0
+            for _ in range(20):
+                trial = zu + alpha * step
+                r_trial = self._residual(trial, x_list, u_exo)
+                norm_trial = float(np.max(np.abs(r_trial))) if r_trial.size else 0.0
+                if np.isfinite(norm_trial) and norm_trial < norm:
+                    zu, r, norm = trial, r_trial, norm_trial
+                    break
+                alpha *= 0.5
+            else:
+                return zu if norm < self.NEWTON_ACCEPT_TOL else None
+        return zu if norm < self.NEWTON_ACCEPT_TOL else None
+
     def solve_algebraic(
         self, x_all: Vec, u_exo: Vec, z_guess: Vec | None = None, u_guess: Vec | None = None
     ) -> tuple[Vec, Vec]:
@@ -340,6 +675,14 @@ class NonlinearNetworkModel:
             z_guess, u_guess = self.initial_algebraic_guess()
         x_list = self._unpack_x(x_all)
         zu0 = np.concatenate([z_guess, u_guess])
+
+        # The sparse damped Newton handles essentially every solve; the two
+        # SciPy solvers below stay as the fallback for the ones it doesn't
+        # (see _newton_sparse, which returns None instead of raising).
+        zu = self._newton_sparse(zu0, x_list, u_exo)
+        if zu is not None:
+            return zu[: self.n_z], zu[self.n_z :]
+
         sol = scipy.optimize.root(
             self._residual, zu0, args=(x_list, u_exo), jac=self._residual_jacobian, method="hybr",
         )
@@ -457,14 +800,22 @@ def build_nonlinear_network(network: Network, result: PowerFlowResult) -> Nonlin
 
     op: NetworkOperatingPoint = compute_operating_point(network, result)
     wb_val = 2 * np.pi * network.f_hz
+    # Which dynamics each element keeps -- see network/schema.ModelOptions.
+    # The default keeps everything, i.e. the full EMT model this builder
+    # produced before model-order reduction existed.
+    net_modes = network.models.group_modes_for("network")
+    fixed_f = network.models.fixed_network_frequency
+    unit_modes = {
+        d.id: network.unit_modes(d) for d in network.der_units if d.unit_type.value != "infinite_bus"
+    }
 
     der_components: dict[int, NonlinearBlockComp] = {}
     for der_id, sm_op in op.sm_ops.items():
-        der_components[der_id] = nonlinear_sm_block(sm_op)
+        der_components[der_id] = nonlinear_sm_block(sm_op, unit_modes[der_id])
     for der_id, gfm_op in op.gfm_ops.items():
-        der_components[der_id] = nonlinear_gfm_block(gfm_op)
+        der_components[der_id] = nonlinear_gfm_block(gfm_op, unit_modes[der_id])
     for der_id, gfl_op in op.gfl_ops.items():
-        der_components[der_id] = nonlinear_gfl_block(gfl_op)
+        der_components[der_id] = nonlinear_gfl_block(gfl_op, unit_modes[der_id])
     for der_id, ib_kwargs in op.ib_ops.items():
         der_components[der_id] = nonlinear_ib_block(**ib_kwargs)
     missing = {d.id for d in network.der_units} - der_components.keys()
@@ -475,7 +826,10 @@ def build_nonlinear_network(network: Network, result: PowerFlowResult) -> Nonlin
     # builds the linear model from the same numbers.
     node_b = node_capacitances(network)
     node_components = {
-        bus_id: nonlinear_node_block(wb_val=wb_val, b_pu=node_b[bus_id], wg0=1.0, vgd_g0=vgd, vgq_g0=vgq)
+        bus_id: nonlinear_node_block(
+            wb_val=wb_val, b_pu=node_b[bus_id], wg0=1.0, vgd_g0=vgd, vgq_g0=vgq,
+            mode=net_modes["nodes"], fixed_frequency=fixed_f,
+        )
         for bus_id, (vgd, vgq) in op.node_vg.items()
     }
     line_components = [
@@ -483,6 +837,7 @@ def build_nonlinear_network(network: Network, result: PowerFlowResult) -> Nonlin
             wb_val=wb_val, r_pu=ln.r_pu, x_pu=ln.x_pu, wg0=1.0, ild_g0=i0[0], ilq_g0=i0[1],
             vgdj_g0=op.node_vg[ln.from_bus][0], vgqj_g0=op.node_vg[ln.from_bus][1],
             vgdk_g0=op.node_vg[ln.to_bus][0], vgqk_g0=op.node_vg[ln.to_bus][1],
+            mode=net_modes["lines"], fixed_frequency=fixed_f,
         )
         for ln, i0 in zip(network.lines, op.line_i0)
     ]
@@ -491,7 +846,10 @@ def build_nonlinear_network(network: Network, result: PowerFlowResult) -> Nonlin
         r_pu, x_pu = op.load_rx[idx]
         vgd, vgq = op.node_vg[load.bus]
         load_components.append(
-            nonlinear_load_block(wb_val=wb_val, r_pu=r_pu, x_pu=x_pu, wg0=1.0, vgd_g0=vgd, vgq_g0=vgq)
+            nonlinear_load_block(
+                wb_val=wb_val, r_pu=r_pu, x_pu=x_pu, wg0=1.0, vgd_g0=vgd, vgq_g0=vgq,
+                mode=net_modes["loads"], fixed_frequency=fixed_f,
+            )
         )
 
     # One reference frame per island (components/frame.py), each following
@@ -510,6 +868,7 @@ def build_nonlinear_network(network: Network, result: PowerFlowResult) -> Nonlin
             ild_g0=op.shunt_i0[idx][0], ilq_g0=op.shunt_i0[idx][1],
             vgdj_g0=op.node_vg[network.shunts[idx].bus][0], vgqj_g0=op.node_vg[network.shunts[idx].bus][1],
             vgdk_g0=0.0, vgqk_g0=0.0,
+            mode=net_modes["shunts"], fixed_frequency=fixed_f,
         )
         for idx, rx in op.shunt_rx.items()
     }
@@ -527,6 +886,7 @@ def build_nonlinear_network(network: Network, result: PowerFlowResult) -> Nonlin
             ild_g0=op.transformer_i0[idx][0], ilq_g0=op.transformer_i0[idx][1],
             vgdj_g0=cos_p * vhd + sin_p * vhq, vgqj_g0=-sin_p * vhd + cos_p * vhq,
             vgdk_g0=op.node_vg[tr.lv_bus][0], vgqk_g0=op.node_vg[tr.lv_bus][1],
+            mode=net_modes["transformers"], fixed_frequency=fixed_f,
         )
     blocks, wiring = build_blocks_and_wiring(
         network,
@@ -548,6 +908,31 @@ def build_nonlinear_network(network: Network, result: PowerFlowResult) -> Nonlin
     return NonlinearNetworkModel(
         blocks=blocks, topology=topology, z_offsets=z_offsets, n_z=off, network=network, theta_g0=op.theta_g_rad, op=op,
     )
+
+
+# The SciPy integrators this tool exposes, and whether each one is implicit
+# (i.e. needs d(xdot)/dx, which NonlinearNetworkModel.ode_jacobian supplies
+# analytically -- see there for what it costs when it has to be guessed).
+SOLVERS: dict[str, dict] = {
+    "Radau":  {"implicit": True,  "label": "Radau (implicit, 5th order)",
+               "note": "The safe default. L-stable, so it copes with the full EMT model's "
+                       "1e7 rad/s modes without needing tiny steps."},
+    "BDF":    {"implicit": True,  "label": "BDF (implicit, variable order)",
+               "note": "Usually fewer function evaluations per step than Radau on a smooth "
+                       "trajectory; often the quickest choice for a stiff model. Less robust "
+                       "across a sharp event."},
+    "LSODA":  {"implicit": True,  "label": "LSODA (switches automatically)",
+               "note": "Detects stiffness and switches between an explicit and an implicit "
+                       "method. A reasonable choice when you don't know which you have."},
+    "RK45":   {"implicit": False, "label": "RK45 (explicit, 5th order)",
+               "note": "No Jacobian at all, so very cheap per step -- but it must resolve every "
+                       "fast mode, so it is only viable once the model order has removed them. "
+                       "On a full EMT model it will crawl."},
+    "DOP853": {"implicit": False, "label": "DOP853 (explicit, 8th order)",
+               "note": "Like RK45 but higher order: fewer, larger steps at tight tolerances. "
+                       "Same caveat -- non-stiff models only."},
+}
+DEFAULT_SOLVER = "Radau"
 
 
 @dataclass
@@ -579,10 +964,11 @@ def simulate(
     x0: Vec | None = None,
     u_exo_fn: Callable[[float], Vec] | None = None,
     t_eval: Vec | None = None,
-    method: str = "Radau",
+    method: str = DEFAULT_SOLVER,
     rtol: float = 1e-6,
     atol: float = 1e-8,
     first_step: float | None = None,
+    max_step: float = np.inf,
 ) -> EmtSimulationResult:
     """Integrates the nonlinear DAE from ``x0`` (defaults to the model's own
     operating point — pass an explicit ``x0`` to start from a perturbed
@@ -590,9 +976,16 @@ def simulate(
     returning a modified exogenous-input vector at each t; defaults to
     holding it fixed at the operating point.
 
-    The system's stiffest modes reach ~1e6-1e7 rad/s (see the "SM operating
-    point" README note on the Rg penalty parameter), so this defaults to
-    ``Radau`` (implicit, L-stable) rather than an explicit method.
+    At full order the stiffest modes reach ~1e6-1e7 rad/s (see the "SM
+    operating point" README note on the Rg penalty parameter), so this
+    defaults to ``Radau`` (implicit, L-stable). Once model-order reduction
+    has removed those modes (:mod:`g2elin_core.reduction`) an explicit
+    method can be far quicker -- see :data:`SOLVERS`.
+
+    An implicit method is given the analytic
+    :meth:`~NonlinearNetworkModel.ode_jacobian`. Without it SciPy
+    finite-differences the Jacobian at one full coupled Newton solve per
+    state, which measured as 68% of all the work in a run.
     """
     if x0 is None:
         x0 = model.initial_state()
@@ -600,19 +993,109 @@ def simulate(
     u_exo_default = model.default_u_exo()
     cache = {"z": z_guess, "u": u_guess}
 
+    def u_at(t: float) -> Vec:
+        return u_exo_fn(t) if u_exo_fn is not None else u_exo_default
+
     def rhs_fn(t: float, x: Vec) -> Vec:
-        u_exo = u_exo_fn(t) if u_exo_fn is not None else u_exo_default
-        xdot, z_sol, u_sol = model.rhs(x, u_exo, cache["z"], cache["u"])
+        xdot, z_sol, u_sol = model.rhs(x, u_at(t), cache["z"], cache["u"])
         cache["z"], cache["u"] = z_sol, u_sol
         return xdot
 
+    def jac_fn(t: float, x: Vec) -> Vec:
+        return model.ode_jacobian(x, u_at(t), cache["z"], cache["u"])
+
+    extra = {"jac": jac_fn} if SOLVERS.get(method, {}).get("implicit") else {}
     sol = scipy.integrate.solve_ivp(
         rhs_fn, t_span, x0, method=method, t_eval=t_eval, rtol=rtol, atol=atol,
-        dense_output=False, first_step=first_step,
+        dense_output=False, first_step=first_step, max_step=max_step, **extra,
     )
     if not sol.success:
         raise RuntimeError(f"EMT integration failed: {sol.message}")
     return EmtSimulationResult(t=sol.t, x=sol.y, state_names=model.state_names, scipy_result=sol)
+
+
+def simulate_fixed_step(
+    model: NonlinearNetworkModel,
+    t_span: tuple[float, float],
+    step: float,
+    *,
+    x0: Vec | None = None,
+    u_exo_fn: Callable[[float], Vec] | None = None,
+    newton_tol: float = 1e-9,
+    max_newton: int = 20,
+) -> EmtSimulationResult:
+    """Integrate on a fixed time step with the trapezoidal rule.
+
+    This is how an EMT program integrates: a step you choose, held for the
+    whole run, rather than one the solver picks. What you give up is error
+    control -- nothing adapts if the trajectory turns sharply. What you get
+    back is a run whose cost you know before starting it (steps x the cost of
+    one step, no rejected steps, no surprises), output exactly at the points
+    you asked for, and a result that doesn't move when a tolerance is nudged.
+
+    Trapezoidal is A-stable, so a step far larger than the fastest time
+    constant cannot make it blow up -- but it can make it *ring*: the
+    classic numerical oscillation that EMT programs damp deliberately. If a
+    trace oscillates at exactly two samples per cycle, that is this, and the
+    answer is a smaller step, not a smaller tolerance.
+
+    Each step solves ``x_{n+1} = x_n + h/2 (f_n + f_{n+1})`` by Newton, using
+    the same analytic :meth:`~NonlinearNetworkModel.ode_jacobian` the
+    variable-step solvers get.
+    """
+    if step <= 0:
+        raise ValueError("the time step must be positive")
+    if x0 is None:
+        x0 = model.initial_state()
+    t0, t_end = t_span
+    n_steps = max(1, int(round((t_end - t0) / step)))
+    times = t0 + step * np.arange(n_steps + 1)
+
+    u_exo_default = model.default_u_exo()
+
+    def u_at(t: float) -> Vec:
+        return u_exo_fn(t) if u_exo_fn is not None else u_exo_default
+
+    cache = {"z": None, "u": None}
+
+    def f_at(t: float, x: Vec) -> Vec:
+        xdot, z, u = model.rhs(x, u_at(t), cache["z"], cache["u"])
+        cache["z"], cache["u"] = z, u
+        return xdot
+
+    n_x = len(x0)
+    xs = np.zeros((n_x, n_steps + 1))
+    xs[:, 0] = x0
+    x = x0.copy()
+    f_now = f_at(times[0], x)
+    identity = np.eye(n_x)
+
+    for k in range(n_steps):
+        t_next = times[k + 1]
+        anchor = x + 0.5 * step * f_now       # the part of the step that is already known
+        guess = x + step * f_now              # explicit Euler, as the Newton start
+        for _ in range(max_newton):
+            f_next = f_at(t_next, guess)
+            residual = guess - anchor - 0.5 * step * f_next
+            if np.max(np.abs(residual)) < newton_tol:
+                break
+            jac = identity - 0.5 * step * model.ode_jacobian(guess, u_at(t_next), cache["z"], cache["u"])
+            try:
+                guess = guess - np.linalg.solve(jac, residual)
+            except np.linalg.LinAlgError as e:
+                raise RuntimeError(
+                    f"fixed-step integration failed at t = {t_next:g} s: the step equation is singular "
+                    f"({e}). Try a smaller step."
+                ) from e
+            if not np.all(np.isfinite(guess)):
+                raise RuntimeError(
+                    f"fixed-step integration diverged at t = {t_next:g} s. Try a smaller step."
+                )
+        x = guess
+        f_now = f_at(t_next, x)
+        xs[:, k + 1] = x
+
+    return EmtSimulationResult(t=times, x=xs, state_names=model.state_names, scipy_result=None)
 
 
 @dataclass
@@ -641,7 +1124,7 @@ def simulate_steps(
     *,
     x0: Vec | None = None,
     u_exo_fn: Callable[[float], Vec] | None = None,
-    method: str = "Radau",
+    method: str = DEFAULT_SOLVER,
     rtol: float = 1e-6,
     atol: float = 1e-8,
     first_step: float | None = None,
@@ -684,15 +1167,23 @@ def simulate_steps(
     u_exo_default = model.default_u_exo()
     cache = {"z": z_guess, "u": u_guess}
 
+    def u_at(t: float) -> Vec:
+        return u_exo_fn(t) if u_exo_fn is not None else u_exo_default
+
     def rhs_fn(t: float, x: Vec) -> Vec:
-        u_exo = u_exo_fn(t) if u_exo_fn is not None else u_exo_default
-        xdot, z_sol, u_sol = model.rhs(x, u_exo, cache["z"], cache["u"])
+        xdot, z_sol, u_sol = model.rhs(x, u_at(t), cache["z"], cache["u"])
         cache["z"], cache["u"] = z_sol, u_sol
         return xdot
 
+    def jac_fn(t: float, x: Vec) -> Vec:
+        return model.ode_jacobian(x, u_at(t), cache["z"], cache["u"])
+
+    # Same analytic Jacobian as simulate() -- see there, and ode_jacobian.
+    extra = {"jac": jac_fn} if SOLVERS.get(method, {}).get("implicit") else {}
     stepper_cls = getattr(scipy.integrate, method)
     stepper = stepper_cls(
-        rhs_fn, t_span[0], x0, t_span[1], max_step=max_step, rtol=rtol, atol=atol, first_step=first_step,
+        rhs_fn, t_span[0], x0, t_span[1], max_step=max_step, rtol=rtol, atol=atol,
+        first_step=first_step, **extra,
     )
 
     # The stepper's own constructor already called rhs_fn(t_span[0], x0)

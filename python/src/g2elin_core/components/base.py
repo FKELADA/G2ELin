@@ -135,6 +135,10 @@ class ComponentDAE:
     diffeq_exprs: list[sp.Expr] = field(default_factory=list)
     algeq_exprs: list[sp.Expr] = field(default_factory=list)
     output_exprs: list[sp.Expr] = field(default_factory=list)
+    # Lazily-filled store for the lambdified Jacobians (see cached_jacobians).
+    # A dict rather than a plain field because this dataclass is frozen:
+    # mutating one is allowed, rebinding it is not.
+    _cache: dict = field(default_factory=dict, compare=False, repr=False)
 
     def param_syms(self) -> list[sp.Symbol]:
         """Every free symbol in the equations that isn't a state/alg/input —
@@ -215,17 +219,36 @@ class ComponentDAE:
             Fu=_lambdify_matrix(self.Fu, (n_x, n_u)),
         )
 
+    def cached_jacobians(self) -> NonlinearJacobians:
+        """:meth:`nonlinear_jacobians`, built once per DAE.
+
+        The component modules already cache each *DAE*, so caching the
+        lambdified Jacobians on it means the (slow) lambdify happens once per
+        model variant for the life of the process.
+        """
+        if "jacobians" not in self._cache:
+            self._cache["jacobians"] = self.nonlinear_jacobians()
+        return self._cache["jacobians"]
+
     def linearize(self, subs: dict) -> LinearComponent:
-        """Substitute numeric parameter + operating-point values and eliminate z."""
-        Fx = _to_numpy(self.Fx, subs)
-        Fz = _to_numpy(self.Fz, subs)
-        Fu = _to_numpy(self.Fu, subs)
-        Gx = _to_numpy(self.Gx, subs)
-        Gz = _to_numpy(self.Gz, subs)
-        Gu = _to_numpy(self.Gu, subs)
-        Hx = _to_numpy(self.Hx, subs)
-        Hz = _to_numpy(self.Hz, subs)
-        Hu = _to_numpy(self.Hu, subs)
+        """Substitute numeric parameter + operating-point values and eliminate z.
+
+        Evaluated through the lambdified Jacobians rather than by symbolic
+        substitution. The two agree to ~1e-22 -- they are the same
+        expressions -- but ``Matrix.subs`` on expressions this size is
+        expensive enough to dominate everything built on it: measured on one
+        synchronous machine, 952 ms against 0.74 ms, and a network's
+        linearisation calls this once per component.
+        """
+        try:
+            x0, z0, u0, p0 = self.point_from_subs(subs)
+        except KeyError as e:
+            raise ValueError(f"no value given for symbol {e.args[0]}") from e
+
+        j = self.cached_jacobians()
+        Fx, Fz, Fu = j.Fx(x0, z0, u0, p0), j.Fz(x0, z0, u0, p0), j.Fu(x0, z0, u0, p0)
+        Gx, Gz, Gu = j.Gx(x0, z0, u0, p0), j.Gz(x0, z0, u0, p0), j.Gu(x0, z0, u0, p0)
+        Hx, Hz, Hu = j.Hx(x0, z0, u0, p0), j.Hz(x0, z0, u0, p0), j.Hu(x0, z0, u0, p0)
 
         if Gz.shape[0] or Gz.shape[1]:
             try:

@@ -23,7 +23,7 @@ from g2elin_core import reduction
 from g2elin_core.interconnect import AssembledSystem
 from g2elin_core.modal import (
     ModalAnalysisResult, analyze, check_adequacy, classify_modes, eigenvalue_sensitivity,
-    free_response, mode_shape, reference_angle_modes, step_response,
+    free_response, mode_shape, parameter_sensitivity, reference_angle_modes, step_response,
 )
 from g2elin_core.network.breakers import TYPE_LABEL, NoReferenceUnit, energized_network, service_state
 from g2elin_core.network.schema import Network
@@ -62,6 +62,10 @@ from .schemas import (
     ModeRow,
     ModeShapeRequest,
     ModeShapeResponse,
+    EntryParametersRow,
+    ParameterEffectRow,
+    ParameterSensitivityRequest,
+    ParameterSensitivityResponse,
     NetworkIssueRow,
     PowerFlowOptions,
     PowerFlowResponse,
@@ -414,6 +418,38 @@ def modal_sensitivity_response(network: Network, req: SensitivityRequest) -> Sen
         state_names=modal.state_names,
         matrix=sens.matrix.tolist(),
         top=[SensitivityEntryRow(row_state=e.row_state, col_state=e.col_state, value=e.value) for e in sens.top],
+    )
+
+
+def modal_parameter_sensitivity_response(
+    network: Network, req: ParameterSensitivityRequest
+) -> ParameterSensitivityResponse:
+    """Which physical parameter moves the chosen mode, and which parameters
+    the entries of A it is most sensitive to are built from.
+
+    Costs two linearisations per parameter scanned -- milliseconds each, but
+    a full scan of a large network is still a few seconds, so the request can
+    narrow it to particular units or parameters.
+    """
+    net = energized_or_422(network)
+    result = run_power_flow(net)
+    if not result.converged:
+        raise HTTPException(status_code=422, detail="power flow did not converge")
+    _, modal = build_modal_from_network(network)
+    mode_or_422(modal, req.mode)
+    try:
+        report = parameter_sensitivity(
+            net, result, modal, req.mode,
+            units=req.units or None, parameters=req.parameters or None,
+            n_entries=req.n_entries,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    data = report.as_dict()
+    return ParameterSensitivityResponse(
+        **{k: v for k, v in data.items() if k not in ("effects", "entries")},
+        effects=[ParameterEffectRow(**e) for e in data["effects"]],
+        entries=[EntryParametersRow(**e) for e in data["entries"]],
     )
 
 

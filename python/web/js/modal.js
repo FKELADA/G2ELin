@@ -6,7 +6,7 @@ const MODAL_VIEWS = {
   eigenmap: { title: "Eigenvalue map", desc: "Every eigenvalue of the closed-loop state matrix on a symlog map, with the 5 % and 70.7 % damping-ratio guides. Click a mode (on the map or in the table) to select it for the other views." },
   participation: { title: "Participation heatmap", desc: "Participation factors of states (rows) in modes (columns) — which physical states drive which oscillation. Each column sums to 1." },
   single: { title: "Single-mode participation", desc: "How much every state participates in one chosen mode." },
-  sensitivity: { title: "Sensitivity heatmap", desc: "Sensitivity of one eigenvalue to each entry of the state matrix (masked to structurally non-zero entries) — which couplings move the mode most." },
+  sensitivity: { title: "Sensitivity heatmap", desc: "Sensitivity of one eigenvalue to each entry of the state matrix (masked to structurally non-zero entries) — which couplings move the mode most, and which physical parameters those entries are built from." },
   shape: { title: "Mode shape", desc: "Relative phase of the most-participating states in one mode: who swings against whom." },
   free: { title: "Free-motion response", desc: "Closed-form (modal-expansion) response of the linearised model to an initial-condition offset in one state. Each channel is one perturbation; split the signals over as many subplots as you like." },
   root: { title: "Root locus", desc: "Sweep any one network parameter across a range: at every value the power flow and the eigenvalues are recomputed, and each mode's path is drawn coloured by the parameter value. The table ranks the modes the parameter moves most." },
@@ -251,8 +251,11 @@ const ModalPage = {
         // Only rows/columns that hold any sensitivity at all -- the full n x n
         // matrix is mostly structural zeros.
         const keep = r.state_names.map((_, i) => i).filter(i => r.matrix[i].some(v => v > 0) || r.matrix.some(row => row[i] > 0));
-        const top = r.top.map(e => `<tr><td class="name">${esc(e.row_state)}</td><td class="name">${esc(e.col_state)}</td><td>${fmtSmart(e.value)}</td></tr>`).join("");
-        out.innerHTML = `<div class="card"><div class="card-title">Largest sensitivities, mode ${mode}</div><div class="tablewrap"><table><thead><tr><th>Row state (∂f of)</th><th>Column state (w.r.t.)</th><th>|∂λ/∂A|</th></tr></thead><tbody>${top}</tbody></table></div></div>
+        const top = r.top.map(e => `<tr><td class="name">${esc(e.row_state)}</td><td class="name">${esc(e.col_state)}</td><td>${fmtSmart(e.value)}</td><td class="name param-cell" data-entry="${esc(e.row_state)}|${esc(e.col_state)}"></td></tr>`).join("");
+        out.innerHTML = `<div class="card"><div class="card-title">Largest sensitivities, mode ${mode} <span class="card-sub">— which entries of A this mode depends on, and what each is made of</span></div><div class="tablewrap"><table><thead><tr><th>Row state (∂f of)</th><th>Column state (w.r.t.)</th><th>|∂λ/∂A|</th><th>Built from</th></tr></thead><tbody>${top}</tbody></table></div></div>
+          <div class="card" id="param-sens"><div class="card-title">Parameters behind this mode <span class="card-sub">— what a 1 % increase does to it</span><span class="spacer"></span><button class="secondary small" id="param-run">Find them</button></div>
+            <p class="muted" style="font-size:0.8rem;margin:0.5rem 0 0">An entry of A is not something you can change; the parameters inside it are. ∂λ/∂p = Σ (∂λ/∂A<sub>ij</sub>)(∂A<sub>ij</sub>/∂p), scanned over every unit parameter.</p>
+            <div id="param-out"></div></div>
           <div class="card"><div class="card-title">Sensitivity matrix <span class="card-sub">— ${keep.length <= 40 ? `${keep.length} of ${n} states with non-zero entries` : `${keep.length} states have non-zero entries; showing the 40 with the largest`}</span></div><div id="sens-heat"></div></div>`;
         let shown = keep;
         if (keep.length > 40) {
@@ -260,11 +263,42 @@ const ModalPage = {
           shown = [...keep].sort((a, b) => score(b) - score(a)).slice(0, 40).sort((a, b) => a - b);
         }
         $("#sens-heat").innerHTML = heatmapTable(shown.map(i => shown.map(j => r.matrix[i][j])), shown.map(i => r.state_names[i]), shown.map(i => r.state_names[i]));
+        $("#param-run").addEventListener("click", () => this.findParameters(mode));
       } catch (e) { out.innerHTML = errorHtml(e); }
       finally { setSpinner($("#sens-spin"), ""); }
     };
     this.bindModeSelect(draw);
     draw();
+  },
+
+  // Behind the button rather than automatic: it costs two linearisations per
+  // parameter, which is a second or two on a small network and longer on a
+  // large one -- worth waiting for, not worth doing unasked.
+  async findParameters(mode) {
+    const out = $("#param-out");
+    setSpinner(out, "Perturbing every unit parameter…");
+    try {
+      const r = await netPost("modal/parameter_sensitivity", { mode });
+      if (mode !== this.mode) return;
+      const rows = r.effects.slice(0, 15).map(e => `<tr>
+        <td class="name">${esc(e.unit_label)}</td><td class="name">${esc(e.parameter)}</td>
+        <td>${fmtSmart(e.value)}</td>
+        <td class="${e.d_freq_hz >= 0 ? "" : "muted"}">${(e.d_freq_hz * 1000).toFixed(3)}</td>
+        <td class="${e.d_damping_pct > 0 ? "ok" : e.d_damping_pct < 0 ? "bad" : ""}">${e.d_damping_pct.toFixed(3)}</td></tr>`).join("");
+      out.innerHTML = rows
+        ? `<div class="tablewrap" style="margin-top:0.7rem"><table><thead><tr><th>Unit</th><th>Parameter</th><th>Value</th><th>Δf (mHz)</th><th>Δdamping (pp)</th></tr></thead><tbody>${rows}</tbody></table></div>
+           ${r.notes.length ? `<p class="muted" style="font-size:0.76rem;margin-top:0.5rem">${r.notes.slice(0, 3).map(esc).join("<br>")}</p>` : ""}`
+        : `<p class="empty">No unit parameter moves this mode measurably.</p>`;
+      // Fill the "Built from" column of the sensitivity table above.
+      const by = {};
+      r.entries.forEach(e => { by[`${e.row_state}|${e.col_state}`] = e.parameters; });
+      $$(".param-cell").forEach(td => {
+        const list = by[td.dataset.entry];
+        td.innerHTML = list && list.length
+          ? list.slice(0, 4).map(p => `<span class="badge">${esc(p)}</span>`).join(" ")
+          : `<span class="muted">—</span>`;
+      });
+    } catch (e) { out.innerHTML = errorHtml(e); }
   },
 
   // --- Mode shape ---

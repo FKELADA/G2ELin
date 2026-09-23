@@ -128,6 +128,45 @@ class SensitivityResponse(BaseModel):
     top: list[SensitivityEntryRow]
 
 
+class ParameterSensitivityRequest(BaseModel):
+    mode: int
+    # Narrow the scan; empty means every unit / every parameter.
+    units: list[int] = []
+    parameters: list[str] = []
+    n_entries: int = Field(default=8, ge=1, le=40)
+
+
+class ParameterEffectRow(BaseModel):
+    unit: int
+    unit_label: str
+    parameter: str
+    value: float
+    d_lambda_real: float
+    d_lambda_imag: float
+    # What a 1% increase in the parameter does to the mode.
+    d_freq_hz: float
+    d_damping_pct: float
+    magnitude: float
+
+
+class EntryParametersRow(BaseModel):
+    """One high-sensitivity entry of A, and the parameters it is built from."""
+
+    row_state: str
+    col_state: str
+    sensitivity: float
+    parameters: list[str]
+
+
+class ParameterSensitivityResponse(BaseModel):
+    mode: int
+    eigenvalue_real: float
+    eigenvalue_imag: float
+    effects: list[ParameterEffectRow]
+    entries: list[EntryParametersRow]
+    notes: list[str] = []
+
+
 class ModeShapeRequest(BaseModel):
     mode: int
 
@@ -394,6 +433,10 @@ class NetworkPowerFlowRequest(PowerFlowRequest):
 
 
 class NetworkBatchPowerFlowRequest(BatchPowerFlowRequest):
+    network: Network
+
+
+class NetworkParameterSensitivityRequest(ParameterSensitivityRequest):
     network: Network
 
 

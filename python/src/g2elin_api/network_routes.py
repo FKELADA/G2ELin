@@ -37,6 +37,8 @@ from .schemas import (
     ModalResponse,
     ModelSummaryResponse,
     ModeShapeResponse,
+    NetworkParameterSensitivityRequest,
+    ParameterSensitivityResponse,
     NetworkBatchPowerFlowRequest,
     NetworkEmtRequest,
     NetworkFreeResponseRequest,
@@ -107,6 +109,16 @@ def network_modal(req: NetworkRequest) -> ModalResponse:
 @router.post("/modal/sensitivity", response_model=SensitivityResponse)
 def network_modal_sensitivity(req: NetworkSensitivityRequest) -> SensitivityResponse:
     return analysis.modal_sensitivity_response(req.network, req)
+
+
+@router.post("/modal/parameter_sensitivity", response_model=ParameterSensitivityResponse)
+def network_modal_parameter_sensitivity(
+    req: NetworkParameterSensitivityRequest,
+) -> ParameterSensitivityResponse:
+    """Which physical parameter moves this mode. The eigenvalue sensitivity
+    says which entries of A matter; this says what those entries are made
+    of, which is what anyone can actually change."""
+    return analysis.modal_parameter_sensitivity_response(req.network, req)
 
 
 @router.post("/modal/mode_shape", response_model=ModeShapeResponse)

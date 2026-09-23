@@ -61,7 +61,7 @@ flowchart LR
 Every endpoint above also has a counterpart under `/api/network/*`
 (`network_routes.py`) taking a full `Network` JSON body instead of a
 `preset_id` path param — `POST /api/network/powerflow`, `/modal`,
-`/modal/sensitivity`, `/modal/mode_shape`, `/modal/free_response`,
+`/modal/sensitivity`, `/modal/parameter_sensitivity`, `/modal/mode_shape`, `/modal/free_response`,
 `/modal/step_response`, `/timeseries`, `/emt`, `/emt/live`, plus `/topology` and
 `/states` as POST (their preset-side counterparts are GET, but a `Network`
 body can't ride a GET request — an intentional divergence).
@@ -334,9 +334,30 @@ perturbed is never hidden away.
 
 - **Modal Analysis** — one linearisation per network version (cached
   server-side too, see `analysis._cached`), seven sub-pages: eigenvalue
-  map (+ mode table, click to select a mode), participation heatmap,
-  single-mode participation, sensitivity heatmap, mode shape, free-motion
-  response and step response. The last two hold *channels* — one
+  map (+ mode table, click to select a mode; markers grouped by what kind of
+  mode it is), participation heatmap, single-mode participation, sensitivity
+  heatmap, mode shape, free-motion response and step response.
+
+  The sensitivity page answers one more question than its name suggests.
+  `∂λ/∂A_ij` says which *entries of the state matrix* a mode depends on, and
+  an entry is not something anyone can change — it is an expression in the
+  physical parameters. **Find them** (`POST
+  /api/network/modal/parameter_sensitivity`) carries the sensitivity through
+  to those parameters by the chain rule, `∂λ/∂p = Σ (∂λ/∂A_ij)(∂A_ij/∂p)`,
+  and reports what a 1 % change in each one does to the mode's frequency and
+  damping. It also fills the **Built from** column: a parameter appears in
+  `A_ij` exactly when `∂A_ij/∂p` is non-zero, so the same pass that ranks
+  parameters also says which ones each entry is made of — including for
+  reduced-order models, where no printed symbolic matrix exists.
+
+  The worked example is the one the algebra predicts. A machine's swing
+  equation divides by `2H`, so `H` reaches `A` through that one row and every
+  entry of it carries a factor `1/(2H)`. An electromechanical mode's largest
+  sensitivity therefore lands in the rotor-speed row, and the entry
+  `∂(dw_r)/∂(P_m)` — which is exactly `1/(2H·ω_r0)` — comes back with `H` and
+  nothing else. Checked against the MATLAB toolbox's printed symbolic
+  matrix: across all 80 entries and 34 parameters, the numerical detection
+  and the symbolic content agree in every one of the 2720 cases. The last two hold *channels* — one
   perturbation (free motion) or one input step (step response) each —
   and every channel has any number of *subplots*, each with its own set of
   signals; crosshairs are synced across a channel's subplots.

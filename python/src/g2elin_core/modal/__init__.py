@@ -1,5 +1,8 @@
 from .adequacy import AdequacyReport, ModePair, StateRisk, check_adequacy
 from .classify import ModeCategory, classify_modes, state_categories
+from .parameters import (
+    EntryParameters, ParameterEffect, ParameterSensitivityResult, parameter_sensitivity,
+)
 from .analysis import reference_angle_modes, ModalAnalysisResult, analyze
 from .toolbox import (
     ModeShapeResult,
@@ -18,6 +21,10 @@ __all__ = [
     "ModeCategory",
     "classify_modes",
     "state_categories",
+    "parameter_sensitivity",
+    "ParameterSensitivityResult",
+    "ParameterEffect",
+    "EntryParameters",
     "ModePair",
     "StateRisk",
     "ModalAnalysisResult",

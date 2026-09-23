@@ -22,10 +22,17 @@ run numerically in numpy. Same result, avoids symbolic inversion of a
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
 import sympy as sp
+
+# The three things that can become of one state when a model's order is
+# reduced (see :func:`apply_reduction`).
+DYNAMIC = "dynamic"
+ALGEBRAIC = "algebraic"
+FROZEN = "frozen"
 
 
 @dataclass(frozen=True)
@@ -78,9 +85,16 @@ class NonlinearFuncs:
 
 @dataclass(frozen=True)
 class NonlinearJacobians:
-    """Numeric Jacobian callables for ``g`` and ``h`` — see
+    """Numeric Jacobian callables for ``f``, ``g`` and ``h`` — see
     :meth:`ComponentDAE.nonlinear_jacobians`. Each takes ``(x, z, u, p)``
     and returns a 2-D numpy array.
+
+    ``Fx``/``Fz``/``Fu`` are what an *implicit* ODE solver needs: with them
+    the total derivative ``df/dx`` along the constraint manifold can be
+    assembled directly (see
+    :meth:`~g2elin_core.timedomain.emt.NonlinearNetworkModel.ode_jacobian`)
+    instead of being finite-differenced, which costs one full coupled Newton
+    solve per state.
     """
 
     Gz: object  # d(g)/d(z), shape (n_z, n_z)
@@ -89,6 +103,9 @@ class NonlinearJacobians:
     Hz: object  # d(h)/d(z), shape (n_out, n_z)
     Hx: object  # d(h)/d(x), shape (n_out, n_x)
     Hu: object  # d(h)/d(u), shape (n_out, n_us+n_ug)
+    Fx: object  # d(f)/d(x), shape (n_x, n_x)
+    Fz: object  # d(f)/d(z), shape (n_x, n_z)
+    Fu: object  # d(f)/d(u), shape (n_x, n_us+n_ug)
 
 
 @dataclass(frozen=True)
@@ -185,13 +202,17 @@ class ComponentDAE:
             return lambda x, z, u, p: np.asarray(fn(x, z, u, p), dtype=np.float64).reshape(shape)
 
         n_x, n_z, n_out = len(self.state_syms), len(self.alg_syms), self.n_out_s + self.n_out_g
+        n_u = self.n_us + self.n_ug
         return NonlinearJacobians(
             Gz=_lambdify_matrix(self.Gz, (n_z, n_z)),
             Gx=_lambdify_matrix(self.Gx, (n_z, n_x)),
-            Gu=_lambdify_matrix(self.Gu, (n_z, self.n_us + self.n_ug)),
+            Gu=_lambdify_matrix(self.Gu, (n_z, n_u)),
             Hz=_lambdify_matrix(self.Hz, (n_out, n_z)),
             Hx=_lambdify_matrix(self.Hx, (n_out, n_x)),
-            Hu=_lambdify_matrix(self.Hu, (n_out, self.n_us + self.n_ug)),
+            Hu=_lambdify_matrix(self.Hu, (n_out, n_u)),
+            Fx=_lambdify_matrix(self.Fx, (n_x, n_x)),
+            Fz=_lambdify_matrix(self.Fz, (n_x, n_z)),
+            Fu=_lambdify_matrix(self.Fu, (n_x, n_u)),
         )
 
     def linearize(self, subs: dict) -> LinearComponent:
@@ -321,3 +342,108 @@ def eq_symbol(sym: sp.Symbol) -> sp.Symbol:
     MATLAB toolbox's ``sym(strcat(char(s),'_0'))`` convention.
     """
     return sp.Symbol(f"{sym.name}_0")
+
+
+def mode_key(modes: Mapping[str, str] | None) -> tuple[tuple[str, str], ...]:
+    """A hashable, canonical form of a mode map, for the ``lru_cache`` on
+    each component's ``*_dae()`` builder.
+
+    Dynamic entries are dropped, so a fully-dynamic model hashes to ``()``
+    and shares its cache entry with a call that passed no modes at all --
+    the full-order DAE is built once however it was asked for.
+    """
+    return tuple(sorted((k, v) for k, v in (modes or {}).items() if v != DYNAMIC))
+
+
+def apply_reduction(
+    *,
+    states: list[tuple[sp.Symbol, sp.Expr, str]],
+    modes: Mapping[str, str],
+    alg_vec: list[sp.Symbol],
+    algeq_vec: list[sp.Expr],
+    output_vec: list[sp.Expr],
+) -> tuple[list[sp.Symbol], list[sp.Expr], list[str], list[sp.Symbol], list[sp.Expr], list[sp.Expr]]:
+    """Lower a component's model order by reclassifying individual states.
+
+    ``states`` is the component's full-order ``(symbol, d/dt expression,
+    display name)`` list in its canonical order; ``modes`` maps a state
+    symbol's *name* to one of :data:`DYNAMIC`, :data:`ALGEBRAIC` or
+    :data:`FROZEN` (anything unnamed stays dynamic). Returns the six lists
+    :func:`build_dae` takes, ready to pass straight through.
+
+    The two reductions are mathematically different and are *not*
+    interchangeable, which is why they're separate modes rather than one
+    "drop this state" flag:
+
+    - :data:`ALGEBRAIC` (residualization / singular perturbation) replaces
+      ``dx/dt = expr`` with ``0 = expr`` and moves ``x`` into the algebraic
+      vector. The state still takes whatever value the rest of the system
+      demands of it, instantaneously. Valid for states much *faster* than
+      the phenomena being studied -- stator flux, filter currents, network
+      branches, inner control loops.
+    - :data:`FROZEN` (truncation) substitutes ``x`` by its equilibrium
+      value ``x_0`` everywhere and drops its equation entirely. The state
+      simply doesn't move. Valid for states much *slower* than the window
+      of interest -- the field flux in the classical machine model, where
+      ``E'`` is held constant.
+
+    Applying the fast-state treatment to a slow state (or the reverse) is
+    the most common way a hand-rolled reduced model goes quietly wrong: a
+    field flux with ``dpsi_fd/dt = 0`` is an *instantaneous* field winding,
+    the exact opposite of the classical model's constant one.
+
+    A frozen state's ``x_0`` becomes an ordinary free symbol, so
+    :meth:`ComponentDAE.param_syms` picks it up as a parameter and
+    :meth:`ComponentDAE.point_from_subs` reads its value from the same
+    operating-point substitution dict everything else comes from -- which
+    is why reduction needs no new initialization code anywhere.
+    """
+    frozen_subs: dict[sp.Symbol, sp.Symbol] = {
+        sym: eq_symbol(sym) for sym, _, _ in states if modes.get(sym.name, DYNAMIC) == FROZEN
+    }
+
+    def sub(expr: sp.Expr) -> sp.Expr:
+        return expr.subs(frozen_subs) if frozen_subs else expr
+
+    kept_syms: list[sp.Symbol] = []
+    kept_eqs: list[sp.Expr] = []
+    kept_names: list[str] = []
+    new_alg_syms: list[sp.Symbol] = []
+    new_alg_eqs: list[sp.Expr] = []
+
+    for sym, eq, name in states:
+        mode = modes.get(sym.name, DYNAMIC)
+        if mode == FROZEN:
+            continue  # equation dropped; the symbol is now the x_0 parameter
+        if mode == ALGEBRAIC:
+            new_alg_syms.append(sym)
+            new_alg_eqs.append(sub(eq))  # dx/dt = eq  ->  0 = eq
+            continue
+        if mode != DYNAMIC:
+            raise ValueError(f"unknown state mode {mode!r} for {sym.name!r}")
+        kept_syms.append(sym)
+        kept_eqs.append(sub(eq))
+        kept_names.append(name)
+
+    # Reclassified states go after the component's own algebraic variables,
+    # in their original state order, so the z layout is deterministic.
+    return (
+        kept_syms,
+        kept_eqs,
+        kept_names,
+        list(alg_vec) + new_alg_syms,
+        [sub(e) for e in algeq_vec] + new_alg_eqs,
+        [sub(e) for e in output_vec],
+    )
+
+
+def equilibrium_subs(subs: dict) -> dict:
+    """``subs`` plus an ``x_0`` entry for every symbol in it -- the values
+    :data:`FROZEN` states are substituted by.
+
+    Components call this on their own operating-point dict so that freezing
+    any state works without the dict having to know which ones were frozen.
+    The extra entries are harmless when nothing is frozen: ``param_syms``
+    only returns symbols that actually appear in the equations.
+    """
+    return {**subs, **{eq_symbol(sym): value for sym, value in subs.items()}}

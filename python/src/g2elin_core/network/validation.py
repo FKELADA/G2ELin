@@ -20,6 +20,8 @@ from dataclasses import dataclass
 
 import networkx as nx
 
+from g2elin_core import reduction
+
 from .schema import DerUnit, Network, UnitType
 
 # Only an SM or IB slack is wired up in interconnect/network_assembly.py --
@@ -341,6 +343,105 @@ def validate_network(network: Network) -> list[NetworkIssue]:
                 f"the designated slack (unit {slack.id}) is out of service -- unit {ref} "
                 f"({by_id[ref].unit_type.value}) is the reference the power flow solves against instead",
                 all_caps,
+            ))
+
+    issues.extend(_model_order_issues(network))
+    return issues
+
+
+def _model_order_issues(network: Network) -> list[NetworkIssue]:
+    """Combinations of model levels that are mathematically buildable but
+    physically inconsistent -- reported as warnings, never errors.
+
+    They are warnings on purpose. A mixed-timescale model is a legitimate
+    thing to ask for (studying what one element's fast dynamics contribute
+    is exactly what this control gives you), and none of these combinations
+    makes the model unsolvable. What they do is give an answer whose
+    timescale is not the one the user probably thinks they asked for, which
+    is precisely what a warning is for.
+    """
+    issues: list[NetworkIssue] = []
+    dynamics_caps = ("modal", "emt")
+    net_modes = network.models.group_modes_for("network")
+    net_dynamic = [gid for gid, mode in net_modes.items() if mode == reduction.DYNAMIC]
+    quasi_stationary = not net_dynamic
+
+    if net_modes.get("nodes") == reduction.ALGEBRAIC and network.nodes_share_first_line_b:
+        # A quasi-stationary bus equation says the current injected into the
+        # bus equals its own shunt's, jB*V. That is the power flow's own bus
+        # equation -- but only when B is the bus's real charging. With the
+        # MATLAB-compatible option every bus borrows the *first line's*
+        # susceptance instead, which no power flow ever saw, so the bus
+        # voltages the model settles at are not the ones the power flow
+        # solved for. (Measured on WSCC-9: bus voltages land 0.03 pu away
+        # and the units start ~3000x further from equilibrium than with each
+        # bus's own capacitance.) A dynamic network hides this as a fast
+        # transient that decays in microseconds; a quasi-stationary one
+        # cannot, so it becomes a visible start-up excursion.
+        issues.append(NetworkIssue(
+            "warning",
+            "this network shares the first line's charging susceptance across every bus "
+            "(nodes_share_first_line_b) while the network model is quasi-stationary. The two are "
+            "inconsistent: the bus equation then demands a shunt current the power flow never "
+            "solved for, so a time-domain run starts with a visible excursion. Switch that option "
+            "off (each bus gets its own capacitance) for quasi-stationary runs, or keep the "
+            "network dynamic.",
+            dynamics_caps,
+        ))
+
+    if quasi_stationary:
+        for der in network.der_units:
+            if der.unit_type.value not in reduction.ELEMENTS:
+                continue
+            groups = network.unit_group_modes(der)
+            kind = der.unit_type.value
+            if groups.get("trafo_current") == reduction.DYNAMIC:
+                issues.append(NetworkIssue(
+                    "warning",
+                    f"unit {der.id} ({kind}) still integrates its transformer current while the network "
+                    "is quasi-stationary: the unit keeps an electromagnetic transient the grid it feeds "
+                    "no longer has. Use a level of 'order8' or lower (machines) / 'no_trafo' or lower "
+                    "(converters), or switch the network back to full dynamics.",
+                    dynamics_caps,
+                ))
+            if kind == "sm" and groups.get("stator_flux") == reduction.DYNAMIC:
+                issues.append(NetworkIssue(
+                    "warning",
+                    f"unit {der.id} keeps its stator flux transients against a quasi-stationary network. "
+                    "The standard pairing is to drop both together (machine level 'order6' or lower); "
+                    "keeping only the machine's produces modes with no physical counterpart.",
+                    dynamics_caps,
+                ))
+            if kind in ("gfm", "gfl") and groups.get("filter") == reduction.DYNAMIC:
+                issues.append(NetworkIssue(
+                    "warning",
+                    f"unit {der.id} ({kind}) keeps its filter dynamics against a quasi-stationary "
+                    "network -- a mismatched pair, the same way stator flux is for a machine.",
+                    dynamics_caps,
+                ))
+    elif len(net_dynamic) != len(net_modes):
+        algebraic = sorted(set(net_modes) - set(net_dynamic))
+        issues.append(NetworkIssue(
+            "warning",
+            "the network is split across timescales: "
+            f"{', '.join(algebraic)} are quasi-stationary while {', '.join(sorted(net_dynamic))} still "
+            "integrate. That is a valid model, but its results are neither EMT nor RMS.",
+            dynamics_caps,
+        ))
+
+    # A unit whose per-group settings don't match any named level: worth
+    # saying out loud, because the UI's level picker will show "custom" and
+    # the combination may not be one anybody has validated.
+    for der in network.der_units:
+        if der.unit_type.value not in reduction.ELEMENTS:
+            continue
+        if network.unit_level(der) is None:
+            issues.append(NetworkIssue(
+                "warning",
+                f"unit {der.id}'s state selection doesn't match any named model level -- a custom "
+                "combination. Check it against the full-order model before trusting it (the model "
+                "adequacy check does exactly that).",
+                dynamics_caps,
             ))
 
     return issues

@@ -22,12 +22,16 @@ MATLAB-generated reference:
 from __future__ import annotations
 
 import cmath
+from collections.abc import Mapping
 from functools import lru_cache
 
 import numpy as np
 import sympy as sp
 
-from .base import ComponentDAE, LinearComponent, NonlinearFuncs, NonlinearJacobians, build_dae
+from .base import (
+    ComponentDAE, LinearComponent, NonlinearFuncs, NonlinearJacobians,
+    apply_reduction, build_dae, equilibrium_subs, mode_key,
+)
 
 # Parameters
 wb, Rt, Lt, Rg, Ra, Ll, Lad, Laq, Lfd, Rfd = sp.symbols("wb Rt Lt Rg Ra Ll Lad Laq Lfd Rfd")
@@ -57,8 +61,13 @@ _STATE_NAMES_PSS_ON = [
 ]
 
 
-@lru_cache(maxsize=2)
-def sm_dae(is_slack: bool) -> ComponentDAE:
+@lru_cache(maxsize=16)
+def sm_dae(is_slack: bool, modes: tuple[tuple[str, str], ...] = ()) -> ComponentDAE:
+    """``modes`` is a :func:`~g2elin_core.components.base.mode_key` tuple
+    naming the states this machine gives up -- see
+    :mod:`g2elin_core.reduction` for the catalogue and the named orders it
+    builds out of them. The default ``()`` is the full 19-state model.
+    """
     state_vec = [igd, igq, phi_d, phi_q, phi_fd, phi_1d, phi_1q, phi_2q, Dwr, theta, Pm,
                  Dw1, v1, v2, vpss, e1, e2, efd, e3]
     alg_vec = [wr, ved, veq, id_, i1d, ifd, iq, i1q, i2q, vgd, vgq, Cm, Ce, DP, Et]
@@ -139,6 +148,14 @@ def sm_dae(is_slack: bool) -> ComponentDAE:
     outputeq_s = [p_e, q_e, wr, theta, Dwr, Et]
     output_vec = outputeq_s + outputeq_g
 
+    state_vec, diffeq_vec, state_names, alg_vec, alg, output_vec = apply_reduction(
+        states=list(zip(state_vec, diffeq_vec, _STATE_NAMES_PSS_ON)),
+        modes=dict(modes),
+        alg_vec=alg_vec,
+        algeq_vec=alg,
+        output_vec=output_vec,
+    )
+
     return build_dae(
         state_vec=state_vec,
         alg_vec=alg_vec,
@@ -150,26 +167,26 @@ def sm_dae(is_slack: bool) -> ComponentDAE:
         n_ug=len(ug_vec),
         n_out_s=6,
         n_out_g=len(outputeq_g),
-        state_names=_STATE_NAMES_PSS_ON,
+        state_names=state_names,
         input_names=["V_ref", "P_ref", "w_ref"],
         output_names=["p_e", "q_e", "w_r", "theta", "dw_r_dot", "V_t"],
     )
 
 
-@lru_cache(maxsize=2)
-def sm_nonlinear_funcs(is_slack: bool) -> NonlinearFuncs:
+@lru_cache(maxsize=16)
+def sm_nonlinear_funcs(is_slack: bool, modes: tuple[tuple[str, str], ...] = ()) -> NonlinearFuncs:
     """Numeric callables for the full nonlinear SM DAE — see
     :meth:`g2elin_core.components.base.ComponentDAE.nonlinear_funcs`.
     """
-    return sm_dae(is_slack).nonlinear_funcs()
+    return sm_dae(is_slack, modes).nonlinear_funcs()
 
 
-@lru_cache(maxsize=2)
-def sm_nonlinear_jacobians(is_slack: bool) -> NonlinearJacobians:
+@lru_cache(maxsize=16)
+def sm_nonlinear_jacobians(is_slack: bool, modes: tuple[tuple[str, str], ...] = ()) -> NonlinearJacobians:
     """Numeric Jacobian callables for the SM DAE's algebraic/output
     equations — see :meth:`g2elin_core.components.base.ComponentDAE.nonlinear_jacobians`.
     """
-    return sm_dae(is_slack).nonlinear_jacobians()
+    return sm_dae(is_slack, modes).nonlinear_jacobians()
 
 
 class SmOperatingPoint:
@@ -307,15 +324,15 @@ def _sm_operating_subs(op: SmOperatingPoint) -> dict:
     }
     if not op.is_slack:
         subs[theta_g] = op.theta_g0
-    return subs
+    return equilibrium_subs(subs)
 
 
-def linearize_sm(op: SmOperatingPoint) -> LinearComponent:
-    return sm_dae(op.is_slack).linearize(_sm_operating_subs(op))
+def linearize_sm(op: SmOperatingPoint, modes: Mapping[str, str] | None = None) -> LinearComponent:
+    return sm_dae(op.is_slack, mode_key(modes)).linearize(_sm_operating_subs(op))
 
 
-def sm_nonlinear_point(op: SmOperatingPoint) -> tuple:
+def sm_nonlinear_point(op: SmOperatingPoint, modes: Mapping[str, str] | None = None) -> tuple:
     """``(x0, z0, u0, p0)`` for :func:`sm_nonlinear_funcs`, at the same
     operating point :func:`linearize_sm` uses.
     """
-    return sm_dae(op.is_slack).point_from_subs(_sm_operating_subs(op))
+    return sm_dae(op.is_slack, mode_key(modes)).point_from_subs(_sm_operating_subs(op))

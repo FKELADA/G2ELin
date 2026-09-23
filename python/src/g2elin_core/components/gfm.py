@@ -14,11 +14,15 @@ CIGRE's preset actually needs.
 from __future__ import annotations
 
 import cmath
+from collections.abc import Mapping
 from functools import lru_cache
 
 import sympy as sp
 
-from .base import ComponentDAE, LinearComponent, NonlinearFuncs, NonlinearJacobians, build_dae
+from .base import (
+    ComponentDAE, LinearComponent, NonlinearFuncs, NonlinearJacobians,
+    apply_reduction, build_dae, equilibrium_subs, mode_key,
+)
 
 wb, wff, Rf, Lf, Cf, Rt, Lt, mp, nq, wf, KpVL, KiVL, Kffi, KpCL, KiCL, Kffv, Cdc, Gdc, Kpdc, Tdc = (
     sp.symbols("wb wff Rf Lf Cf Rt Lt mp nq wf KpVL KiVL Kffi KpCL KiCL Kffv Cdc Gdc Kpdc Tdc")
@@ -34,8 +38,13 @@ _STATE_NAMES = ["i_sd", "i_sq", "i_gd", "i_gq", "v_ed", "v_eq", "v_dc", "i_dc",
                 "p_m", "theta", "q_m", "M_VLd", "M_VLq", "M_CLd", "M_CLq"]
 
 
-@lru_cache(maxsize=1)
-def gfm_dae() -> ComponentDAE:
+@lru_cache(maxsize=16)
+def gfm_dae(modes: tuple[tuple[str, str], ...] = ()) -> ComponentDAE:
+    """``modes`` is a :func:`~g2elin_core.components.base.mode_key` tuple
+    naming the states this converter gives up -- see
+    :mod:`g2elin_core.reduction`. The default ``()`` is the full 15-state
+    model.
+    """
     state_vec = [isd, isq, igd, igq, ved, veq, vdc, idc, pm, theta, qm, M_VLd, M_VLq, M_CLd, M_CLq]
     alg_vec = [md, mq, w]
     us_vec = [p_ref, q_ref, ve_ref, w_ref, vdc_ref]
@@ -86,6 +95,14 @@ def gfm_dae() -> ComponentDAE:
     Vt = sp.sqrt(ved**2 + veq**2)
     output_vec = [p, q, w, Vt, igd_g_out, igq_g_out]
 
+    state_vec, diffeq_vec, state_names, alg_vec, alg, output_vec = apply_reduction(
+        states=list(zip(state_vec, diffeq_vec, _STATE_NAMES)),
+        modes=dict(modes),
+        alg_vec=alg_vec,
+        algeq_vec=alg,
+        output_vec=output_vec,
+    )
+
     return build_dae(
         state_vec=state_vec,
         alg_vec=alg_vec,
@@ -97,20 +114,20 @@ def gfm_dae() -> ComponentDAE:
         n_ug=3,
         n_out_s=4,
         n_out_g=2,
-        state_names=_STATE_NAMES,
+        state_names=state_names,
         input_names=["P_ref", "Q_ref", "V_ref", "w_ref", "Vdc_ref"],
         output_names=["p_e", "q_e", "w", "V_t"],
     )
 
 
-@lru_cache(maxsize=1)
-def gfm_nonlinear_funcs() -> NonlinearFuncs:
-    return gfm_dae().nonlinear_funcs()
+@lru_cache(maxsize=16)
+def gfm_nonlinear_funcs(modes: tuple[tuple[str, str], ...] = ()) -> NonlinearFuncs:
+    return gfm_dae(modes).nonlinear_funcs()
 
 
-@lru_cache(maxsize=1)
-def gfm_nonlinear_jacobians() -> NonlinearJacobians:
-    return gfm_dae().nonlinear_jacobians()
+@lru_cache(maxsize=16)
+def gfm_nonlinear_jacobians(modes: tuple[tuple[str, str], ...] = ()) -> NonlinearJacobians:
+    return gfm_dae(modes).nonlinear_jacobians()
 
 
 class GfmOperatingPoint:
@@ -185,7 +202,7 @@ class GfmOperatingPoint:
 
 def _gfm_operating_subs(op: GfmOperatingPoint) -> dict:
     p = op.p
-    return {
+    return equilibrium_subs({
         wb: p["wb"], wff: p["wff"], Rf: p["Rf"], Lf: p["Lf"], Cf: p["Cf"], Rt: p["Rt"], Lt: p["Lt"],
         mp: p["mp"], nq: p["nq"], wf: p["wf"], KpVL: p["KpVL"], KiVL: p["KiVL"], Kffi: p["Kffi"],
         KpCL: p["KpCL"], KiCL: p["KiCL"], Kffv: p["Kffv"], Cdc: p["Cdc"], Gdc: p["Gdc"],
@@ -196,13 +213,13 @@ def _gfm_operating_subs(op: GfmOperatingPoint) -> dict:
         md: op.md0, mq: op.mq0, w: op.w0,
         p_ref: op.p_ref0, q_ref: op.q_ref0, ve_ref: op.ve_ref0, w_ref: op.w_ref0, vdc_ref: op.vdc_ref0,
         theta_g: op.theta_g0, vgd_g: op.vgd_g0, vgq_g: op.vgq_g0,
-    }
+    })
 
 
-def linearize_gfm(op: GfmOperatingPoint) -> LinearComponent:
-    return gfm_dae().linearize(_gfm_operating_subs(op))
+def linearize_gfm(op: GfmOperatingPoint, modes: Mapping[str, str] | None = None) -> LinearComponent:
+    return gfm_dae(mode_key(modes)).linearize(_gfm_operating_subs(op))
 
 
-def gfm_nonlinear_point(op: GfmOperatingPoint) -> tuple:
+def gfm_nonlinear_point(op: GfmOperatingPoint, modes: Mapping[str, str] | None = None) -> tuple:
     """``(x0, z0, u0, p0)`` for :func:`gfm_nonlinear_funcs`."""
-    return gfm_dae().point_from_subs(_gfm_operating_subs(op))
+    return gfm_dae(mode_key(modes)).point_from_subs(_gfm_operating_subs(op))

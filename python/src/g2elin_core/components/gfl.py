@@ -6,11 +6,15 @@ slack DG, so unlike SM/GFM there's only one variant.
 from __future__ import annotations
 
 import cmath
+from collections.abc import Mapping
 from functools import lru_cache
 
 import sympy as sp
 
-from .base import ComponentDAE, LinearComponent, NonlinearFuncs, NonlinearJacobians, build_dae
+from .base import (
+    ComponentDAE, LinearComponent, NonlinearFuncs, NonlinearJacobians,
+    apply_reduction, build_dae, equilibrium_subs, mode_key,
+)
 
 wb, wff, Rf, Lf, Cf, Rt, Lt = sp.symbols("wb wff Rf Lf Cf Rt Lt")
 Kpd, Kid, Kiq, KpCL, KiCL, Kffv, Cdc, Gdc, Tdc, Kipll, Kppll = sp.symbols(
@@ -25,8 +29,13 @@ _STATE_NAMES = ["i_sd", "i_sq", "i_gd", "i_gq", "v_ed", "v_eq", "v_dc", "i_dc",
                 "M_d", "M_q", "M_CLd", "M_CLq", "M_pll", "theta_pll"]
 
 
-@lru_cache(maxsize=1)
-def gfl_dae() -> ComponentDAE:
+@lru_cache(maxsize=16)
+def gfl_dae(modes: tuple[tuple[str, str], ...] = ()) -> ComponentDAE:
+    """``modes`` is a :func:`~g2elin_core.components.base.mode_key` tuple
+    naming the states this converter gives up -- see
+    :mod:`g2elin_core.reduction`. The default ``()`` is the full 14-state
+    model.
+    """
     state_vec = [isd, isq, igd, igq, ved, veq, vdc, idc, M_d, M_q, M_CLd, M_CLq, M_pll, theta_pll]
     alg_vec = [md, mq, w_pll]
     us_vec = [vdc_ref, q_ref, idc_ref]
@@ -72,6 +81,14 @@ def gfl_dae() -> ComponentDAE:
     Vt = sp.sqrt(ved**2 + veq**2)
     output_vec = [p, q, w_pll_out, Vt, igd_g_out, igq_g_out]
 
+    state_vec, diffeq_vec, state_names, alg_vec, alg, output_vec = apply_reduction(
+        states=list(zip(state_vec, diffeq_vec, _STATE_NAMES)),
+        modes=dict(modes),
+        alg_vec=alg_vec,
+        algeq_vec=alg,
+        output_vec=output_vec,
+    )
+
     return build_dae(
         state_vec=state_vec,
         alg_vec=alg_vec,
@@ -83,20 +100,20 @@ def gfl_dae() -> ComponentDAE:
         n_ug=3,
         n_out_s=4,
         n_out_g=2,
-        state_names=_STATE_NAMES,
+        state_names=state_names,
         input_names=["Vdc_ref", "Q_ref", "Idc_ref"],
         output_names=["p_e", "q_e", "w_pll", "V_t"],
     )
 
 
-@lru_cache(maxsize=1)
-def gfl_nonlinear_funcs() -> NonlinearFuncs:
-    return gfl_dae().nonlinear_funcs()
+@lru_cache(maxsize=16)
+def gfl_nonlinear_funcs(modes: tuple[tuple[str, str], ...] = ()) -> NonlinearFuncs:
+    return gfl_dae(modes).nonlinear_funcs()
 
 
-@lru_cache(maxsize=1)
-def gfl_nonlinear_jacobians() -> NonlinearJacobians:
-    return gfl_dae().nonlinear_jacobians()
+@lru_cache(maxsize=16)
+def gfl_nonlinear_jacobians(modes: tuple[tuple[str, str], ...] = ()) -> NonlinearJacobians:
+    return gfl_dae(modes).nonlinear_jacobians()
 
 
 class GflOperatingPoint:
@@ -170,7 +187,7 @@ class GflOperatingPoint:
 
 def _gfl_operating_subs(op: GflOperatingPoint) -> dict:
     p = op.p
-    return {
+    return equilibrium_subs({
         wb: p["wb"], wff: p["wff"], Rf: p["Rf"], Lf: p["Lf"], Cf: p["Cf"], Rt: p["Rt"], Lt: p["Lt"],
         Kpd: p["Kpd"], Kid: p["Kid"], Kiq: p["Kiq"], KpCL: p["KpCL"], KiCL: p["KiCL"],
         Kffv: p["Kffv"], Cdc: p["Cdc"], Gdc: p["Gdc"], Tdc: p["Tdc"], Kipll: p["Kipll"], Kppll: p["Kppll"],
@@ -179,13 +196,13 @@ def _gfl_operating_subs(op: GflOperatingPoint) -> dict:
         M_pll: op.M_pll0, theta_pll: op.theta_pll0, md: op.md0, mq: op.mq0, w_pll: op.w_pll0,
         idc_ref: op.idc_ref0, vdc_ref: op.vdc_ref0, q_ref: op.q_ref0,
         theta_g: op.theta_g0, vgd_g: op.vgd_g0, vgq_g: op.vgq_g0,
-    }
+    })
 
 
-def linearize_gfl(op: GflOperatingPoint) -> LinearComponent:
-    return gfl_dae().linearize(_gfl_operating_subs(op))
+def linearize_gfl(op: GflOperatingPoint, modes: Mapping[str, str] | None = None) -> LinearComponent:
+    return gfl_dae(mode_key(modes)).linearize(_gfl_operating_subs(op))
 
 
-def gfl_nonlinear_point(op: GflOperatingPoint) -> tuple:
+def gfl_nonlinear_point(op: GflOperatingPoint, modes: Mapping[str, str] | None = None) -> tuple:
     """``(x0, z0, u0, p0)`` for :func:`gfl_nonlinear_funcs`."""
-    return gfl_dae().point_from_subs(_gfl_operating_subs(op))
+    return gfl_dae(mode_key(modes)).point_from_subs(_gfl_operating_subs(op))

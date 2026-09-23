@@ -1,0 +1,553 @@
+"""The catalogue of model-order reductions: which states each element type
+can give up, what the named levels are, and how a choice resolves to the
+per-state modes :func:`g2elin_core.components.base.apply_reduction` wants.
+
+This module holds *no* physics. It is a description of the choices, shared
+by the symbolic model builders (``components/*.py``), the schema that
+persists a choice (``network/schema.py``), the validation that rejects an
+inconsistent one (``network/validation.py``), and the API that shows the
+choices to the web UI. Keeping it in one place is what stops the level
+names, the state groupings and the UI's checkboxes drifting apart.
+
+**Granularity.** The unit of control is a *state group*, not an individual
+state: the d- and q-axis halves of a stator flux, or the two integrators of
+a current PI, are one physical approximation each and there is no
+meaningful model in which one is kept and the other dropped. Groups are
+also what make the named levels ("6th order", "droop only") expressible as
+a handful of settings rather than a list of nineteen.
+
+**Named levels vs. free choice.** A level is nothing more than a preset
+mapping of groups to modes; anything a level can express, a set of explicit
+group overrides can express too, and overrides are applied *on top of* a
+level. So the UI can offer both the familiar names and the underlying
+per-group ``dynamic | algebraic | frozen`` control without the two being
+different mechanisms.
+
+See :func:`g2elin_core.components.base.apply_reduction` for what the three
+modes mean and why ``algebraic`` and ``frozen`` are not interchangeable.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from g2elin_core.components.base import ALGEBRAIC, DYNAMIC, FROZEN
+
+__all__ = [
+    "ALGEBRAIC", "DYNAMIC", "FROZEN", "MODES", "ElementModel", "StateGroup",
+    "ELEMENTS", "element", "resolve_modes", "level_ids", "group_ids", "describe",
+    "CATEGORIES", "SYNCHRONISATION", "CONTROL", "UNIT_ELECTRICAL", "NETWORK", "MIXED", "REFERENCE",
+    "category_of_state", "group_of_state", "split_state_name",
+]
+
+MODES = (DYNAMIC, ALGEBRAIC, FROZEN)
+
+# What kind of phenomenon a state belongs to. Every state group carries one,
+# so a mode can be classified by which category its participation falls in
+# (see :func:`g2elin_core.modal.classify.classify_modes`) -- the eigenvalue
+# map groups modes by it.
+#
+# The split is by *mechanism*, not by which box the state sits in. A
+# converter has no rotor, but its droop law and a machine's swing equation
+# do the same job -- they are how the unit stays in step with the grid -- so
+# they share a category, and a question like "which modes are
+# synchronisation modes?" has one answer across a mixed fleet.
+SYNCHRONISATION = "synchronisation"
+CONTROL = "control"
+UNIT_ELECTRICAL = "unit_electrical"
+NETWORK = "network"
+MIXED = "mixed"
+REFERENCE = "reference"
+
+CATEGORIES: dict[str, dict[str, str]] = {
+    SYNCHRONISATION: {
+        "label": "Synchronisation",
+        "note": "How a unit stays in step with the grid: a machine's swing equation, a "
+                "grid-forming converter's droop angle and power filters, a grid-following "
+                "converter's PLL. The slow modes -- local and inter-area oscillations live here.",
+    },
+    CONTROL: {
+        "label": "Control",
+        "note": "Regulators: AVR, exciter, PSS, governor, and a converter's cascaded voltage "
+                "and current loops. Where a tuning change shows up first.",
+    },
+    UNIT_ELECTRICAL: {
+        "label": "Unit electrical",
+        "note": "The electromagnetic states inside a unit: stator and rotor flux, damper "
+                "windings, filter currents and voltages, the DC link, the step-up transformer "
+                "current. Fast, and the first thing model-order reduction removes.",
+    },
+    NETWORK: {
+        "label": "Network",
+        "note": "Bus voltages and branch currents -- the grid's own electromagnetic "
+                "transients. Absent entirely from a quasi-stationary model.",
+    },
+    MIXED: {
+        "label": "Mixed",
+        "note": "No single category accounts for most of this mode: it couples across "
+                "them. Often the interesting ones -- a control loop interacting with the "
+                "network, for instance.",
+    },
+    REFERENCE: {
+        "label": "Reference angle",
+        "note": "Not a mode of the system at all: the model's dq frame has no absolute "
+                "position, so turning every angle together changes nothing. Marginal by "
+                "construction, and excluded from the stability verdict.",
+    },
+}
+
+
+@dataclass(frozen=True)
+class StateGroup:
+    """One physical approximation a user can switch on or off."""
+
+    id: str
+    label: str
+    symbols: tuple[str, ...]  # the DAE symbol names this group covers
+    states: tuple[str, ...]  # their display names, for the UI
+    allowed: tuple[str, ...] = (DYNAMIC, ALGEBRAIC)
+    default: str = DYNAMIC
+    note: str = ""
+    category: str = UNIT_ELECTRICAL  # see CATEGORIES
+    # Groups that must be algebraic too before this one can be. A control
+    # loop's integrator has no term of its own in its own equation --
+    # ``0 = Ki*(ref - x)`` says nothing about the integrator, only about
+    # ``x`` -- so making it algebraic is only solvable once whatever it
+    # regulates is an unknown as well. These are the minimum sets, found by
+    # building every combination against CIGRE (see tests/test_model_order).
+    requires: tuple[str, ...] = ()
+
+    @property
+    def locked(self) -> bool:
+        return self.allowed == (DYNAMIC,)
+
+
+@dataclass(frozen=True)
+class ElementModel:
+    kind: str
+    label: str
+    groups: tuple[StateGroup, ...]
+    levels: dict[str, dict[str, str]]  # level id -> {group id: mode}, dynamic omitted
+    level_labels: dict[str, str]
+    level_notes: dict[str, str] = field(default_factory=dict)
+    default_level: str = "full"
+
+    def group(self, group_id: str) -> StateGroup:
+        for g in self.groups:
+            if g.id == group_id:
+                return g
+        # A ValueError, not a KeyError: this is reached from a pydantic
+        # validator on user-supplied settings, and pydantic turns a
+        # ValueError into a proper per-field validation error (a 422 with
+        # the reason) while a KeyError escapes as a 500.
+        raise ValueError(
+            f"{self.kind!r} has no state group {group_id!r} -- have {[g.id for g in self.groups]}"
+        )
+
+    def modes_by_group(self, level: str | None = None, overrides: dict[str, str] | None = None) -> dict[str, str]:
+        """Every group's mode, after applying ``level`` then ``overrides``."""
+        level = level or self.default_level
+        if level not in self.levels:
+            raise ValueError(
+                f"unknown {self.kind} model level {level!r} -- available: {sorted(self.levels)}"
+            )
+        modes = {g.id: g.default for g in self.groups}
+        modes.update(self.levels[level])
+        for group_id, mode in (overrides or {}).items():
+            group = self.group(group_id)  # raises on an unknown group id
+            if mode not in group.allowed:
+                raise ValueError(
+                    f"{self.kind}.{group_id} cannot be {mode!r} -- allowed: {list(group.allowed)}"
+                    + (f" ({group.note})" if group.note else "")
+                )
+            modes[group_id] = mode
+        return modes
+
+    def unmet_requirements(self, by_group: dict[str, str]) -> list[tuple[str, tuple[str, ...]]]:
+        """``(group, groups it still needs)`` for every group made algebraic
+        without what it depends on -- see :attr:`StateGroup.requires`.
+
+        Checked up front rather than left to surface as a singular Jacobian
+        deep inside the linearisation, which says nothing about which
+        setting caused it.
+        """
+        out = []
+        for g in self.groups:
+            if by_group.get(g.id) != ALGEBRAIC or not g.requires:
+                continue
+            missing = tuple(r for r in g.requires if by_group.get(r) != ALGEBRAIC)
+            if missing:
+                out.append((g.id, missing))
+        return out
+
+    def modes(self, level: str | None = None, overrides: dict[str, str] | None = None) -> dict[str, str]:
+        """The per-*symbol* mode map ``apply_reduction`` takes."""
+        by_group = self.modes_by_group(level, overrides)
+        return {sym: by_group[g.id] for g in self.groups for sym in g.symbols}
+
+    def matching_level(self, by_group: dict[str, str]) -> str | None:
+        """The named level a group->mode map corresponds to, if any -- what
+        the UI shows in its level picker after per-group edits."""
+        for level_id in self.levels:
+            if self.modes_by_group(level_id) == by_group:
+                return level_id
+        return None
+
+
+# --- Synchronous machine ------------------------------------------------------
+# The 19 states of components/sm.py. The nine controller states (governor,
+# PSS, AVR) are groups of their own and stay dynamic in every named level:
+# a reduced-order machine in a stability study keeps its full controls --
+# that is the whole point of the study. They are still exposed, because
+# switching one off is the cleanest way to ask what it contributes.
+_SM = ElementModel(
+    kind="sm",
+    label="Synchronous machine",
+    groups=(
+        StateGroup(
+            "trafo_current", "Step-up transformer current", ("igd", "igq"), ("i_gd", "i_gq"),
+            note="must be algebraic when the network is quasi-stationary",
+        ),
+        StateGroup("stator_flux", "Stator flux", ("phi_d", "phi_q"), ("psi_d", "psi_q")),
+        StateGroup(
+            "field_flux", "Field winding flux", ("phi_fd",), ("psi_fd",),
+            allowed=(DYNAMIC, ALGEBRAIC, FROZEN),
+            note="a slow state (T'do ~ 5-10 s): freeze it for the classical model, "
+                 "do not make it algebraic unless you mean an instantaneous field winding",
+        ),
+        StateGroup("damper_1d", "d-axis damper winding", ("phi_1d",), ("psi_1d",)),
+        StateGroup("damper_1q", "q-axis damper winding", ("phi_1q",), ("psi_1q",)),
+        StateGroup("damper_2q", "Second q-axis damper winding", ("phi_2q",), ("psi_2q",)),
+        StateGroup(
+            "swing", "Rotor swing", ("Dwr", "theta"), ("dw_r", "theta"), allowed=(DYNAMIC,),
+            note="every machine model keeps the swing equation; theta defines the rotor frame",
+            category=SYNCHRONISATION,
+        ),
+        StateGroup(
+            "governor", "Governor", ("Pm",), ("P_m",), allowed=(DYNAMIC, ALGEBRAIC, FROZEN),
+            note="frozen = fixed mechanical power", category=CONTROL,
+        ),
+        StateGroup(
+            "pss", "Power system stabiliser", ("Dw1", "v1", "v2", "vpss"),
+            ("dw_1", "v_1", "v_2", "v_pss"), allowed=(DYNAMIC, FROZEN),
+            note="frozen = PSS held at its equilibrium output", category=CONTROL,
+        ),
+        StateGroup(
+            "avr", "AVR / exciter", ("e1", "e2", "efd", "e3"), ("e_1", "e_2", "e_fd", "e_3"),
+            allowed=(DYNAMIC, ALGEBRAIC, FROZEN), note="frozen = constant field voltage",
+            category=CONTROL,
+        ),
+    ),
+    levels={
+        "full": {},
+        "order8": {"trafo_current": ALGEBRAIC},
+        "order6": {"trafo_current": ALGEBRAIC, "stator_flux": ALGEBRAIC},
+        "order5": {"trafo_current": ALGEBRAIC, "stator_flux": ALGEBRAIC, "damper_2q": ALGEBRAIC},
+        "order4": {
+            "trafo_current": ALGEBRAIC, "stator_flux": ALGEBRAIC,
+            "damper_1d": ALGEBRAIC, "damper_2q": ALGEBRAIC,
+        },
+        "order3": {
+            "trafo_current": ALGEBRAIC, "stator_flux": ALGEBRAIC,
+            "damper_1d": ALGEBRAIC, "damper_1q": ALGEBRAIC, "damper_2q": ALGEBRAIC,
+        },
+        "order2": {
+            "trafo_current": ALGEBRAIC, "stator_flux": ALGEBRAIC, "field_flux": FROZEN,
+            "damper_1d": ALGEBRAIC, "damper_1q": ALGEBRAIC, "damper_2q": ALGEBRAIC,
+        },
+    },
+    level_labels={
+        "full": "Full order (EMT)",
+        "order8": "8th order",
+        "order6": "6th order",
+        "order5": "5th order",
+        "order4": "4th order (two-axis)",
+        "order3": "3rd order (flux decay)",
+        "order2": "2nd order (classical)",
+    },
+    level_notes={
+        "full": "Everything dynamic, including the step-up transformer current. Needs a dynamic network.",
+        "order8": "Full Park machine. Transformer current algebraic, so it pairs with either network.",
+        "order6": "Stator flux algebraic -- the standard machine model for stability studies "
+                  "(Sauer-Pai / Anderson-Fouad). Pairs with a quasi-stationary network.",
+        "order5": "6th order without the second q-axis damper.",
+        "order4": "Two-axis model: field flux and one q-axis damper (E'd, E'q).",
+        "order3": "Flux-decay / one-axis model: field flux and swing.",
+        "order2": "Classical model: swing only, with the field flux *frozen* at its "
+                  "equilibrium (constant E'), not made algebraic.",
+    },
+)
+
+# --- Grid-forming converter ---------------------------------------------------
+# The 15 states of components/gfm.py, ordered outward from the grid: the
+# levels peel off one cascaded loop at a time, ending at the droop law plus
+# its power measurement filters, which is the model RMS tools carry.
+_GFM = ElementModel(
+    kind="gfm",
+    label="Grid-forming converter",
+    groups=(
+        StateGroup(
+            "trafo_current", "Transformer current", ("igd", "igq"), ("i_gd", "i_gq"),
+            note="must be algebraic when the network is quasi-stationary",
+        ),
+        StateGroup("filter", "LC filter", ("isd", "isq", "ved", "veq"), ("i_sd", "i_sq", "v_ed", "v_eq")),
+        StateGroup("dc_link", "DC link", ("vdc", "idc"), ("v_dc", "i_dc")),
+        StateGroup("current_loop", "Inner current loop", ("M_CLd", "M_CLq"), ("M_CLd", "M_CLq"),
+                   requires=("filter",), category=CONTROL),
+        StateGroup("voltage_loop", "Outer voltage loop", ("M_VLd", "M_VLq"), ("M_VLd", "M_VLq"),
+                   requires=("filter",), category=CONTROL),
+        StateGroup(
+            "power_filter", "Power measurement filters", ("pm", "qm"), ("p_m", "q_m"),
+            note="algebraic = the droop sees instantaneous power", category=SYNCHRONISATION,
+        ),
+        StateGroup(
+            "angle", "Droop angle", ("theta",), ("theta",), allowed=(DYNAMIC,),
+            note="theta defines the converter's own frame and can never be removed",
+            category=SYNCHRONISATION,
+        ),
+    ),
+    levels={
+        "full": {},
+        "no_trafo": {"trafo_current": ALGEBRAIC},
+        "no_filter": {"trafo_current": ALGEBRAIC, "filter": ALGEBRAIC},
+        "no_inner": {"trafo_current": ALGEBRAIC, "filter": ALGEBRAIC, "current_loop": ALGEBRAIC},
+        "no_voltage": {
+            "trafo_current": ALGEBRAIC, "filter": ALGEBRAIC,
+            "current_loop": ALGEBRAIC, "voltage_loop": ALGEBRAIC,
+        },
+        "droop": {
+            "trafo_current": ALGEBRAIC, "filter": ALGEBRAIC, "current_loop": ALGEBRAIC,
+            "voltage_loop": ALGEBRAIC, "dc_link": ALGEBRAIC,
+        },
+    },
+    level_labels={
+        "full": "Full order (EMT)",
+        "no_trafo": "No transformer current",
+        "no_filter": "No LC filter",
+        "no_inner": "No inner current loop",
+        "no_voltage": "No cascaded voltage control",
+        "droop": "Droop only (RMS)",
+    },
+    level_notes={
+        "full": "Everything dynamic. Needs a dynamic network.",
+        "no_trafo": "Transformer current algebraic, so it pairs with either network.",
+        "no_filter": "Ideal LC filter -- the converter's terminal voltage follows its reference.",
+        "no_inner": "The current loop tracks its reference instantly.",
+        "no_voltage": "Both cascaded loops ideal: a controlled voltage source behind the filter impedance.",
+        "droop": "The droop law and its power measurement filters only -- three states. "
+                 "This is the grid-forming model RMS studies use.",
+    },
+)
+
+# --- Grid-following converter -------------------------------------------------
+# The 14 states of components/gfl.py. The PLL is the synchronising dynamic
+# and survives every level: the smallest model is a current source behind
+# its PLL, which is what phasor tools represent a grid-following unit as.
+_GFL = ElementModel(
+    kind="gfl",
+    label="Grid-following converter",
+    groups=(
+        StateGroup(
+            "trafo_current", "Transformer current", ("igd", "igq"), ("i_gd", "i_gq"),
+            note="must be algebraic when the network is quasi-stationary",
+        ),
+        StateGroup("filter", "LCL filter", ("isd", "isq", "ved", "veq"), ("i_sd", "i_sq", "v_ed", "v_eq")),
+        StateGroup("dc_link", "DC link", ("vdc", "idc"), ("v_dc", "i_dc")),
+        StateGroup("current_loop", "Inner current loop", ("M_CLd", "M_CLq"), ("M_CLd", "M_CLq"),
+                   requires=("filter",), category=CONTROL),
+        StateGroup(
+            "outer_loop", "Outer DC-voltage and reactive-power loops", ("M_d", "M_q"), ("M_d", "M_q"),
+            requires=("filter", "dc_link"), category=CONTROL,
+        ),
+        StateGroup(
+            "pll", "Phase-locked loop", ("M_pll", "theta_pll"), ("M_pll", "theta_pll"),
+            allowed=(DYNAMIC,), category=SYNCHRONISATION,
+            note="the PLL is how a grid-following unit synchronises; theta_pll defines its frame",
+        ),
+    ),
+    levels={
+        "full": {},
+        "no_trafo": {"trafo_current": ALGEBRAIC},
+        "no_filter": {"trafo_current": ALGEBRAIC, "filter": ALGEBRAIC},
+        "no_inner": {"trafo_current": ALGEBRAIC, "filter": ALGEBRAIC, "current_loop": ALGEBRAIC},
+        "no_dc": {
+            "trafo_current": ALGEBRAIC, "filter": ALGEBRAIC,
+            "current_loop": ALGEBRAIC, "dc_link": ALGEBRAIC,
+        },
+        "pll": {
+            "trafo_current": ALGEBRAIC, "filter": ALGEBRAIC, "current_loop": ALGEBRAIC,
+            "dc_link": ALGEBRAIC, "outer_loop": ALGEBRAIC,
+        },
+    },
+    level_labels={
+        "full": "Full order (EMT)",
+        "no_trafo": "No transformer current",
+        "no_filter": "No LCL filter",
+        "no_inner": "No inner current loop",
+        "no_dc": "No DC link",
+        "pll": "PLL only (RMS)",
+    },
+    level_notes={
+        "full": "Everything dynamic. Needs a dynamic network.",
+        "no_trafo": "Transformer current algebraic, so it pairs with either network.",
+        "no_filter": "Ideal LCL filter.",
+        "no_inner": "The current loop tracks its reference instantly. Watch this one in weak grids: "
+                    "at low SCR or low switching frequency the current loop couples with the PLL "
+                    "and dropping it changes the answer.",
+        "no_dc": "DC link held at its reference.",
+        "pll": "A controlled current source behind its PLL -- two states. This is the "
+               "grid-following model RMS studies use.",
+    },
+)
+
+# --- Network ------------------------------------------------------------------
+# One pseudo-element covering every passive element, because the choice is
+# almost always made for the network as a whole. Its groups are the element
+# kinds, so a user who does want a mixed network (dynamic lines, algebraic
+# loads) can still say so.
+_NETWORK = ElementModel(
+    kind="network",
+    label="Network",
+    groups=(
+        StateGroup("nodes", "Bus voltages (shunt capacitance)", ("vgd_g", "vgq_g"), ("v_{g_d}", "v_{g_q}"),
+                   category=NETWORK),
+        StateGroup("lines", "Line currents", ("ild_g", "ilq_g"), ("i_{l_d}", "i_{l_q}"), category=NETWORK),
+        StateGroup("loads", "Load currents", ("icd_g", "icq_g"), ("i_{c_d}", "i_{c_q}"), category=NETWORK),
+        StateGroup("shunts", "Shunt reactor currents", ("ild_g", "ilq_g"), ("i_{l_d}", "i_{l_q}"),
+                   category=NETWORK),
+        StateGroup(
+            "transformers", "Branch transformer currents", ("ild_g", "ilq_g"), ("i_{l_d}", "i_{l_q}"),
+            category=NETWORK,
+        ),
+    ),
+    levels={
+        "full": {},
+        "quasi_stationary": {
+            "nodes": ALGEBRAIC, "lines": ALGEBRAIC, "loads": ALGEBRAIC,
+            "shunts": ALGEBRAIC, "transformers": ALGEBRAIC,
+        },
+    },
+    level_labels={"full": "Dynamic (EMT)", "quasi_stationary": "Quasi-stationary (RMS)"},
+    level_notes={
+        "full": "Every passive element integrates its own L di/dt and C dv/dt. "
+                "This is what makes a run electromagnetic-transient.",
+        "quasi_stationary": "Every passive element is algebraic: the interconnection's own "
+                            "elimination becomes the admittance-matrix solve a phasor tool does. "
+                            "Removes the network's fast modes, which are the stiffest in the model.",
+    },
+)
+
+ELEMENTS: dict[str, ElementModel] = {e.kind: e for e in (_NETWORK, _SM, _GFM, _GFL)}
+
+
+# Block-name prefix -> (catalogue kind, the one group it can be). The passive
+# elements all reuse the same two-state models, so "i_{l_d}" alone cannot say
+# whether it is a line, a shunt or a branch transformer -- the block name is
+# what distinguishes them. A frame or an infinite bus has no reducible group
+# of its own; both carry the reference angle, so they count as synchronisation.
+_BLOCK_PREFIX: dict[str, tuple[str, str | None]] = {
+    "SM": ("sm", None), "GFM": ("gfm", None), "GFL": ("gfl", None),
+    "Nd": ("network", "nodes"), "Ln": ("network", "lines"), "Ld": ("network", "loads"),
+    "Sh": ("network", "shunts"), "Tr": ("network", "transformers"),
+}
+# A reference frame is nothing but its angle. An infinite bus carries an
+# angle too, but also its own source currents, which are electrical.
+_UNGROUPED_CATEGORY = {"Frame": SYNCHRONISATION, "IB": UNIT_ELECTRICAL}
+_ANGLE_STATES = {"theta", "theta_pll"}
+
+
+def split_state_name(state_name: str) -> tuple[str, str]:
+    """``"psi_d_{SM_1}"`` -> ``("psi_d", "SM_1")``.
+
+    The split is on the *last* ``_{``: a display name can itself contain
+    braces, as ``"v_{g_d}_{Nd_3}"`` does.
+    """
+    idx = state_name.rfind("_{")
+    if idx < 0:
+        return state_name, ""
+    return state_name[:idx], state_name[idx + 2:].rstrip("}")
+
+
+def group_of_state(state_name: str) -> str | None:
+    """The reduction group one assembled state belongs to, as
+    ``"<kind>.<group>"``, or None when it belongs to none (a reference frame
+    or an infinite bus)."""
+    base, block = split_state_name(state_name)
+    if not block:
+        return None
+    kind, fixed = _BLOCK_PREFIX.get(block.split("_")[0], (None, None))
+    if kind is None:
+        return None
+    if fixed is not None:
+        return f"{kind}.{fixed}"
+    for g in element(kind).groups:
+        if base in g.states:
+            return f"{kind}.{g.id}"
+    return None
+
+
+def category_of_state(state_name: str) -> str:
+    """Which of :data:`CATEGORIES` one assembled state belongs to."""
+    group = group_of_state(state_name)
+    if group is None:
+        base, block = split_state_name(state_name)
+        if base in _ANGLE_STATES:
+            return SYNCHRONISATION
+        return _UNGROUPED_CATEGORY.get(block.split("_")[0], MIXED)
+    kind, group_id = group.split(".", 1)
+    return element(kind).group(group_id).category
+
+
+def element(kind: str) -> ElementModel:
+    try:
+        return ELEMENTS[kind]
+    except KeyError:
+        raise ValueError(f"no reduction catalogue for {kind!r} -- have {sorted(ELEMENTS)}") from None
+
+
+def resolve_modes(kind: str, level: str | None = None, overrides: dict[str, str] | None = None) -> dict[str, str]:
+    """``{symbol name: mode}`` for one element type, ready for
+    :func:`g2elin_core.components.base.apply_reduction`."""
+    return element(kind).modes(level, overrides)
+
+
+def level_ids(kind: str) -> list[str]:
+    return list(element(kind).levels)
+
+
+def group_ids(kind: str) -> list[str]:
+    return [g.id for g in element(kind).groups]
+
+
+def describe(kind: str) -> dict:
+    """The catalogue for one element type as plain JSON-able data -- what
+    the API hands the web UI to build its pickers from, so the UI never
+    hard-codes a level name or a state group."""
+    e = element(kind)
+    return {
+        "kind": e.kind,
+        "label": e.label,
+        "default_level": e.default_level,
+        "levels": [
+            {
+                "id": level_id,
+                "label": e.level_labels.get(level_id, level_id),
+                "note": e.level_notes.get(level_id, ""),
+                "modes": e.modes_by_group(level_id),
+            }
+            for level_id in e.levels
+        ],
+        "groups": [
+            {
+                "id": g.id,
+                "label": g.label,
+                "states": list(g.states),
+                "allowed": list(g.allowed),
+                "default": g.default,
+                "locked": g.locked,
+                "requires": list(g.requires),
+                "note": g.note,
+            }
+            for g in e.groups
+        ],
+    }

@@ -177,8 +177,14 @@ def _load_step(model: NonlinearNetworkModel, ev: NetworkEvent) -> AppliedEvent:
     z_new = 1 / y_new
     load = net.loads[k]
     vgd, vgq = model.op.node_vg[load.bus]
+    # The replacement block has to be built at the *network's* model order,
+    # not the default one: a load step in a quasi-stationary model that
+    # quietly reinstated a dynamic load would change what kind of simulation
+    # is running, halfway through the run.
     comp = nonlinear_load_block(
         wb_val=2 * math.pi * net.f_hz, r_pu=z_new.real, x_pu=z_new.imag, wg0=1.0, vgd_g0=vgd, vgq_g0=vgq,
+        mode=net.models.group_modes_for("network")["loads"],
+        fixed_frequency=net.models.fixed_network_frequency,
     )
     new = rebuild(model, net, replace={f"Ld_{ev.index + 1}": comp})
     sign = lambda v: f"{v:+g} %"  # noqa: E731
@@ -197,12 +203,31 @@ def _phase_jump(model: NonlinearNetworkModel, ev: NetworkEvent) -> AppliedEvent:
     by_name = {b.name: b for b in model.blocks}
 
     def rotate(b, angle: float) -> None:
+        """Turn a block's own dq pair (a bus voltage, a branch current).
+
+        A block reduced to algebraic has no such pair to turn, and its
+        ``state_off`` points at whatever block comes next, so the guard is
+        what stops a jump from writing into a different element's states.
+        """
+        if b.comp.n_states < 2:
+            return
         s = b.state_off
         v = complex(x0[s], x0[s + 1]) * cmath.exp(1j * angle)
         x0[s], x0[s + 1] = v.real, v.imag
 
     ib = next((u for u in net.der_units if u.bus == ev.bus and u.unit_type.value == "infinite_bus"), None)
     node = by_name.get(f"Nd_{ev.bus}")
+    if node is not None and not node.comp.n_states:
+        # A jump at a bus is applied by rotating that bus's own voltage
+        # state. A quasi-stationary bus has none: its voltage is whatever
+        # the network equations make it, so there is nothing to displace --
+        # and rotating it anyway would write into the *next* block's states,
+        # silently corrupting a different element.
+        raise EventError(
+            f"bus {ev.bus}'s voltage isn't a state in this model: the network is quasi-stationary, so the "
+            "bus voltage follows the network equations instantly and can't be displaced on its own. Jump "
+            "the infinite-bus source instead, or set the network's model order back to dynamic."
+        )
     if node is not None:
         rotate(node, d)
         what = f"phase jump of {ev.angle_deg:+g}° at bus {ev.bus}"

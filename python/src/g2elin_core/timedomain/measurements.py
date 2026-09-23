@@ -118,8 +118,15 @@ class MeasurementSet:
             self.filtered.add(f"f_{{bus{bus.id}}}")
             add(f"f_inst_{{bus{bus.id}}}", g, "Frequency (instantaneous)", "Hz", lambda c, nb=nb: c.freq(nb))
             self.frequencies.update({f"f_{{bus{bus.id}}}", f"f_inst_{{bus{bus.id}}}"})
+            # With a quasi-stationary bus the waveform is a reconstruction
+            # from the phasor, not a simulated instantaneous voltage: it
+            # carries nothing below one cycle, because the model no longer
+            # has anything there. Said in the label rather than hidden --
+            # it is still the right trace to look at for a phase jump.
+            phasor = not nb.comp.n_states
+            suffix = " (reconstructed from the phasor)" if phasor else " (instantaneous)"
             for k, ph in enumerate("abc"):
-                add(f"v_{ph}_{{bus{bus.id}}}", g, f"Phase-{ph} voltage (instantaneous)", "pu", lambda c, nb=nb, k=k: c.phase(nb, k))
+                add(f"v_{ph}_{{bus{bus.id}}}", g, f"Phase-{ph} voltage{suffix}", "pu", lambda c, nb=nb, k=k: c.phase(nb, k))
         for i, ln, lb in self.lines:
             g = f"Line #{i} ({ln.from_bus} → {ln.to_bus})" + (f" {ln.name}" if ln.name else "")
             nj, nk = self.nodes.get(ln.from_bus), self.nodes.get(ln.to_bus)
@@ -229,9 +236,16 @@ class _Sample:
         self.z_list, self.u_list = ms.model._unpack_z(z), ms.model._unpack_u(u)
         self.frame_offset = frame_offset
         self._y: dict[int, np.ndarray] = {}
+        self._ydot: np.ndarray | None = None
+        self._z, self._u = z, u
 
     def _idx(self, b) -> int:
         return self.m.blocks.index(b)
+
+    def _output_rates(self) -> np.ndarray:
+        if self._ydot is None:
+            self._ydot = self.m.output_rates(self.x, self._z, self._u)
+        return self._ydot
 
     def y(self, b) -> np.ndarray:
         i = self._idx(b)
@@ -240,8 +254,20 @@ class _Sample:
         return self._y[i]
 
     def x2(self, b) -> complex:
-        xs = self.x_list[self._idx(b)]
-        return complex(xs[0], xs[1])
+        """A passive block's dq pair -- a node's voltage, a branch's current.
+
+        Read from the block's two grid *outputs* rather than its states, so
+        it works whether the element still integrates that pair or the
+        model-order reduction has made it algebraic
+        (:mod:`g2elin_core.reduction`). Both models output the same two
+        quantities in the same order (``_OUTG_PORTS``); only where they are
+        stored differs.
+        """
+        y, ports = self.y(b), _OUTG_PORTS[b.kind]
+        n = b.comp.n_out_s
+        d, q = (("vgd_g", "vgq_g") if b.kind == "node" else
+                ("icd_g", "icq_g") if b.kind == "load" else ("ild_g", "ilq_g"))
+        return complex(y[n + ports[d]], y[n + ports[q]])
 
     def v(self, node) -> complex:
         return self.x2(node)
@@ -273,7 +299,21 @@ class _Sample:
 
     def freq(self, node) -> float:
         i = self._idx(node)
-        dv = np.asarray(node.comp.f(self.x_list[i], self.z_list[i], self.u_list[i]), dtype=float)
+        if node.comp.n_states:
+            dv = np.asarray(node.comp.f(self.x_list[i], self.z_list[i], self.u_list[i]), dtype=float)
+        else:
+            # A quasi-stationary bus no longer integrates its own voltage,
+            # so its derivative comes from the algebraic system instead --
+            # exactly, not by differencing the trajectory (see
+            # NonlinearNetworkModel.output_rates). One extra sparse solve
+            # per sample, shared by every bus frequency in that sample.
+            ydot = self._output_rates()
+            n = node.comp.n_out_s
+            ports = _OUTG_PORTS[node.kind]
+            dv = np.array([
+                ydot[node.output_off + n + ports["vgd_g"]],
+                ydot[node.output_off + n + ports["vgq_g"]],
+            ])
         v = self.v(node)
         mag2 = v.real ** 2 + v.imag ** 2
         dphi = (v.real * dv[1] - v.imag * dv[0]) / mag2 if mag2 > 0 else 0.0

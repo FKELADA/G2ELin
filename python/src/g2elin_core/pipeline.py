@@ -28,14 +28,20 @@ def linearize_network(network: Network, result: PowerFlowResult) -> AssembledSys
 
     op = compute_operating_point(network, result)
     wb_val = 2 * 3.141592653589793 * network.f_hz
+    # Which dynamics each element keeps (network/schema.ModelOptions). The
+    # default is "all of them", i.e. exactly the model this pipeline built
+    # before model-order reduction existed.
+    net_modes = network.models.group_modes_for("network")
+    fixed_f = network.models.fixed_network_frequency
 
+    unit_modes = {d.id: network.unit_modes(d) for d in network.der_units if d.unit_type.value != "infinite_bus"}
     der_components = {}
     for der_id, sm_op in op.sm_ops.items():
-        der_components[der_id] = linearize_sm(sm_op)
+        der_components[der_id] = linearize_sm(sm_op, modes=unit_modes[der_id])
     for der_id, gfm_op in op.gfm_ops.items():
-        der_components[der_id] = linearize_gfm(gfm_op)
+        der_components[der_id] = linearize_gfm(gfm_op, modes=unit_modes[der_id])
     for der_id, gfl_op in op.gfl_ops.items():
-        der_components[der_id] = linearize_gfl(gfl_op)
+        der_components[der_id] = linearize_gfl(gfl_op, modes=unit_modes[der_id])
     for der_id, ib_kwargs in op.ib_ops.items():
         der_components[der_id] = linearize_ib(**ib_kwargs)
     # One reference frame per island (components/frame.py), each following
@@ -64,12 +70,18 @@ def linearize_network(network: Network, result: PowerFlowResult) -> AssembledSys
             "Switch that option off to give each bus its own capacitance, or add at least one Line."
         )
     node_components = {
-        bus_id: linearize_node(wb_val=wb_val, b_pu=node_b[bus_id], wg0=1.0, vgd_g0=vgd, vgq_g0=vgq)
+        bus_id: linearize_node(
+            wb_val=wb_val, b_pu=node_b[bus_id], wg0=1.0, vgd_g0=vgd, vgq_g0=vgq,
+            mode=net_modes["nodes"], fixed_frequency=fixed_f,
+        )
         for bus_id, (vgd, vgq) in op.node_vg.items()
     }
 
     line_components = [
-        linearize_line(wb_val=wb_val, r_pu=ln.r_pu, x_pu=ln.x_pu, wg0=1.0, ild_g0=i0[0], ilq_g0=i0[1])
+        linearize_line(
+            wb_val=wb_val, r_pu=ln.r_pu, x_pu=ln.x_pu, wg0=1.0, ild_g0=i0[0], ilq_g0=i0[1],
+            mode=net_modes["lines"], fixed_frequency=fixed_f,
+        )
         for ln, i0 in zip(network.lines, op.line_i0)
     ]
 
@@ -78,7 +90,10 @@ def linearize_network(network: Network, result: PowerFlowResult) -> AssembledSys
         r_pu, x_pu = op.load_rx[idx]
         vgd, vgq = op.node_vg[load.bus]
         load_components.append(
-            linearize_load(wb_val=wb_val, r_pu=r_pu, x_pu=x_pu, wg0=1.0, vgd_g0=vgd, vgq_g0=vgq)
+            linearize_load(
+                wb_val=wb_val, r_pu=r_pu, x_pu=x_pu, wg0=1.0, vgd_g0=vgd, vgq_g0=vgq,
+                mode=net_modes["loads"], fixed_frequency=fixed_f,
+            )
         )
 
     # Shunt reactors: the same RL branch a line uses, with its far end at
@@ -88,6 +103,7 @@ def linearize_network(network: Network, result: PowerFlowResult) -> AssembledSys
         idx: linearize_line(
             wb_val=wb_val, r_pu=rx[0], x_pu=rx[1], wg0=1.0,
             ild_g0=op.shunt_i0[idx][0], ilq_g0=op.shunt_i0[idx][1],
+            mode=net_modes["shunts"], fixed_frequency=fixed_f,
         )
         for idx, rx in op.shunt_rx.items()
     }
@@ -98,6 +114,7 @@ def linearize_network(network: Network, result: PowerFlowResult) -> AssembledSys
         idx: linearize_line(
             wb_val=wb_val, r_pu=rx[0], x_pu=rx[1], wg0=1.0,
             ild_g0=op.transformer_i0[idx][0], ilq_g0=op.transformer_i0[idx][1],
+            mode=net_modes["transformers"], fixed_frequency=fixed_f,
         )
         for idx, rx in op.transformer_rx.items()
     }

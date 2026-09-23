@@ -14,8 +14,11 @@ transformer turns-ratio calculations.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
+
+from g2elin_core import reduction
 
 
 class BusType(str, Enum):
@@ -152,6 +155,115 @@ class Shunt(BaseModel):
     name: str = ""
 
 
+class StateMode(str, Enum):
+    """What becomes of one state group when the model order is lowered --
+    see :func:`g2elin_core.components.base.apply_reduction`."""
+
+    DYNAMIC = reduction.DYNAMIC
+    ALGEBRAIC = reduction.ALGEBRAIC
+    FROZEN = reduction.FROZEN
+
+
+def _mode_values(states: dict) -> dict[str, str]:
+    """``{group: mode string}`` from a ``dict[str, StateMode]``.
+
+    Tolerates a plain string as well: ``model_copy(update=...)`` skips
+    validation, so a field set that way holds whatever it was given, and a
+    bare ``AttributeError`` here would say nothing about why.
+    """
+    return {k: (v.value if isinstance(v, StateMode) else str(v)) for k, v in states.items()}
+
+
+def _check_requirements(kind: str, modes: dict[str, str]) -> None:
+    """Refuse a combination whose algebraic groups depend on ones that are
+    still dynamic.
+
+    Without this the model still *builds* and then fails deep inside the
+    linearisation with "singular algebraic Jacobian", which is true and
+    tells the user nothing about which switch caused it.
+    """
+    unmet = reduction.element(kind).unmet_requirements(modes)
+    if not unmet:
+        return
+    parts = [
+        f"{group!r} needs {' and '.join(repr(m) for m in missing)} to be algebraic too"
+        for group, missing in unmet
+    ]
+    raise ValueError(
+        f"this {kind} model order isn't solvable: " + "; ".join(parts) + ". "
+        "A control loop's integrator doesn't appear in its own equation, so it can only be made "
+        "algebraic once what it regulates is an unknown as well."
+    )
+
+
+class ModelOptions(BaseModel):
+    """Which dynamics this network's models keep.
+
+    Lives on the ``Network`` rather than on each analysis request on
+    purpose: the level is part of what a saved case *is*, it travels with a
+    network that is exported and re-imported, and the analysis layer's model
+    cache is keyed on the network's own JSON, so changing a level correctly
+    invalidates every cached model without any extra plumbing.
+
+    ``*_level`` names a preset from :mod:`g2elin_core.reduction`;
+    ``*_states`` overrides individual state groups on top of it. A unit can
+    override both again through ``DerUnit.level`` / ``DerUnit.states``.
+    """
+
+    network_level: str = Field(
+        default="full",
+        description="Passive-element dynamics: 'full' (EMT) or 'quasi_stationary' (RMS). "
+        "See g2elin_core.reduction for the catalogue.",
+    )
+    network_states: dict[str, StateMode] = Field(
+        default_factory=dict,
+        description="Per-element-kind overrides (nodes/lines/loads/shunts/transformers) "
+        "applied on top of network_level",
+    )
+    network_frequency: Literal["frame", "nominal"] = Field(
+        default="frame",
+        description="Whether the w*L / w*C speed terms in the passive elements follow the "
+        "reference frame's own speed (the default, and what an EMT model does) or are pinned "
+        "to nominal, which is the convention phasor tools use.",
+    )
+    sm_level: str = Field(default="full", description="Default synchronous-machine level")
+    sm_states: dict[str, StateMode] = Field(default_factory=dict)
+    gfm_level: str = Field(default="full", description="Default grid-forming converter level")
+    gfm_states: dict[str, StateMode] = Field(default_factory=dict)
+    gfl_level: str = Field(default="full", description="Default grid-following converter level")
+    gfl_states: dict[str, StateMode] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _levels_and_groups_exist(self) -> "ModelOptions":
+        for kind in ("network", "sm", "gfm", "gfl"):
+            level = getattr(self, f"{kind}_level")
+            overrides = _mode_values(getattr(self, f"{kind}_states"))
+            # Raises with the available levels / allowed modes named.
+            modes = reduction.element(kind).modes_by_group(level, overrides)
+            _check_requirements(kind, modes)
+        return self
+
+    def modes_for(self, kind: str) -> dict[str, str]:
+        """``{symbol name: mode}`` for one element type."""
+        overrides = _mode_values(getattr(self, f"{kind}_states"))
+        return reduction.resolve_modes(kind, getattr(self, f"{kind}_level"), overrides)
+
+    def group_modes_for(self, kind: str) -> dict[str, str]:
+        """``{group id: mode}`` for one element type -- what the UI shows."""
+        overrides = _mode_values(getattr(self, f"{kind}_states"))
+        return reduction.element(kind).modes_by_group(getattr(self, f"{kind}_level"), overrides)
+
+    @property
+    def network_is_dynamic(self) -> bool:
+        """True when any passive element still integrates something -- the
+        property that decides whether a run is electromagnetic-transient."""
+        return reduction.DYNAMIC in self.group_modes_for("network").values()
+
+    @property
+    def fixed_network_frequency(self) -> bool:
+        return self.network_frequency == "nominal"
+
+
 class DerUnit(BaseModel):
     """A dispatchable unit (infinite bus, GFM, GFL or synchronous machine).
 
@@ -193,11 +305,38 @@ class DerUnit(BaseModel):
         description="Overrides of this unit's electrical/control parameters (e.g. KpCL, H, Ka), by the "
         "names sm_params()/gfm_params()/gfl_params() use; anything not listed keeps its default",
     )
+    level: str | None = Field(
+        default=None,
+        description="This unit's own model level, overriding the network's default for its type "
+        "(ModelOptions.sm_level / gfm_level / gfl_level). None = follow the network.",
+    )
+    states: dict[str, StateMode] = Field(
+        default_factory=dict,
+        description="Per-state-group overrides for this unit alone, applied on top of its level",
+    )
 
     @model_validator(mode="after")
     def _controller_only_for_gfm(self) -> "DerUnit":
         if self.controller is not None and self.unit_type is not UnitType.GFM:
             raise ValueError("controller is only meaningful for GFM units")
+        return self
+
+    @model_validator(mode="after")
+    def _level_and_groups_exist(self) -> "DerUnit":
+        kind = self.unit_type.value
+        if kind not in reduction.ELEMENTS:
+            # An infinite bus has no reducible dynamics of its own.
+            if self.level or self.states:
+                raise ValueError(f"a {kind} unit has no model levels to choose from")
+            return self
+        if self.level is not None or self.states:
+            overrides = _mode_values(self.states)
+            modes = reduction.element(kind).modes_by_group(self.level, overrides)
+            # Only checkable here against this unit's own settings; the
+            # combination with the network's defaults is checked again in
+            # Network.unit_group_modes' caller (validation.py), since a unit
+            # can be valid on its own and not on top of the network's level.
+            _check_requirements(kind, modes)
         return self
 
 
@@ -232,6 +371,11 @@ class Network(BaseModel):
         "unit's own speed (script_generic.m's convention) instead of standing on its own at nominal speed. "
         "Off by default, so any unit -- the slack included -- can be disconnected and a network can be "
         "split into islands (see components/frame.py).",
+    )
+    models: ModelOptions = Field(
+        default_factory=ModelOptions,
+        description="Which dynamics the element models keep -- the model-order reduction "
+        "settings. The default keeps everything, i.e. the full EMT model.",
     )
     buses: list[Bus]
     lines: list[Line] = Field(default_factory=list)
@@ -274,3 +418,29 @@ class Network(BaseModel):
             if b.id == bus_id:
                 return b
         raise KeyError(bus_id)
+
+    def unit_group_modes(self, der: DerUnit) -> dict[str, str]:
+        """``{group id: mode}`` for one unit: the network's default for its
+        type, with the unit's own ``level``/``states`` applied on top."""
+        kind = der.unit_type.value
+        level = der.level or getattr(self.models, f"{kind}_level")
+        overrides = _mode_values(getattr(self.models, f"{kind}_states"))
+        overrides.update(_mode_values(der.states))
+        modes = reduction.element(kind).modes_by_group(level, overrides)
+        # A unit's own settings and the network's defaults are each valid on
+        # their own; only their combination can be unsolvable, so this is
+        # where that is caught.
+        _check_requirements(kind, modes)
+        return modes
+
+    def unit_modes(self, der: DerUnit) -> dict[str, str]:
+        """``{symbol name: mode}`` for one unit -- what its ``*_dae()``
+        builder takes."""
+        e = reduction.element(der.unit_type.value)
+        by_group = self.unit_group_modes(der)
+        return {sym: by_group[g.id] for g in e.groups for sym in g.symbols}
+
+    def unit_level(self, der: DerUnit) -> str | None:
+        """The named level this unit's settings correspond to, or None when
+        its per-group overrides don't match any."""
+        return reduction.element(der.unit_type.value).matching_level(self.unit_group_modes(der))

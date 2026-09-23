@@ -99,9 +99,16 @@ def test_emt_measurements():
     assert np.allclose(meas["v_a_{bus4}"] + meas["v_b_{bus4}"] + meas["v_c_{bus4}"], 0.0, atol=1e-9)
     # A sampled 60 Hz waveform: phase a actually oscillates before T0.
     assert np.ptp(meas["v_a_{bus4}"][pre]) > 1.0
-    # The filter keeps the measured frequency far calmer than the raw one.
+    # The filter never adds excursion to the raw frequency. It used to remove
+    # most of it, but what it was removing was largely an artefact: with every
+    # bus borrowing line #1's susceptance the operating point was not the
+    # model's own equilibrium, so the instantaneous frequency opened with a
+    # spurious spike. The presets give each bus its own capacitance now, the
+    # raw signal is nearly as smooth as the filtered one, and asserting a
+    # large ratio here would be asserting the artefact back.
     post = t > 0
-    assert np.ptp(meas["f_{bus4}"][post]) < 0.5 * np.ptp(meas["f_inst_{bus4}"][post])
+    assert np.ptp(meas["f_{bus4}"][post]) <= np.ptp(meas["f_inst_{bus4}"][post])
+    assert np.ptp(meas["f_inst_{bus4}"][post]) < 0.1  # and both stay near nominal
     # The P_ref step of +0.05 pu raises SM 2's injection.
     p = meas["P_grid_{unit2}"]
     assert p[-1] > p[np.argmax(t >= 0)] + 0.01

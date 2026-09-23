@@ -10,6 +10,22 @@ several DER-mix variants (``WSCC/script_WSCC.m``'s ``switch model.name`` and
 each family is a shared ``_*_topology()`` builder plus one thin function per
 variant supplying just its own DER rows, rather than duplicating the shared
 part 8 (WSCC) or 4 (CIGRE) times over.
+
+**One deliberate departure from the MATLAB source.** These presets no longer
+set ``nodes_share_first_line_b``: every bus gets its own capacitance -- half
+the charging of the lines actually meeting at it, plus its capacitor banks --
+rather than all of them borrowing the first line's. The MATLAB convention is
+still available on any ``Network``, and the tests that exist to prove this
+port reproduces the toolbox set it explicitly; it is simply no longer what a
+user gets by default, for two reasons:
+
+- It is a convention, not physics. A bus's capacitance decides how fast its
+  voltage settles, and with a shared value that speed is fictitious.
+- It is incompatible with a quasi-stationary network
+  (:mod:`g2elin_core.reduction`), where the bus equation stops being about
+  speed and starts deciding *where* the voltage sits. A susceptance the power
+  flow never saw then moves the answer -- measurably: 0.03 pu on WSCC-9 (see
+  ``network/validation._model_order_issues``).
 """
 
 from __future__ import annotations
@@ -109,10 +125,6 @@ def _wscc9_network(name: str, ders: list[_WsccDer]) -> Network:
     ]
     return Network(
         name=name, f_hz=60.0, sn_mva=_SN_MVA,
-        # These are ports of the MATLAB toolbox's own cases, so they keep its
-        # node convention (every bus uses the first line's charging) and their
-        # numbers still match it -- see network/breakers.node_capacitances.
-        nodes_share_first_line_b=True,
         buses=topo_buses + der_buses, lines=lines, transformers=transformers,
         loads=loads, der_units=der_units,
     )
@@ -347,10 +359,6 @@ def _cigre_network(name: str, ders: list[_CigreDer], terminal_names: list[str]) 
     ]
     return Network(
         name=name, f_hz=50.0, sn_mva=_CIGRE_SN_MVA,
-        # These are ports of the MATLAB toolbox's own cases, so they keep its
-        # node convention (every bus uses the first line's charging) and their
-        # numbers still match it -- see network/breakers.node_capacitances.
-        nodes_share_first_line_b=True,
         buses=raw_buses + der_buses, lines=lines, transformers=transformers,
         loads=loads, der_units=der_units,
     )
@@ -500,10 +508,6 @@ def _smib(
 
     return Network(
         name=f"{'SMIB' if grid_unit is UnitType.INFINITE_BUS else 'SMSM'}_{unit_type.value}",
-        # These are ports of the MATLAB toolbox's own cases, so they keep its
-        # node convention (every bus uses the first line's charging) and their
-        # numbers still match it -- see network/breakers.node_capacitances.
-        nodes_share_first_line_b=True,
         f_hz=50.0,
         sn_mva=_CIGRE_SN_MVA,
         buses=buses,
@@ -669,10 +673,6 @@ def cigre_interconnected_1sm_1gfm_1gfl() -> Network:
                      sn_mva=_CIGRE_SN_MVA, name="hv_mv_xfmr")]
     return Network(
         name="CIGRE_Interconnected_1SM_1GFM_1GFL", f_hz=50.0, sn_mva=_CIGRE_SN_MVA,
-        # These are ports of the MATLAB toolbox's own cases, so they keep its
-        # node convention (every bus uses the first line's charging) and their
-        # numbers still match it -- see network/breakers.node_capacitances.
-        nodes_share_first_line_b=True,
         buses=raw_buses + der_buses + [grid_bus], lines=lines, transformers=transformers,
         loads=loads, der_units=der_units,
     )
@@ -683,9 +683,7 @@ def cigre_interconnected_1sm_1gfm_1gfl() -> Network:
 # 900 MVA machines each, joined by a weak 220 km double-circuit tie. The
 # textbook case for inter-area oscillations and for what a PSS is for.
 #
-# Unlike every preset above this one is not a port of the MATLAB toolbox, so it
-# uses the tool's own conventions throughout: each bus gets its own capacitance
-# (nodes_share_first_line_b off) and each unit its own transformer.
+# Transcribed from the book rather than ported from the MATLAB toolbox.
 #
 # The published data is transcribed from the book; the operating point it
 # produces is checked against the book's own in tests/test_kundur.py (the

@@ -52,25 +52,26 @@ def test_algebraic_solve_at_operating_point_converges(model):
     assert np.allclose(z_sol, z_guess, atol=1e-6)
 
 
-def test_network_operating_point_is_not_a_perfect_equilibrium(model):
-    """Documents a real, expected finding rather than asserting it away:
-    the "every node uses line #1's susceptance" quirk (see
-    components/sm.py) means the per-component operating point isn't quite
-    a network-wide KCL/equilibrium fix point -- solve_algebraic's u_sol
-    differs from the naive per-component u_guess by ~0.08 (small relative
-    to per-unit scale ~1, but not solver noise), and xdot at that point is
-    correspondingly nonzero for node-voltage and SM current states. This
-    doesn't affect linear modal analysis (a Jacobian is valid at any point,
-    verified in test_nonlinear_cross_validation.py), but it does mean an
-    EMT simulation starting here has a real initial transient to settle,
-    not just numerical noise.
+def test_the_operating_point_is_nearly_but_not_exactly_an_equilibrium(model):
+    """The per-component operating points are built independently, so the
+    network-wide fix point they imply is close but not exact:
+    ``solve_algebraic``'s ``u_sol`` moves off the naive per-component
+    ``u_guess``. It doesn't affect linear modal analysis (a Jacobian is valid
+    at any point, verified in test_nonlinear_cross_validation.py); it means a
+    time-domain run starting here has a small real transient to settle.
+
+    It used to be *much* bigger -- around 0.08 pu -- because every bus
+    borrowed the first line's susceptance. The presets no longer do, so what
+    is left is only the genuine per-component mismatch.
     """
     x0 = model.initial_state()
     z_guess, u_guess = model.initial_algebraic_guess()
     u_exo0 = model.default_u_exo()
 
     z_sol, u_sol = model.solve_algebraic(x0, u_exo0, z_guess, u_guess)
-    assert np.max(np.abs(u_sol - u_guess)) > 0.01  # real, not floating-point-scale
+    offset = np.max(np.abs(u_sol - u_guess))
+    assert offset > 1e-9, "not solver noise: the guess really is not the fix point"
+    assert offset < 0.02, f"the borrowed-susceptance error was ~0.08; got {offset}"
 
 
 def _non_rotating_mask(state_names: list[str]) -> np.ndarray:

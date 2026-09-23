@@ -29,9 +29,20 @@ from g2elin_core.timedomain import build_nonlinear_network
 
 
 def _fixed(build=wscc9_3sm):
-    """A preset with each bus using its own capacitance instead of line #1's."""
+    """A preset with each bus using its own capacitance -- the default since
+    the presets stopped setting the MATLAB convention, so this is now just
+    ``build()``; kept as a name because the tests below read better for it."""
     net = build()
     net.nodes_share_first_line_b = False
+    return net
+
+
+def _matlab(build=wscc9_3sm):
+    """The same preset on the MATLAB toolbox's convention: every bus borrows
+    the first line's charging. No longer the default, still supported, and
+    still what the ported cases have to be able to reproduce."""
+    net = build()
+    net.nodes_share_first_line_b = True
     return net
 
 
@@ -59,8 +70,7 @@ def test_each_bus_gets_half_the_charging_of_its_own_lines():
 
 
 def test_parity_mode_gives_every_bus_the_first_lines_charging():
-    net = wscc9_3sm()  # the presets set nodes_share_first_line_b
-    assert net.nodes_share_first_line_b
+    net = _matlab()
     assert set(node_capacitances(net).values()) == {net.lines[0].b_pu}
 
 
@@ -73,9 +83,14 @@ def test_a_units_own_terminal_bus_has_no_node_of_its_own():
 
 def test_per_bus_capacitance_makes_the_operating_point_an_equilibrium():
     """The borrowed value leaves the model being linearized about a point that
-    is not its own equilibrium: bus voltages drift with no disturbance."""
-    borrowed = _node_residual(wscc9_3sm())
-    fixed = _node_residual(_fixed())
+    is not its own equilibrium: bus voltages drift with no disturbance.
+
+    This is why the presets no longer borrow it. With a dynamic network the
+    drift is a transient that decays in microseconds; with a quasi-stationary
+    one it cannot decay at all, and moves the answer instead (see
+    ``network/validation._model_order_issues``)."""
+    borrowed = _node_residual(_matlab())
+    fixed = _node_residual(wscc9_3sm())
     assert borrowed > 100.0                      # ~178 pu/s on this preset
     assert fixed < 1.0                           # ~0.09
     assert fixed < borrowed / 100
@@ -208,7 +223,22 @@ def test_an_open_reactor_breaker_drops_its_block():
     assert linearize_network(reduced, run_power_flow(reduced)).A.shape[0] == n_states
 
 
-# --- the presets keep reproducing the MATLAB toolbox ---------------------------
+# --- the presets use their own capacitance; the MATLAB one is still there -----
 @pytest.mark.parametrize("build", [wscc9_3sm, cigre_interconnected_1sm_1gfm_1gfl])
-def test_ported_presets_stay_on_the_matlab_convention(build):
-    assert build().nodes_share_first_line_b is True
+def test_presets_give_every_bus_its_own_capacitance(build):
+    """The ported presets used to carry the toolbox's convention so their
+    numbers matched it exactly. They no longer do: it is a convention rather
+    than physics, and it is incompatible with a quasi-stationary network."""
+    net = build()
+    assert net.nodes_share_first_line_b is False
+    caps = node_capacitances(net)
+    assert len(set(caps.values())) > 1, "every bus borrowing one value is the old convention"
+
+
+@pytest.mark.parametrize("build", [wscc9_3sm, cigre_interconnected_1sm_1gfm_1gfl])
+def test_the_matlab_convention_is_still_available(build):
+    """Dropping it as the default must not drop it as an option -- it is how
+    a result gets compared against the original toolbox."""
+    net = _matlab(build)
+    assert set(node_capacitances(net).values()) == {net.lines[0].b_pu}
+    linearize_network(net, run_power_flow(net))

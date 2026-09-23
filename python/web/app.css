@@ -267,6 +267,23 @@ table.edit input[type="text"] { width: 8rem; }
 .pt { stroke: var(--surface-1); stroke-width: 1.5; cursor: pointer; }
 .pt.good { fill: var(--good); } .pt.warning { fill: var(--warning); } .pt.critical { fill: var(--critical); }
 .pt.sel { stroke: var(--text-primary); stroke-width: 2.5; }
+/* A reference-angle mode is drawn as a cross: it has no interior to fill, and
+   it is not really a mode of the system anyway (see modal.classify). */
+.pt.hollow { fill: none; stroke-width: 2; }
+.pt.hollow.good { stroke: var(--good); } .pt.hollow.warning { stroke: var(--warning); }
+.pt.hollow.critical { stroke: var(--critical); }
+
+/* The eigenvalue map's kind legend doubles as a filter, so each entry is a
+   button rather than a caption. */
+.kind-legend { gap: 0.3rem 0.5rem; margin-bottom: 0.5rem; }
+.kind-toggle {
+  display: inline-flex; align-items: center; padding: 0.18rem 0.55rem;
+  font-size: 0.76rem; font-family: var(--font-ui); background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: 999px; color: var(--text-secondary); cursor: pointer;
+}
+.kind-toggle:hover { border-color: var(--border-strong); }
+.kind-toggle.off { opacity: 0.45; text-decoration: line-through; }
+.kind-toggle .muted { margin-left: 0.35em; font-family: var(--font-mono); font-size: 0.68rem; }
 .heat-table { border-collapse: separate; border-spacing: 2px; width: auto; }
 .heat-table th { font-family: var(--font-mono); font-size: 0.6rem; color: var(--text-muted); font-weight: 500; padding: 0.2rem 0.35rem; white-space: nowrap; background: none; position: static; }
 .heat-table td { font-size: 0.64rem; text-align: center; padding: 0.22rem 0.4rem; border-radius: 3px; border: 0; }
@@ -553,3 +570,66 @@ details.card[open] > summary { margin-bottom: 0.8rem; }
 .scope-edit + .scope-edit { margin-top: 0.5rem; }
 .scope-edit .scope-title { width: 11rem; font-weight: 600; }
 .scope-edit .scope-picker { flex: 1; min-width: 280px; }
+
+/* --- Model order (web/js/model_order.js) ------------------------------------
+   The per-state-group controls are a table on purpose: every row is the same
+   question ("what happens to this group?") asked of a different group, and a
+   table is what makes that readable at ten rows. */
+.mo-section { border: 1px solid var(--border); border-radius: 8px; padding: 0.55rem 0.8rem; margin-bottom: 0.6rem; background: var(--surface-1); }
+.mo-section > summary { cursor: pointer; font-weight: 600; font-size: 0.86rem; }
+.mo-section > summary .muted { font-weight: 400; }
+.mo-head { display: flex; align-items: center; gap: 0.7rem; margin-top: 0.6rem; flex-wrap: wrap; }
+.mo-head .mo-level { min-width: 230px; }
+.mo-count { font-family: var(--font-mono); font-size: 0.74rem; color: var(--text-muted); }
+.mo-note { font-size: 0.78rem; color: var(--text-secondary); margin: 0.45rem 0 0; }
+.mo-note.warn { color: #9a6a00; }
+.mo-groups { margin-top: 0.6rem; }
+.mo-groups td { padding: 0.3rem 0.5rem 0.3rem 0; border-bottom: 1px solid var(--gridline); font-family: var(--font-ui); white-space: normal; }
+.mo-groups td:last-child { width: 9.5rem; text-align: right; }
+.mo-groups tr.locked td { opacity: 0.6; }
+.mo-groups select { width: 9rem; padding: 0.25rem 0.4rem; font-size: 0.78rem; }
+.mo-g { display: block; font-size: 0.82rem; }
+.mo-s { display: block; font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-muted); }
+.mo-legend { display: flex; flex-direction: column; gap: 0.15rem; font-size: 0.72rem; color: var(--text-muted); margin: 0.6rem 0 0; }
+.mo-legend b { font-family: var(--font-mono); font-weight: 600; margin-right: 0.4em; }
+.mo-summary { margin-bottom: 0.9rem; }
+.mo-badge { display: flex; align-items: center; gap: 0.6rem; font-size: 0.9rem; }
+.mo-units { margin-top: 0.7rem; max-width: 560px; }
+/* These two sit directly on the page, not in a scrolling .tablewrap, so the
+   app-wide sticky header has nothing to stick *to* and pins itself to the
+   viewport instead -- floating down over its own rows as the page scrolls. */
+.mo-units thead th, .mo-groups thead th { position: static; }
+.mo-adequacy { margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 0.9rem; }
+.mo-notes { margin: 0.6rem 0 0.8rem; padding-left: 1.1rem; font-size: 0.82rem; color: var(--text-secondary); }
+.mo-notes li { margin-bottom: 0.25rem; }
+.mo-h4 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin: 0.9rem 0 0.4rem; }
+tbody tr.bad-row td { background: #fdeeee; }
+#insp-model-order .mo-section { margin-top: 0.7rem; }
+#insp-model-order .mo-head .mo-level { min-width: 0; flex: 1; }
+
+/* Solver settings on the time-domain page (web/js/emt.js) -- a <details>
+   because the defaults are right for most runs; it opens when they aren't.
+
+   A grid, not a flex row: each setting carries a hint of its own length, and
+   in a row those different heights push the controls out of line with each
+   other. Grid cells in the same row stretch to a common height, so every
+   label sits on one line, every control on the next, and each hint is pinned
+   to the bottom of its own cell. */
+.solver-box > summary { cursor: pointer; font-weight: 600; font-size: 0.9rem; }
+.solver-box > summary .card-sub { font-weight: 400; }
+.solver-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 1rem 1.3rem;
+  align-items: stretch;
+  margin-top: 0.9rem;
+}
+.solver-grid .field { display: flex; flex-direction: column; max-width: none; margin: 0; }
+/* A select and a number input render a couple of pixels apart by default,
+   which is enough to leave the hints under them off by the same amount. */
+.solver-grid .field > input,
+.solver-grid .field > select { width: 100%; box-sizing: border-box; height: 36px; }
+/* Hints start right under their control rather than being pushed to the
+   bottom of the cell: label, control, hint then reads as one rhythm across
+   the whole row, and only the ends are ragged. */
+.solver-grid .field > .hint { padding-top: 0.15rem; }

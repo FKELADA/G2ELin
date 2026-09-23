@@ -31,7 +31,7 @@ const PowerFlowPage = {
     const page = $("#page-powerflow");
     page.innerHTML = `
       <div class="page-head"><div class="crumb">Analysis</div><h1>Power Flow</h1>
-        <p>Steady-state AC solution: every bus voltage and angle, and every branch flow, at the current dispatch — the operating point modal analysis and EMT simulation start from. Run it once on the initial operating point, or as a batch while scaling loads and unit setpoints.</p></div>
+        <p>Steady-state AC solution: every bus voltage and angle, and every branch flow, at the current dispatch — the operating point modal analysis and time-domain simulation start from. Run it once on the initial operating point, or as a batch while scaling loads and unit setpoints.</p></div>
       <div id="pf-context"></div>
       <div class="card">
         <div class="card-title">Solver settings</div>

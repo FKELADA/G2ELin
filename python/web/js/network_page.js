@@ -141,6 +141,7 @@ const NetworkPage = {
         </div>
         <aside class="card inspector" id="net-inspector" style="display:none"></aside>
       </div>
+      <div class="card"><div class="card-title">Model order <span class="card-sub">which dynamics the models keep — this is what makes a time-domain run EMT or RMS</span></div><div id="net-model-order"><p class="empty">No network loaded.</p></div></div>
       <div class="card"><div class="card-title">Validation <span class="card-sub" id="net-valid-sub"></span></div><div id="net-validation"><p class="empty">No network loaded.</p></div></div>
       <details class="card" id="net-tables"><summary>Table view — bulk edit every element</summary><div id="net-tables-body"></div></details>`;
 
@@ -178,10 +179,12 @@ const NetworkPage = {
     SavedNetworks.mount();
 
     on("network:loaded", () => { this.closeInspector(); this.refreshAll(); });
+    on("network:changed", () => ModelOrder.refreshSummary());
     on("network:layout", () => { this.view.render(); this.view.fit(); });
     on("network:changed", () => { this.renderSummary(); this.scheduleValidation(); });
     on("network:derived", () => this.refreshControlParams());
     on("network:changed", () => this.refreshControlParams());
+    on("network:changed", () => this.refreshUnitModelOrder());
     this.refreshAll();
   },
 
@@ -210,6 +213,9 @@ const NetworkPage = {
     this.renderSummary();
     this.view.render();
     this.scheduleValidation(true);
+    // Re-mounted rather than refreshed: which unit types a network has
+    // decides which model-order sections exist at all.
+    ModelOrder.mount($("#net-model-order")).catch(e => { $("#net-model-order").innerHTML = errorHtml(e); });
     if ($("#net-tables")?.open) this.renderTables();
   },
 
@@ -357,6 +363,7 @@ const NetworkPage = {
         html += `<div class="insp-section"><h4><span class="swatch" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${UNIT_COLOR[der.unit_type]}"></span>${esc(UNIT_NAME[der.unit_type] || "Unit")}<span class="spacer"></span><button class="ghost small" data-act="remove-der" data-index="${di}">Remove unit</button></h4>
           ${this.formHtml("der", der, `der:${di}`)}
           ${this.retypeNoteHtml(der)}
+          <div id="insp-model-order"></div>
           <div id="insp-ctrl"></div></div>`;
       } else {
         html += `<div class="insp-section"><h4>Generation unit</h4><div class="controls" style="align-items:center"><select id="insp-attach-type">${Object.keys(UNIT_LABEL).map(u => `<option value="${u}">${UNIT_NAME[u]}</option>`).join("")}</select><button class="secondary small" data-act="attach-der">Attach to this bus</button></div>
@@ -381,6 +388,7 @@ const NetworkPage = {
     box.innerHTML = html;
     this.bindInspector(box);
     this.refreshControlParams();
+    this.refreshUnitModelOrder();
     this.view.render();
   },
 
@@ -590,7 +598,27 @@ const NetworkPage = {
     }
   },
 
-    refreshControlParams() {
+    // This unit's own model level, overriding the network default for its
+    // type. Rendered in the inspector so the choice sits next to the
+    // parameters it decides the fate of.
+    refreshUnitModelOrder() {
+    const box = $("#insp-model-order");
+    if (!box || !this.selected || this.selected.kind !== "bus") return;
+    const der = state.network.der_units.find(d => d.bus === this.selected.id);
+    if (!der || !ModelOrder.catalogue || !ModelOrder.catalogue[der.unit_type]) { if (box) box.innerHTML = ""; return; }
+    const net = ModelOrder.matchingLevel(der.unit_type, ModelOrder.groupModes(der.unit_type));
+    const own = der.level || der.states && Object.keys(der.states).length;
+    box.innerHTML = `<details class="mo-section"${own ? " open" : ""}>
+      <summary>Model order${own ? ` <span class="badge warn">overridden</span>` : ` <span class="muted">— following the network default</span>`}</summary>
+      ${ModelOrder.controlsHtml(der.unit_type, der)}
+      ${own ? `<button class="ghost small" data-act="mo-reset">Follow the network default (${esc(ModelOrder.levelLabel(der.unit_type, net))})</button>` : ""}
+    </details>`;
+    ModelOrder.bind(box);
+    const reset = $("[data-act='mo-reset']", box);
+    if (reset) reset.addEventListener("click", () => { der.level = null; der.states = {}; networkChanged(); this.refreshUnitModelOrder(); });
+  },
+
+  refreshControlParams() {
     const box = $("#insp-ctrl");
     if (!box || !this.selected || this.selected.kind !== "bus") return;
     const der = state.network.der_units.find(d => d.bus === this.selected.id);

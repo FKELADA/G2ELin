@@ -1,4 +1,4 @@
-// EMT simulation page: integrates the nonlinear network model after a state
+// Time-domain simulation page: integrates the nonlinear network model after a state
 // offset, an input step, or a network event (breaker opening, load step,
 // phase jump) at T0 = 0. Trajectories start T_PRE before T0 so
 // the undisturbed x0 is visible; optionally the linearised model's response
@@ -34,9 +34,36 @@ const EmtPage = {
     if (this.inited) return;
     this.inited = true;
     $("#page-emt").innerHTML = `
-      <div class="page-head"><div class="crumb">Analysis</div><h1>EMT Simulation</h1>
-        <p>Integrates the network's full nonlinear differential-algebraic equations (a coupled Newton solve at every step) after a disturbance at T0 = 0 — a state offset, an input step, or a network event (a breaker opening, a load step, a phase jump) — the ground truth that modal analysis linearises. Plots start ${EMT_T_PRE} s before T0 to show the initial operating point x0.</p></div>
+      <div class="page-head"><div class="crumb">Analysis</div><h1>Time-Domain Simulation</h1>
+        <p>Integrates the network's nonlinear differential-algebraic equations (a coupled Newton solve at every step) after a disturbance at T0 = 0 — a state offset, an input step, or a network event (a breaker opening, a load step, a phase jump) — the ground truth that modal analysis linearises. Whether that is an <b>EMT</b> or an <b>RMS</b> run is decided by the model order set on the Network page, shown below. Plots start ${EMT_T_PRE} s before T0 to show the initial operating point x0.</p></div>
+      <div id="emt-model-class"></div>
       <div id="emt-context"></div>
+      <details class="card solver-box" id="emt-solver-box">
+        <summary>Solver <span class="card-sub" id="emt-solver-sub"></span></summary>
+        <div class="solver-grid">
+          <div class="field"><label for="emt-stepping">Stepping</label>
+            <select id="emt-stepping">
+              <option value="variable" selected>Variable (error-controlled)</option>
+              <option value="fixed">Fixed (like an EMT program)</option>
+            </select>
+            <span class="hint">Variable spends steps only where the trajectory needs them. Fixed costs what you can predict, and reproduces exactly.</span></div>
+          <div class="field" data-step="variable"><label for="emt-solver">Method</label>
+            <select id="emt-solver"></select>
+            <span class="hint" id="emt-solver-note"></span></div>
+          <div class="field" data-step="variable"><label for="emt-rtol">Relative tolerance</label>
+            <input type="number" id="emt-rtol" step="any" value="1e-4">
+            <span class="hint">The single biggest speed knob. 1e-3 is a screening run, 1e-6 a publication one.</span></div>
+          <div class="field" data-step="variable"><label for="emt-atol">Absolute tolerance</label>
+            <input type="number" id="emt-atol" step="any" value="1e-6">
+            <span class="hint">Only matters for signals near zero; the relative tolerance governs the rest.</span></div>
+          <div class="field" data-step="variable"><label for="emt-maxstep">Max step (s)</label>
+            <input type="number" id="emt-maxstep" step="any" placeholder="unbounded">
+            <span class="hint">Leave empty. Capping it only forces steps the solver didn't need; output spacing is the timestep below.</span></div>
+          <div class="field" data-step="fixed"><label for="emt-fixedstep">Time step (s)</label>
+            <input type="number" id="emt-fixedstep" step="any" placeholder="one per output point">
+            <span class="hint">Trapezoidal, so a large step cannot blow up — but it can ring at two samples per cycle. If it does, use a smaller step.</span></div>
+        </div>
+      </details>
       <div class="card">
         <div class="card-title">Disturbance at T0</div>
         <div class="btn-group" role="group" aria-label="Disturbance type" style="margin-bottom:0.9rem">
@@ -80,7 +107,7 @@ const EmtPage = {
           <label class="check"><input type="checkbox" id="emt-live" checked> Trace live <span class="muted" style="font-size:0.76rem">(streams solver steps; slower)</span></label>
         </div>
         <div class="controls" style="margin-top:1rem;align-items:center">
-          <button id="emt-run"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>Run EMT simulation</button>
+          <button id="emt-run"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>Run simulation</button>
           <button class="secondary" id="emt-stop" style="display:none">Stop</button>
           <span class="spinner" id="emt-spin"></span>
         </div>
@@ -173,6 +200,8 @@ const EmtPage = {
   async onShow() {
     $("#emt-context").innerHTML = networkContextHtml({ plot: true });
     bindContextPlot($("#emt-context"));
+    this.refreshModelClass();
+    this.initSolver();
     if (!state.network) return;
     if (this.names && this.names.version === state.version) return;
     const sel = $("#emt-perturb");
@@ -210,6 +239,31 @@ const EmtPage = {
   // are many of them (two per element) and a study rarely starts there. What
   // is already plotted is never hidden away.
   hideNetStates() { return $("#emt-hide-net")?.checked !== false; },
+
+  // What kind of simulation the current model order makes this. Derived
+  // server-side (analysis.model_summary_response) so the definition lives
+  // in one place; shown here because this is the page where it decides what
+  // the results mean.
+  async refreshModelClass() {
+    const box = $("#emt-model-class");
+    if (!box || !state.network) return;
+    const version = state.version;
+    try {
+      await ModelOrder.load();
+      const r = await netPost("model");
+      if (version !== state.version) return;
+      const cls = { EMT: "accent", RMS: "warn", Mixed: "" }[r.model_class] || "";
+      const saved = r.n_states_full - r.n_states;
+      box.innerHTML = `<div class="notice" style="margin-bottom:1rem">
+        <span><b class="badge ${cls}">${esc(r.model_class)}</b>
+        ${esc(MODEL_CLASS_NOTE[r.model_class] || "")}
+        <a href="#/network" style="white-space:nowrap">Change the model order →</a>
+        <span class="muted"> (${r.n_states} states${saved > 0 ? `, ${saved} fewer than full order` : ""})</span></span></div>`;
+    } catch (e) {
+      if (version !== state.version) return;
+      box.innerHTML = "";
+    }
+  },
 
   refreshSignalOptions() {
     const all = this.allOptions || [];
@@ -321,7 +375,61 @@ const EmtPage = {
       ...this.wanted(),
       t_pre: EMT_T_PRE,
       linear_overlay: $("#emt-linear").checked,
+      ...this.solverSettings(),
     };
+  },
+
+  // The solver half of the request. Empty fields are left out entirely so
+  // the server's own defaults apply, rather than being sent as 0 or NaN.
+  solverSettings() {
+    const stepping = $("#emt-stepping")?.value || "variable";
+    if (stepping === "fixed") {
+      const step = parseFloat($("#emt-fixedstep").value);
+      return { stepping: "fixed", ...(step > 0 ? { fixed_step: step } : {}) };
+    }
+    const rtol = parseFloat($("#emt-rtol").value);
+    const atol = parseFloat($("#emt-atol").value);
+    const maxStep = parseFloat($("#emt-maxstep").value);
+    return {
+      stepping: "variable",
+      solver: $("#emt-solver").value || "Radau",
+      ...(rtol > 0 ? { rtol } : {}),
+      ...(atol > 0 ? { atol } : {}),
+      ...(maxStep > 0 ? { max_step: maxStep } : {}),
+    };
+  },
+
+  // Fills the method picker from GET /api/solvers and keeps the two
+  // stepping modes' fields showing only when they apply.
+  async initSolver() {
+    const box = $("#emt-solver-box");
+    if (!box || this._solverInited) return;
+    this._solverInited = true;
+    const sync = () => {
+      const mode = $("#emt-stepping").value;
+      $$("#emt-solver-box [data-step]").forEach(f => {
+        f.style.display = f.dataset.step === mode ? "" : "none";
+      });
+      const s = this.solverInfo && this.solverInfo[$("#emt-solver").value];
+      const note = $("#emt-solver-note");
+      if (note) note.textContent = s ? s.note : "";
+      $("#emt-solver-sub").textContent = mode === "fixed"
+        ? "— fixed step, trapezoidal (as an EMT program does)"
+        : `— ${$("#emt-solver").value}, rtol ${$("#emt-rtol").value}`;
+    };
+    try {
+      const r = await api("/api/solvers");
+      this.solverInfo = Object.fromEntries(r.solvers.map(s => [s.id, s]));
+      $("#emt-solver").innerHTML = r.solvers.map(s =>
+        `<option value="${s.id}"${s.id === r.default ? " selected" : ""}>${esc(s.label)}</option>`).join("");
+      $("#emt-rtol").value = r.default_rtol;
+      $("#emt-atol").value = r.default_atol;
+    } catch (e) {
+      $("#emt-solver").innerHTML = `<option value="Radau">Radau</option>`;
+    }
+    ["#emt-stepping", "#emt-solver", "#emt-rtol"].forEach(sel =>
+      $(sel).addEventListener("change", sync));
+    sync();
   },
 
   // 3-phase waveforms need a fine timestep (a 50/60 Hz sine sampled every

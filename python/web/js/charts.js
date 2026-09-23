@@ -338,16 +338,49 @@ function eigenGridLines(sx, sy, xMax, yMax, W, H, PAD) {
     + yTicks.map(v => `<text class="eigen-ticklabel" x="${PAD - 6}" y="${sy(v).toFixed(1)}" text-anchor="end" dominant-baseline="middle">${invSymlog(v).toExponential(1)}</text>`).join("");
 }
 
-function eigenvalueMapSvg(modes, selectedMode) {
+// One marker shape per mode category. Colour on this map already means
+// stability, so shape is the channel that is free -- and it is the one that
+// survives greyscale printing and colour-blindness anyway. Drawn as a path
+// around (0,0) so the same code can place and scale every shape.
+const MODE_MARKERS = {
+  synchronisation: r => `M0,${-r * 1.25}L${r * 1.15},${r * 0.75}L${-r * 1.15},${r * 0.75}Z`,  // triangle
+  control:         r => `M${-r},${-r}h${2 * r}v${2 * r}h${-2 * r}Z`,                          // square
+  unit_electrical: r => `M0,${-r * 1.3}L${r * 1.3},0L0,${r * 1.3}L${-r * 1.3},0Z`,            // diamond
+  network:         r => `M${-r},0a${r},${r} 0 1,0 ${2 * r},0a${r},${r} 0 1,0 ${-2 * r},0`,    // circle
+  mixed:           r => `M0,${-r * 1.35}L${r * 0.42},${-r * 0.42}L${r * 1.35},0L${r * 0.42},${r * 0.42}`
+                        + `L0,${r * 1.35}L${-r * 0.42},${r * 0.42}L${-r * 1.35},0L${-r * 0.42},${-r * 0.42}Z`,
+  reference:       r => `M${-r},${-r}L${r},${r}M${-r},${r}L${r},${-r}`,                       // cross
+};
+const MODE_MARKER_FALLBACK = MODE_MARKERS.network;
+
+function modeMarkerPath(category, r) {
+  return (MODE_MARKERS[category] || MODE_MARKER_FALLBACK)(r);
+}
+
+// The legend entry for one category, as a small standalone SVG.
+function modeMarkerSwatch(category) {
+  // The cross has no interior, so it needs the hollow class to be stroked in
+  // the series colour -- .pt's default stroke is the card background, which
+  // would draw it invisibly.
+  const hollow = category === "reference" ? " hollow" : "";
+  return `<svg width="14" height="14" viewBox="-7 -7 14 14" style="vertical-align:-3px;margin-right:0.35em" aria-hidden="true">
+    <path d="${modeMarkerPath(category, 4.4)}" class="pt good${hollow}"/></svg>`;
+}
+
+function eigenvalueMapSvg(modes, selectedMode, hidden = null) {
   const W = 820, H = 440, PAD = 50;
   const xs = modes.map(m => symlog(m.real)), ys = modes.map(m => symlog(m.imag / (2 * Math.PI)));
   const xMax = Math.max(1, ...xs.map(Math.abs)), yMax = Math.max(1, ...ys.map(Math.abs));
   const sx = v => PAD + ((v + xMax) / (2 * xMax)) * (W - 2 * PAD);
   const sy = v => H - PAD - ((v + yMax) / (2 * yMax)) * (H - 2 * PAD);
-  const points = modes.map(m => {
+  const shown = hidden ? modes.filter(m => !hidden.has(m.category || "mixed")) : modes;
+  const points = shown.map(m => {
     const st = statusOf(m.real);
-    return `<circle cx="${sx(symlog(m.real)).toFixed(1)}" cy="${sy(symlog(m.imag / (2 * Math.PI))).toFixed(1)}" r="${m.mode === selectedMode ? 6.5 : 4.5}" class="pt ${st.cls}${m.mode === selectedMode ? " sel" : ""}" data-mode="${m.mode}"></circle>`;
-  }).join("");
+    const sel = m.mode === selectedMode;
+    const cat = m.category || "mixed";
+    // The selected mode is drawn last so it is never hidden under a neighbour.
+    return `<path d="${modeMarkerPath(cat, sel ? 6.2 : 4.2)}" transform="translate(${sx(symlog(m.real)).toFixed(1)},${sy(symlog(m.imag / (2 * Math.PI))).toFixed(1)})" class="pt ${st.cls}${sel ? " sel" : ""}${cat === "reference" ? " hollow" : ""}" data-mode="${m.mode}" data-cat="${cat}"></path>`;
+  }).sort((a, b) => (a.includes(" sel") ? 1 : 0) - (b.includes(" sel") ? 1 : 0)).join("");
   return `<svg class="eigenmap-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Eigenvalue map (scroll to zoom, drag to pan)" style="width:100%;height:auto;display:block">
     ${eigenGridLines(sx, sy, xMax, yMax, W, H, PAD)}
     <line x1="${PAD}" y1="${sy(0)}" x2="${W - PAD}" y2="${sy(0)}" stroke="var(--baseline)" stroke-width="1"/>

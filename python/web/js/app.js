@@ -31,7 +31,7 @@ function route() {
   $("#nav-docs").classList.toggle("active", page === "docs");
   $(".sidebar").classList.remove("open");
   if (page !== "docs") window.scrollTo(0, 0);
-  document.title = `G2ELin — ${{ home: "Home", docs: "Documentation", network: "Network", powerflow: "Power Flow", modal: "Modal Analysis", emt: "EMT Simulation" }[page]}`;
+  document.title = `G2ELin — ${{ home: "Home", docs: "Documentation", network: "Network", powerflow: "Power Flow", modal: "Modal Analysis", emt: "Time-Domain Simulation" }[page]}`;
 }
 
 function updateSidebarNetwork() {

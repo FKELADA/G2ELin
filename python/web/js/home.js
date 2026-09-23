@@ -40,7 +40,7 @@ const HomePage = {
           ["Newton-Raphson, Iwamoto, fast-decoupled, Gauss-Seidel, BFSW", "Results as a heatmap on the diagram", "Batch runs scaling loads and unit setpoints"])}
         ${this.feature("modal", "#/modal/eigenmap", "Modal analysis", "The whole network linearised into one closed-loop state matrix and eigen-decomposed.",
           ["Eigenvalue map & damping", "Participation, sensitivity, mode shapes", "Free-motion and step responses, multi-channel"])}
-        ${this.feature("emt", "#/emt", "EMT simulation", "The nonlinear DAE model integrated in time after a state offset or an input step.",
+        ${this.feature("emt", "#/emt", "Time-domain simulation", "The nonlinear DAE model integrated in time after a state offset or an input step — EMT or RMS, depending on the model order.",
           ["Coupled Newton solve at every step", "Live tracing of the solver", "Overlay of the linearised response"])}
         ${this.feature("docs", "#/docs", "Documentation", "The physics and architecture reference: equations, methodology, module by module, with worked examples.",
           ["Component equations", "Interconnection & elimination", "Notebook walkthroughs"])}

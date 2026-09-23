@@ -110,23 +110,36 @@ const ModalPage = {
   viewEigenmap() {
     const m = state.modal.data;
     if (this.mode === null) this.mode = this.defaultMode();
+    // Categories the user has switched off. Kept across redraws of this view
+    // but not across networks -- a different model has different modes.
+    if (!this._hiddenCats) this._hiddenCats = new Set();
+    const cats = m.categories || [];
+    const counts = {};
+    m.modes.forEach(md => { const c = md.category || "mixed"; counts[c] = (counts[c] || 0) + 1; });
+    const present = cats.filter(c => counts[c.id]);
     const body = $("#modal-body");
-    body.innerHTML = `<div class="card"><div class="card-title">Eigenvalues<span class="spacer"></span><button class="ghost small" id="eig-reset">Reset zoom</button></div>
+    body.innerHTML = `<div class="card"><div class="card-title">Eigenvalues<span class="card-sub">— shape is what kind of mode it is, colour is how stable</span><span class="spacer"></span><button class="ghost small" id="eig-reset">Reset zoom</button></div>
+        <div class="legend kind-legend" id="eig-kinds">${present.map(c => `
+          <button class="kind-toggle" data-cat="${c.id}" aria-pressed="true" title="${esc(c.note)}">
+            ${modeMarkerSwatch(c.id)}${esc(c.label)} <span class="muted">${counts[c.id]}</span></button>`).join("")}
+          <span class="muted" style="margin-left:0.3rem">click a kind to hide it</span></div>
         <div id="eig-map"></div>
         <div class="legend"><span><span class="swatch" style="background:var(--good)"></span>Stable</span><span><span class="swatch" style="background:var(--warning)"></span>Marginal</span><span><span class="swatch" style="background:var(--critical)"></span>Unstable</span>
           <span><span class="line-swatch" style="border-color:var(--critical);border-top-style:dashed"></span>5 % damping</span><span><span class="line-swatch" style="border-color:var(--good);border-top-style:dashed"></span>70.7 % damping</span>
-          <span class="muted">Scroll to zoom · drag to pan · click a mode</span></div></div>
+          <span class="muted">Scroll to zoom · drag to pan · click a mode</span></div>
+        <p class="muted" id="eig-kind-note" style="font-size:0.78rem;margin:0.6rem 0 0"></p></div>
       <div class="card" id="eig-detail"></div>
       <div class="card"><div class="card-title">Modes <span class="card-sub">— sorted by real part, least stable first</span></div><div id="eig-table"></div></div>`;
     const drawMap = () => {
       const view = this._eigZoom ? this._eigZoom.get() : null;
-      $("#eig-map").innerHTML = eigenvalueMapSvg(m.modes, this.mode);
+      $("#eig-map").innerHTML = eigenvalueMapSvg(m.modes, this.mode, this._hiddenCats);
       const svg = $("#eig-map svg");
       this._eigZoom = attachSvgZoomPan(svg);
       if (view) this._eigZoom.set(view);
       $$("#eig-map .pt").forEach(pt => {
         const mode = m.modes.find(x => x.mode === +pt.dataset.mode);
-        pt.addEventListener("mouseenter", evt => showTooltip(`<div class="tt-title">Mode ${mode.mode}</div>` + ttTable([["λ", `${mode.real.toExponential(3)} ${mode.imag >= 0 ? "+" : "−"} j${Math.abs(mode.imag).toExponential(3)}`], ["Frequency", `${fmt(mode.undamped_hz, 3)} Hz`], ["Damping", `${fmt(mode.damping_pct, 2)} %`], ["Top state", `${esc(mode.state1)} (${fmt(mode.part1_pct, 1)} %)`]]), evt));
+        pt.addEventListener("mouseenter", evt => showTooltip(`<div class="tt-title">Mode ${mode.mode}</div>` + ttTable([["λ", `${mode.real.toExponential(3)} ${mode.imag >= 0 ? "+" : "−"} j${Math.abs(mode.imag).toExponential(3)}`], ["Frequency", `${fmt(mode.undamped_hz, 3)} Hz`], ["Damping", `${fmt(mode.damping_pct, 2)} %`], ["Top state", `${esc(mode.state1)} (${fmt(mode.part1_pct, 1)} %)`],
+          ["Kind", `${esc(kindLabel(m, mode.category))} — ${fmt((mode.category_share || 0) * 100, 0)} % of the mode`]]), evt));
         pt.addEventListener("mousemove", moveTooltip);
         pt.addEventListener("mouseleave", hideTooltip);
         pt.addEventListener("click", () => { if (!svg.__justPanned) { this.mode = mode.mode; drawMap(); drawDetail(); drawTable(); } });
@@ -139,21 +152,39 @@ const ModalPage = {
         <div class="stats"><div class="stat"><span class="n">${mode.real.toExponential(3)}</span><span class="l">Real part (1/s)</span></div>
           <div class="stat"><span class="n">${fmt(mode.undamped_hz, 3)} Hz</span><span class="l">Frequency</span></div>
           <div class="stat"><span class="n">${fmt(mode.damping_pct, 2)} %</span><span class="l">Damping ratio</span></div>
-          <div class="stat"><span class="n" style="font-size:0.9rem">${esc(mode.state1)} · ${esc(mode.state2)} · ${esc(mode.state3)}</span><span class="l">Top participating states</span></div></div>
+          <div class="stat"><span class="n" style="font-size:0.9rem">${esc(mode.state1)} · ${esc(mode.state2)} · ${esc(mode.state3)}</span><span class="l">Top participating states</span></div>
+          <div class="stat"><span class="n" style="font-size:0.9rem">${esc(kindLabel(m, mode.category))}</span><span class="l">Kind — ${fmt((mode.category_share || 0) * 100, 0)} % of the mode</span></div></div>
         <div class="controls" style="margin-top:0.9rem"><a href="#/modal/single"><button class="secondary small">Participation →</button></a><a href="#/modal/shape"><button class="secondary small">Mode shape →</button></a><a href="#/modal/sensitivity"><button class="secondary small">Sensitivity →</button></a></div>`;
     };
     const drawTable = () => {
-      const rows = this.sortedModes().map(md => {
+      const rows = this.sortedModes().filter(md => !this._hiddenCats.has(md.category || "mixed")).map(md => {
         const st = statusOf(md.real);
         return `<tr class="clickable${md.mode === this.mode ? " hl" : ""}" data-mode="${md.mode}"><td>${md.mode}</td><td class="name"><span class="swatch" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--${st.cls});margin-right:0.4em"></span>${st.label}</td>
+          <td class="name" title="${esc(kindShares(md))}">${modeMarkerSwatch(md.category || "mixed")}${esc(kindLabel(m, md.category))}</td>
           <td>${md.real.toExponential(3)}</td><td>${md.imag.toExponential(3)}</td><td>${fmt(md.undamped_hz, 3)}</td><td>${fmt(md.damping_pct, 2)}</td>
           <td class="name">${esc(md.state1)} (${fmt(md.part1_pct, 1)}%)</td><td class="name">${esc(md.state2)} (${fmt(md.part2_pct, 1)}%)</td><td class="name">${esc(md.state3)} (${fmt(md.part3_pct, 1)}%)</td></tr>`;
       }).join("");
-      $("#eig-table").innerHTML = `<div class="tablewrap"><table><thead><tr><th>Mode</th><th>Status</th><th>Real</th><th>Imag</th><th>Freq (Hz)</th><th>Damping (%)</th><th>Top state</th><th>2nd</th><th>3rd</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      $("#eig-table").innerHTML = `<div class="tablewrap"><table><thead><tr><th>Mode</th><th>Status</th><th>Kind</th><th>Real</th><th>Imag</th><th>Freq (Hz)</th><th>Damping (%)</th><th>Top state</th><th>2nd</th><th>3rd</th></tr></thead><tbody>${rows}</tbody></table></div>`;
       $$("#eig-table tr[data-mode]").forEach(tr => tr.addEventListener("click", () => { this.mode = +tr.dataset.mode; drawMap(); drawDetail(); drawTable(); }));
     };
+    const syncLegend = () => {
+      $$("#eig-kinds .kind-toggle").forEach(b => {
+        const off = this._hiddenCats.has(b.dataset.cat);
+        b.setAttribute("aria-pressed", String(!off));
+        b.classList.toggle("off", off);
+      });
+      // With one kind left showing, say what it is -- that is the moment the
+      // explanation is wanted, and the moment there is room for it.
+      const shown = present.filter(c => !this._hiddenCats.has(c.id));
+      $("#eig-kind-note").textContent = shown.length === 1 ? shown[0].note : "";
+    };
+    $$("#eig-kinds .kind-toggle").forEach(btn => btn.addEventListener("click", () => {
+      const c = btn.dataset.cat;
+      if (this._hiddenCats.has(c)) this._hiddenCats.delete(c); else this._hiddenCats.add(c);
+      syncLegend(); drawMap(); drawTable();
+    }));
     this._eigZoom = null;
-    drawMap(); drawDetail(); drawTable();
+    drawMap(); drawDetail(); drawTable(); syncLegend();
     $("#eig-reset").addEventListener("click", () => this._eigZoom && this._eigZoom.reset());
   },
 
@@ -440,3 +471,21 @@ const ModalPage = {
     plots.appendChild(wrap);
   },
 };
+
+
+// --- Mode kinds (see g2elin_core.modal.classify) ------------------------------
+// The labels and explanations come from the modal response, so nothing here
+// hard-codes a category; these are only the lookup and the tooltip text.
+function kindLabel(modalData, categoryId) {
+  const c = (modalData.categories || []).find(x => x.id === categoryId);
+  return c ? c.label : (categoryId || "Mixed");
+}
+
+function kindShares(mode) {
+  const shares = mode.category_shares || {};
+  return Object.entries(shares)
+    .filter(([, v]) => v > 0.005)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${k}: ${(v * 100).toFixed(0)}%`)
+    .join(" · ");
+}

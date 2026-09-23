@@ -97,9 +97,14 @@ def _der_info(der: DerUnit, network: Network) -> dict:
     return info
 
 
-# How far a unit's terminal sits from the bus it feeds, in the layout's own
-# roughly [-1, 1] coordinates.
-_TERMINAL_OFFSET = 0.13
+# Above this many buses of its own, a network's unit terminals are hung off
+# the bus they feed instead of being laid out as nodes. Below it the spring
+# layout has room to place them properly, and does it better: a fixed offset
+# pushes a machine onto the very branches its bus connects to.
+_HANG_TERMINALS_ABOVE = 40
+# How far a hung terminal sits from its bus, in the layout's own roughly
+# [-1, 1] coordinates.
+_TERMINAL_OFFSET = 0.16
 
 
 def _unit_terminal_buses(network: Network) -> dict[int, int]:
@@ -116,6 +121,47 @@ def _unit_terminal_buses(network: Network) -> dict[int, int]:
     return out
 
 
+def _hung_terminal_positions(network, terminal_of, pos):
+    """Place each unit terminal just off the bus it feeds, pointing away from
+    that bus's own branches so the machine does not land on top of one, and
+    fanned when a bus carries more than one unit."""
+    neighbours: dict[int, list[int]] = {}
+    for a, b in (
+        [(ln.from_bus, ln.to_bus) for ln in network.lines]
+        + [(t.hv_bus, t.lv_bus) for t in network.transformers]
+    ):
+        neighbours.setdefault(a, []).append(b)
+        neighbours.setdefault(b, []).append(a)
+
+    per_grid_bus: dict[int, list[int]] = {}
+    for terminal, grid_bus in terminal_of.items():
+        per_grid_bus.setdefault(grid_bus, []).append(terminal)
+
+    placed: dict[int, "np.ndarray"] = {}
+    for grid_bus, terminals in per_grid_bus.items():
+        anchor = pos.get(grid_bus)
+        if anchor is None:
+            continue
+        # The direction the bus's branches least occupy: the reverse of their
+        # summed unit vectors.
+        away = np.zeros(2)
+        for other in neighbours.get(grid_bus, []):
+            q = pos.get(other)
+            if q is None:
+                continue
+            d = anchor - q
+            n = float(np.hypot(*d))
+            if n > 1e-9:
+                away += d / n
+        base = math.atan2(away[1], away[0]) if float(np.hypot(*away)) > 1e-9 else 0.6 * grid_bus
+        spread = math.pi / 3
+        for k, terminal in enumerate(sorted(terminals)):
+            offset = 0.0 if len(terminals) == 1 else (k / (len(terminals) - 1) - 0.5) * 2 * spread
+            angle = base + offset
+            placed[terminal] = anchor + _TERMINAL_OFFSET * np.array([math.cos(angle), math.sin(angle)])
+    return placed
+
+
 def compute_topology_layout(network: Network) -> NetworkTopology:
     """Kamada-Kawai layout (a graph-distance-preserving spring layout, reads
     well for the mostly-tree-like/lightly-meshed topologies these presets
@@ -125,12 +171,15 @@ def compute_topology_layout(network: Network) -> NetworkTopology:
     nothing here assumes it can't happen for a future one).
     """
     # A unit's own terminal bus -- the LV side of its step-up, carrying nothing
-    # else -- is a modelling device, not a place in the network. Laying it out
-    # as a node of its own pulls the real topology apart and wastes the space
-    # it takes: on the 118-bus case that is 54 extra nodes among 118 real ones.
-    # So the layout is computed over the network proper, and each terminal is
-    # then hung just off the bus it feeds.
-    terminal_of = _unit_terminal_buses(network)
+    # else -- is a modelling device rather than a place in the network. On a
+    # large case laying each one out as a node of its own pulls the real
+    # topology apart and spends space on it (54 extra nodes among the 118-bus
+    # case's own), so there they are hung off the bus they feed instead. On a
+    # small one the spring layout has room and places them better than any
+    # fixed offset can, so it keeps them.
+    all_terminals = _unit_terminal_buses(network)
+    hang = len(network.buses) - len(all_terminals) > _HANG_TERMINALS_ABOVE
+    terminal_of = all_terminals if hang else {}
 
     graph = nx.Graph()
     for bus in network.buses:
@@ -147,20 +196,8 @@ def compute_topology_layout(network: Network) -> NetworkTopology:
     except (nx.NetworkXException, ZeroDivisionError):
         pos = nx.spring_layout(graph, seed=0)
 
-    # Fan the terminals around their grid bus so two machines on one bus do not
-    # land on top of each other.
-    per_grid_bus: dict[int, list[int]] = {}
-    for terminal, grid_bus in terminal_of.items():
-        per_grid_bus.setdefault(grid_bus, []).append(terminal)
-    for grid_bus, terminals in per_grid_bus.items():
-        anchor = pos.get(grid_bus)
-        if anchor is None:
-            continue
-        for k, terminal in enumerate(sorted(terminals)):
-            angle = 2 * math.pi * (k + 0.5) / len(terminals) + 0.6 * grid_bus
-            pos[terminal] = anchor + _TERMINAL_OFFSET * np.array(
-                [math.cos(angle), math.sin(angle)]
-            )
+    if terminal_of:
+        pos.update(_hung_terminal_positions(network, terminal_of, pos))
 
     der_by_bus = {der.bus: der for der in network.der_units}
     load_p_by_bus: dict[int, float] = {}

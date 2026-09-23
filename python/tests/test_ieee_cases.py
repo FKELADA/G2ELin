@@ -223,40 +223,66 @@ def test_the_conversion_is_the_one_kundur_uses_too():
 
 # --- the diagram at this size -----------------------------------------------------
 @pytest.mark.parametrize("build,factory", CASES, ids=IDS)
-def test_unit_terminals_are_hung_off_their_grid_bus_not_laid_out(build, factory):
-    """A unit's terminal bus is a modelling device, not a place in the network.
-    Laying it out as a node of its own pulled the real topology apart and wasted
-    the space it took -- 54 extra nodes among 118 real ones on the 118-bus case,
-    whose labels overlapped 152 times before this."""
+def test_every_bus_still_gets_a_position(build, factory):
     from g2elin_core.network.topology import _unit_terminal_buses, compute_topology_layout
 
     net = build()
-    terminals = _unit_terminal_buses(net)
-    assert len(terminals) == len(net.der_units)
+    assert len(_unit_terminal_buses(net)) == len(net.der_units)
+    assert len({n.id for n in compute_topology_layout(net).nodes}) == len(net.buses)
 
-    layout = compute_topology_layout(net)
-    at = {n.id: (n.x, n.y) for n in layout.nodes}
-    assert len(at) == len(net.buses)                      # every bus still gets a position
+
+def test_a_large_network_hangs_its_unit_terminals_off_the_bus_they_feed():
+    """Laying each one out as a node of its own pulls the real topology apart
+    and spends space on it -- 54 extra nodes among the 118-bus case's own,
+    whose labels overlapped 152 times before this."""
+    from g2elin_core.network.topology import _unit_terminal_buses, compute_topology_layout
+
+    from g2elin_core.network.topology import _TERMINAL_OFFSET
+
+    net = ieee118()
+    terminals = _unit_terminal_buses(net)
+    at = {n.id: (n.x, n.y) for n in compute_topology_layout(net).nodes}
     for terminal, grid_bus in terminals.items():
         distance = math.hypot(at[terminal][0] - at[grid_bus][0], at[terminal][1] - at[grid_bus][1])
-        assert distance > 0, "a terminal must not sit exactly on its grid bus"
-        # Close to the bus it feeds, rather than wherever a spring layout put it.
-        spread = max(abs(x) for x, _ in at.values()) + max(abs(y) for _, y in at.values())
-        assert distance < 0.35 * spread
+        assert distance == pytest.approx(_TERMINAL_OFFSET, abs=1e-9)
+
+
+@pytest.mark.parametrize("build", [ieee39, lambda: __import__(
+    "g2elin_core.network.presets", fromlist=["x"]).wscc9_3sm()], ids=["ieee39", "wscc9_3sm"])
+def test_a_small_network_keeps_the_spring_layout_for_its_terminals(build):
+    """A fixed offset pushed the machines onto the very branches their bus
+    connects to. Below the threshold the spring layout has room and does it
+    better, so it keeps them as nodes."""
+    from g2elin_core.network.topology import _unit_terminal_buses, compute_topology_layout
+
+    from g2elin_core.network.topology import _TERMINAL_OFFSET
+
+    net = build()
+    terminals = _unit_terminal_buses(net)
+    at = {n.id: (n.x, n.y) for n in compute_topology_layout(net).nodes}
+    distances = [
+        math.hypot(at[t][0] - at[g][0], at[t][1] - at[g][1]) for t, g in terminals.items()
+    ]
+    # Placed by the layout, so spaced by the topology -- not all sitting at the
+    # one fixed offset a hung terminal would take.
+    assert all(d != pytest.approx(_TERMINAL_OFFSET, abs=1e-6) for d in distances)
+    assert all(d > 0 for d in distances)
 
 
 def test_two_units_on_one_bus_do_not_land_on_top_of_each_other():
-    from g2elin_core.network.presets import wscc9_3sm
-    from g2elin_core.network.schema import DerUnit, Transformer, UnitType, BusType, Bus
-    from g2elin_core.network.topology import compute_topology_layout
+    """Only reachable on a network big enough to hang them."""
+    from g2elin_core.network.schema import Bus, BusType, DerUnit, Transformer, UnitType
+    from g2elin_core.network.topology import _unit_terminal_buses, compute_topology_layout
 
-    net = wscc9_3sm()
-    host = net.der_units[1].bus          # already a terminal; use its grid bus instead
-    grid = next(t.hv_bus for t in net.transformers if t.lv_bus == host)
+    net = ieee118()
+    grid = next(t.hv_bus for t in net.transformers if t.lv_bus == net.der_units[1].bus)
     new_bus = max(b.id for b in net.buses) + 1
     net.buses.append(Bus(id=new_bus, name="extra_terminal", vn_kv=20.0))
     net.transformers.append(Transformer(hv_bus=grid, lv_bus=new_bus, r_pu=0.0, x_pu=0.05, sn_mva=100.0))
-    net.der_units.append(DerUnit(id=99, bus=new_bus, unit_type=UnitType.GFL, bus_type=BusType.PQ,
+    net.der_units.append(DerUnit(id=9999, bus=new_bus, unit_type=UnitType.GFL, bus_type=BusType.PQ,
                                  v_set_pu=1.0, p_set_mw=1.0))
+    sharing = [t for t, g in _unit_terminal_buses(net).items() if g == grid]
+    assert len(sharing) == 2
     at = {n.id: (n.x, n.y) for n in compute_topology_layout(net).nodes}
-    assert math.hypot(at[new_bus][0] - at[host][0], at[new_bus][1] - at[host][1]) > 1e-6
+    a, b = (at[t] for t in sharing)
+    assert math.hypot(a[0] - b[0], a[1] - b[1]) > 1e-6

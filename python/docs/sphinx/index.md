@@ -126,6 +126,13 @@ installation
 ```
 
 ```{toctree}
+:maxdepth: 1
+:caption: Validation
+
+validation/cross-validation-2026-09
+```
+
+```{toctree}
 :maxdepth: 2
 :caption: Architecture
 

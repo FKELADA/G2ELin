@@ -1,6 +1,8 @@
 # G2ELin: An Open-Access Power System Linearization and EMT Simulation Tool
 
-G2ELin is an open-access tool for power system linearization and Electromagnetic Transient (EMT) simulation, developed to help researchers analyze small-signal stability and dynamics in systems with a high penetration of Inverter-Based Resources (IBRs).
+G2ELin is an open-access tool for power system linearization and time-domain simulation, developed to help researchers analyze small-signal stability and dynamics in systems with a high penetration of Inverter-Based Resources (IBRs).
+
+Every element is modelled in full detail by default, which makes a run an Electromagnetic Transient (EMT) simulation. The model order of each element is also selectable — the network can be made quasi-stationary and the machines and converters lower-order, which turns the same case into an electromechanical (RMS) study for large networks. A built-in adequacy check compares the reduced model against the full one on *your* network and says whether the reduction is safe for it.
 
 This repository contains two implementations:
 

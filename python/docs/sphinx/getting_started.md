@@ -57,8 +57,18 @@ first pass:
    results, and hovering an element shows its own.
 3. **Modal Analysis → Eigenvalue map** — the same network, linearised: every
    mode with its frequency and damping.
-4. **EMT Simulation** — pick a disturbance and press *Run*. This is the slow
-   one: a large network takes a few minutes.
+4. **Time-Domain Simulation** — pick a disturbance and press *Run*. This is
+   the slow one: a large network takes a few minutes.
+
+**If a run is too slow.** By default every element is modelled in full
+detail, which is what makes a run an EMT simulation — and what makes it slow,
+because the fast dynamics force the solver into very small steps. The
+**Model order** panel on the Network page lets you drop them: set the network
+to *Quasi-stationary* and the machines to *6th order* and the same case
+becomes an electromechanical (RMS) study, which is what a stability tool
+would run and is far quicker. The panel's *Check this model against the full
+one* button then tells you whether that reduction is safe for your particular
+network, instead of leaving you to guess.
 
 **Keeping your work.** On the Network page, *My networks* saves whatever you
 have built or modified under a name and brings it back next time, even after

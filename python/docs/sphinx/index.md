@@ -1,7 +1,8 @@
 # G2ELin documentation
 
-**G2ELin** is an open-access tool for the small-signal analysis and EMT
-simulation of power systems with a high share of inverter-based resources.
+**G2ELin** is an open-access tool for the small-signal analysis and
+time-domain simulation of power systems with a high share of inverter-based
+resources.
 It builds a network of synchronous machines, grid-forming and grid-following
 converters, infinite buses, lines, transformers and loads; solves its power
 flow; linearises the whole thing into one closed-loop state-space model for
@@ -18,8 +19,12 @@ What you can do with it:
 - **Analyse modes** — eigenvalue maps, participation, sensitivity, mode
   shapes, free and step responses, and root loci that sweep any parameter,
   including each control loop's tuning.
-- **Simulate in time** — nonlinear EMT runs with network events (breaker
+- **Simulate in time** — nonlinear runs with network events (breaker
   openings, load steps, phase jumps) and the linearised response overlaid.
+- **Choose the model order** — keep every dynamic for an EMT run, or make
+  the network quasi-stationary and the units lower-order for an
+  electromechanical (RMS) one, with a check that tells you whether the
+  reduction is safe for *your* network. See {doc}`modules/reduction`.
 
 It runs as a Python library (`g2elin_core`), as a web interface
 (`g2elin_api` + `web/`), or from the notebooks. New here? Start with
@@ -130,6 +135,7 @@ modules/operating_point
 modules/components
 modules/interconnect
 modules/pipeline
+modules/reduction
 modules/timeseries
 modules/timedomain
 api_and_web

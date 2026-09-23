@@ -32,7 +32,7 @@ flowchart LR
         TN["Network"]
         T1["Power Flow"]
         T2["Modal Analysis<br/>(7 sub-pages)"]
-        T4["EMT Simulation"]
+        T4["Time-Domain Simulation"]
         T6["Documentation"]
     end
     EP1 --> T0
@@ -64,7 +64,18 @@ Every endpoint above also has a counterpart under `/api/network/*`
 `/modal/sensitivity`, `/modal/mode_shape`, `/modal/free_response`,
 `/modal/step_response`, `/timeseries`, `/emt`, `/emt/live`, plus `/topology` and
 `/states` as POST (their preset-side counterparts are GET, but a `Network`
-body can't ride a GET request — an intentional divergence). There's no
+body can't ride a GET request — an intentional divergence).
+
+Three endpoints have no preset-side counterpart because they are about a
+network's *model order* ({doc}`modules/reduction`), which a preset does not
+fix: `POST /api/network/model` reports what the current settings add up to
+(the model class — EMT, RMS or Mixed — each unit's resolved level, and the
+state count against full order), and `POST /api/network/model/adequacy`
+builds the same network at full order and says whether the reduction is safe
+for it. The catalogue they are read against is static, so it is a plain
+`GET /api/model-levels`: every element type's named levels and the state
+groups behind them, which is what the web UI builds its model-order controls
+from rather than hard-coding either. There's no
 preset-side equivalent of `POST /api/network/validate` (a preset is always
 already known-valid) — it runs `network.validate_network()` (see
 {doc}`network <modules/network>`) and returns every structural issue
@@ -372,9 +383,10 @@ perturbed is never hidden away.
   those frames are drawn straight onto the canvas -- the state names, the
   bars and their values, over the parameter, frequency and damping of that
   value.
-- **EMT Simulation** — state offset, input step or **network event** at
-  T0 = 0, integrated
-  with the nonlinear model; plots start 0.01 s before T0 (`t_pre`) so the
+- **Time-Domain Simulation** — state offset, input step or **network
+  event** at T0 = 0, integrated with the nonlinear model. Whether the run is
+  an EMT or an RMS one follows from the model order set on the Network page
+  ({doc}`modules/reduction`), and the page shows which it is; plots start 0.01 s before T0 (`t_pre`) so the
   initial point x0 is visible. *Overlay the equivalent linearised
   response* adds the linear model's response to the same disturbance
   (`linear_overlay`: `lsim` of the full `(A, B, C, D)` around the same

@@ -69,8 +69,7 @@ const FIELD_DEFS = {
     { key: "q_set_mvar", label: "Reactive power setpoint", unit: "MVAr", type: "number" },
     { key: "p_cons_mw", label: "Auxiliary load P", unit: "MW", type: "number" },
     { key: "q_cons_mvar", label: "Auxiliary load Q", unit: "MVAr", type: "number" },
-    { key: "controller", label: "GFM outer control", type: "select", options: ["", "droop", "droop_filtered", "dvoc", "vsm", "matching"], gfmOnly: true },
-    { key: "xd_pu", label: "Transient reactance Xd", unit: "pu", type: "number", nullable: true, help: "Used for SCR calculations only." },
+    { key: "xd_pu", label: "Transient reactance Xd", unit: "pu", type: "number", nullable: true, only: ["sm"], help: "Used for SCR calculations only." },
     { key: "sn_mva", label: "Unit rating", unit: "MVA", type: "number", nullable: true,
       help: "The base this unit's parameter overrides are given on. Published machine data is per unit of the machine's own rating: set this to 900 to type a 900 MVA machine's x_d = 1.8 and H = 6.5 s in as published, and they become 0.2 pu and 58.5 s on a 100 MVA network. Leave empty when the overrides are already on the network base. Gains and time constants are taken as given either way." },
     { key: "closed", label: "Unit breaker closed", type: "bool", breaker: true, full: true, help: "Open = the unit is disconnected (with its transformer). The slack unit's breaker can't be opened." },
@@ -125,7 +124,7 @@ const NetworkPage = {
             <div class="palette"><span class="palette-label">Drag to add</span>
               <span class="chip" data-chip="bus"><span class="dot" style="background:#77766f"></span>Bus</span>
               <span class="chip" data-chip="load"><span class="dot" style="background:var(--text-secondary);border-radius:1px"></span>Load</span>
-              ${Object.keys(UNIT_LABEL).map(u => `<span class="chip" data-chip="${u}" title="${UNIT_NAME[u]}"><span class="dot" style="background:${UNIT_COLOR[u]}"></span>${UNIT_LABEL[u]}</span>`).join("")}
+              ${Object.keys(UNIT_LABEL).map(u => `<span class="chip" data-chip="${u}" title="${UNIT_NAME[u]}">${unitGlyphHtml(u, UNIT_COLOR[u], 15)}${UNIT_LABEL[u]}</span>`).join("")}
             </div>
             <div class="btn-group" role="group" aria-label="Canvas mode">
               <button class="secondary toggle small" data-mode="select" aria-pressed="true">Select / move</button>
@@ -398,6 +397,10 @@ const NetworkPage = {
     const net = state.network;
     const busOpts = cur => net.buses.map(b => `<option value="${b.id}"${b.id === cur ? " selected" : ""}>${b.id} — ${esc(b.name || "")}</option>`).join("");
     return `<div class="form-grid">${FIELD_DEFS[defsKey].map(f => {
+      // A field belonging to one kind of unit is left out of the others
+      // entirely rather than shown greyed: an empty box with a name on it
+      // invites someone to wonder what it would do.
+      if (f.only && !f.only.includes(obj.unit_type)) return "";
       const v = obj[f.key];
       const id = `f-${target.replace(":", "-")}-${f.key}`;
       const lab = `<label for="${id}">${esc(f.label)}${f.unit ? ` <span class="unit">(${f.unit})</span>` : ""}</label>`;
@@ -411,8 +414,7 @@ const NetworkPage = {
       }
       if (f.type === "bus") return `<div class="${cls}">${lab}<select id="${id}" ${data} data-type="int">${busOpts(v)}</select>${help}</div>`;
       if (f.type === "select") {
-        const disabled = f.gfmOnly && obj.unit_type !== "gfm" ? " disabled" : "";
-        return `<div class="${cls}">${lab}<select id="${id}" ${data}${disabled}>${f.options.map(o => `<option value="${o}"${o === (v ?? "") ? " selected" : ""}>${o === "" ? "(none)" : o}</option>`).join("")}</select>${help}</div>`;
+        return `<div class="${cls}">${lab}<select id="${id}" ${data}>${f.options.map(o => `<option value="${o}"${o === (v ?? "") ? " selected" : ""}>${o === "" ? "(none)" : o}</option>`).join("")}</select>${help}</div>`;
       }
       const type = f.type === "number" ? "number" : "text";
       const si = f.type === "number" ? siSpecs(defsKey, obj, f.key) : [];

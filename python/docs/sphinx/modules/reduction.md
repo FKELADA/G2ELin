@@ -77,10 +77,27 @@ network (dynamic lines, algebraic loads) is expressible.
 reference frame's own speed (the default, what an EMT model does) or are
 pinned to nominal, which is what phasor tools do.
 
+### The catalogue is per *unit*, not per type
+
+A machine's AVR, stabiliser and governor, and a converter's power-control
+law, are chosen per unit, and they decide which state groups that unit even
+has: a machine with the Kundur exciter has an `avr` group of two states
+rather than four, one with no governor has no `governor` group at all, and a
+converter running VSM has `frequency` and `flux` where droop has
+`power_filter`.
+
+So `element(kind)` answers about the *type* — the default models — while
+`Network.unit_element(der)` answers about one unit, which is what every
+per-unit caller goes through. The **group ids are shared** wherever the
+physics is, so a saved level or per-group override stays meaningful when a
+model is swapped; only the states behind the group change.
+
 ### Synchronous machine
 
-The nine controller states (governor, PSS, AVR) stay dynamic in every named
+The controller states (governor, PSS, AVR) stay dynamic in every named
 level: a reduced-order machine in a stability study keeps its full controls.
+The totals below are for the default regulators — a different exciter or a
+missing governor shifts every row by the same amount.
 
 | Level | Machine states kept | Total |
 |---|---|---|

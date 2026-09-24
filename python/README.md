@@ -7,10 +7,49 @@ core — no web dependencies, usable standalone. `g2elin_api` (optional,
 `pip install -e ".[api]"`) is a thin HTTP layer over it, serving a static
 web frontend from `web/`.
 
+
+## Selectable unit models
+
+A unit's regulators are part of its description, not baked into the
+component. Each model brings its *own* parameters under its own names, so
+what is typed is what that model's diagram shows, and an override under a
+name the fitted model does not have is refused rather than ignored.
+
+| Unit | Field | Models |
+|---|---|---|
+| Synchronous machine | `exciter` | `g2elin` (transducer, amplifier, exciter, rate feedback), `kundur` (thyristor + transient gain reduction, Fig. E12.9) |
+| | `pss` | `g2elin` (input filter, washout, two lead-lags), `kundur` (washout, two lead-lags), `none` |
+| | `governor` | `g2elin` (droop into a first-order lag), `none` |
+| Grid-forming converter | `controller` | `droop`, `droop_filtered`, `dvoc`, `vsm`, `matching` |
+
+Every default is the model the component always had, so any saved network
+linearises to exactly what it did before.
+
+`none` is equipment that is not fitted rather than a gain turned down: the
+states, the parameters and the reduction group all go with it. Two
+consequences worth knowing, both of which the tools handle explicitly:
+
+- A machine's `P_ref` is its *governor's* setpoint. With no governor its
+  column of `B` is exactly zero, so a step on it does nothing — and the step
+  response says so rather than drawing an unexplained flat line.
+- A fleet with no governor anywhere has no frequency regulation, so its
+  common frequency is a free integrator. That is a marginal direction of the
+  model, not an instability, and it is set aside from the stability verdict
+  beside the reference angles (`Network.frequency_is_regulated()`).
+
+The grid-forming laws are `symGFM_types.m`'s, with `script_generic.m`'s
+gains — each written in terms of the droop tuning (`eta = mp`, `J =
+1/(mp*wf)`, `K_theta = mp*Kpdc`), so the laws are *comparable* and a study
+that swaps one for another sees what the law changes rather than what a
+different tuning changes. VSM and matching carry no power filters at all.
+
+See `docs/sphinx/design/controller-models.md` for the equations, the block
+diagrams, and the plan for the rest of the IEEE 421.5 library.
+
 ## Status
 
 Phase P0 (foundations), P1 (static power flow), P2 (linear small-signal /
-modal analysis — SM/GFM(Droop)/GFL/IB slack, plus the full toolbox:
+modal analysis — SM/GFM/GFL/IB slack, plus the full toolbox:
 sensitivity, mode shape, free/step response), P3 (time-series load flow),
 P4 (EMT/nonlinear time-domain simulation — now with an analytic Newton
 Jacobian, ~9x faster than the first working slice), and P7 (web UI — result

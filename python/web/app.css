@@ -305,7 +305,7 @@ table.edit input[type="text"] { width: 8rem; }
 .nd-bus circle.core { stroke: var(--surface-1); stroke-width: 2; }
 .nd-bus:hover circle.core { stroke: var(--accent); stroke-width: 3; }
 .nd-bus.sel circle.ring { stroke: var(--accent); stroke-width: 3; fill: none; }
-.nd-unit-label { font: 700 10.5px var(--font-mono); text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+.nd-unit-glyph { pointer-events: none; }
 .nd-bus-label { font: 12.5px var(--font-mono); fill: var(--text-secondary); pointer-events: none; paint-order: stroke; stroke: var(--surface-2); stroke-width: 3px; }
 .nd-cap { stroke: var(--accent); stroke-width: 2.4; stroke-linecap: round; }
 .nd-reactor { fill: var(--accent); fill-opacity: 0.25; stroke: var(--accent); stroke-width: 1.6; }
@@ -323,7 +323,7 @@ table.edit input[type="text"] { width: 8rem; }
 .nd-out .nd-edge { stroke-dasharray: 6 5; opacity: 0.5; }
 .nd-out .nd-trafo, .nd-out .nd-load, .nd-out > line { opacity: 0.5; }
 .nd-bus.nd-out .core { opacity: 0.4; }
-.nd-bus.nd-out .nd-unit-label, .nd-bus.nd-out .nd-bus-label { opacity: 0.55; }
+.nd-bus.nd-out .nd-unit-glyph, .nd-bus.nd-out .nd-bus-label { opacity: 0.55; }
 .nd-trafo { fill: var(--surface-1); stroke: var(--text-secondary); stroke-width: 1.6; pointer-events: none; }
 .nd-wire-preview { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 5 4; pointer-events: none; }
 
@@ -650,3 +650,12 @@ tbody tr.bad-row td { background: #fdeeee; }
 .ureg-row label { display: block; margin-bottom: 0.15rem; cursor: help; }
 .ureg-row label code { font-size: 0.78rem; }
 .uregulators select { width: 100%; font-size: 0.78rem; }
+
+/* Plot zoom: a mode row above the chart, and the rubber band the drag
+   draws. The band shows exactly what the release will keep -- a horizontal
+   zoom draws full height -- so the result is never a surprise. */
+.chart-zoombar { display: flex; gap: .25rem; align-items: center; margin: .1rem 0 .2rem; }
+.chart-zoombar button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.chart-zoombar .zoom-note { font-size: .7rem; margin-left: .25rem; }
+rect.zoom-band { fill: var(--accent); fill-opacity: .12; stroke: var(--accent); stroke-width: 1; stroke-dasharray: 3 2; pointer-events: none; }
+svg rect.capture { cursor: crosshair; }

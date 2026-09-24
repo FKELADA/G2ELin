@@ -91,7 +91,7 @@ flowchart LR
     end
     subgraph Python["components/*.py"]
         sm["sm.py<br/>synchronous machine"]
-        gfm["gfm.py<br/>grid-forming (Droop)"]
+        gfm["gfm.py<br/>grid-forming"]
         gfl["gfl.py<br/>grid-following"]
         ib["ib.py<br/>infinite bus"]
         frame["frame.py<br/>reference frame"]
@@ -173,21 +173,55 @@ standard per-unit machine-equation convention.
 ### Synchronous machine (`sm.py`)
 
 A round-rotor synchronous machine with one field winding and 2 damper
-windings (1 $d$-axis, 2 $q$-axis), its own step-up transformer, a
-first-order turbine/governor, a standard AVR (IEEE-Type-ish PI-cascade),
-and a lead-lag/washout PSS branch — 19 states total, ported from
+windings (1 $d$-axis, 2 $q$-axis), its own step-up transformer, and a set of
+regulators — 19 states in its default configuration, ported from
 `Functions/symSG.m`.
 
 **States** $x = [i_{gd}, i_{gq}, \psi_d, \psi_q, \psi_{fd}, \psi_{1d},
-\psi_{1q}, \psi_{2q}, \Delta\omega_r, \theta, P_m, \Delta\omega_1, v_1,
-v_2, v_{pss}, e_1, e_2, e_{fd}, e_3]$ — grid-side transformer current,
-stator/field/damper flux linkages, speed deviation and rotor angle,
-governor mechanical power, and the PSS/AVR filter-chain states.
+\psi_{1q}, \psi_{2q}, \Delta\omega_r, \theta, \ldots]$ — grid-side
+transformer current, stator/field/damper flux linkages, speed deviation and
+rotor angle, followed by whatever the fitted regulators carry (below).
+
+#### Selectable regulators
+
+The exciter, the stabiliser and the governor are chosen per unit through
+`DerUnit.exciter`, `DerUnit.pss` and `DerUnit.governor`. They decide the
+machine's states *and* its parameter set: each model brings its own
+parameters under its own names, so what is typed is what that model's own
+diagram shows, and an override under a name the fitted model does not have
+is rejected rather than ignored.
+
+| Slot | Model | States | Parameters |
+|---|---|---|---|
+| Exciter | `g2elin` (default) | $e_1, e_2, e_{fd}, e_3$ | $T_r, K_a, T_a, K_e, T_e, K_{fd}, T_{fd}$ |
+| | `kundur` | $e_1, e_{tgr}$ | $T_R, K_A, T_A, T_B$ |
+| PSS | `g2elin` (default) | $\Delta\omega_1, v_1, v_2, v_{pss}$ | $K_{PSS}, T_{LP}, T_{HP}, T_{1n}, T_{1d}, T_{2n}, T_{2d}$ |
+| | `kundur` | $v_1, v_2, v_{pss}$ | $K_{STAB}, T_W, T_1, T_2, T_3, T_4$ |
+| | `none` | — | — |
+| Governor | `g2elin` (default) | $P_m$ | $m_p, T_G$ |
+| | `none` | — | — |
+
+The `kundur` pair is Kundur Fig. E12.9: a thyristor exciter — a terminal
+voltage transducer, a gain and transient gain reduction, with no exciter lag
+— and a stabiliser that is a washout and two lead-lag stages. Because a
+thyristor bridge has no time constant of its own, $E_{fd}$ follows the
+regulator instantaneously and is **algebraic** there rather than a state,
+which is why that exciter is two states shorter rather than one.
+
+`none` is equipment that is not fitted, not a gain turned down: the states,
+the parameters and the reduction group all go. A machine with no governor
+holds its mechanical power at the operating point, which is the
+constant-torque assumption most textbook small-signal examples are worked
+under — and note that a fleet with no governor anywhere has an unregulated
+common frequency, which the modal tools treat as marginal by construction
+rather than as an instability.
 
 **Algebraic variables** $z = [\omega_r, v_{ed}, v_{eq}, i_d, i_{1d},
 i_{fd}, i_q, i_{1q}, i_{2q}, v_{gd}, v_{gq}, C_m, C_e, \Delta P, E_t]$.
 
-**Inputs**: own $u_s = [V_{ref}, P_{ref}, \omega_{ref}]$; grid-coupling
+**Inputs**: own $u_s = [V_{ref}, P_{ref}, \omega_{ref}]$ — note that
+$P_{ref}$ is the *governor's* setpoint, so with no governor fitted its
+column of $B$ is exactly zero and it moves nothing; grid-coupling
 $u_g = [\theta_g, v_{gd,g}, v_{gq,g}]$ (just $[v_{gd,g}, v_{gq,g}]$ for the
 slack unit, which needs no $\theta_g$ input since $\theta_g \equiv \theta$
 for it by definition).
@@ -304,19 +338,47 @@ $$
 Default electrical/mechanical/AVR/PSS parameter values are tabulated in
 {doc}`operating_point <operating_point>`.
 
-### Grid-forming converter — droop control (`gfm.py`)
+### Grid-forming converter (`gfm.py`)
 
-A two-level VSC behind an LCL filter ($R_f/L_f$ series, $C_f$ shunt) and
-its own step-up transformer ($R_t/L_t$), with an active-power/frequency
-and reactive-power/voltage **droop** outer loop, a voltage-control loop,
-a current-control loop, and a first-order DC-link model — 15 states,
-ported from `Functions/symGFM_types.m`'s `'Droop'` case.
+A two-level VSC behind an LCL filter ($R_f/L_f$ series, $C_f$ shunt) and its
+own step-up transformer ($R_t/L_t$), with an outer power-control law, a
+voltage-control loop, a current-control loop, and a first-order DC-link
+model — 15 states running droop, ported from `Functions/symGFM_types.m`.
 
-**States** $x = [i_{sd}, i_{sq}, i_{gd}, i_{gq}, v_{ed}, v_{eq}, v_{dc},
-i_{dc}, p_m, \theta, q_m, M_{VLd}, M_{VLq}, M_{CLd}, M_{CLq}]$ — converter
-and grid-side filter currents, filter capacitor voltage, DC-link voltage
-and current, droop's own filtered $P$/$Q$ ($p_m$, $q_m$), the unit's own
-angle, and the voltage-loop/current-loop PI integrator states.
+**States** $x = [i_{sd}, i_{sq}, i_{gd}, i_{gq}, v_{dc}, i_{dc}, \ldots,
+M_{VLd}, M_{VLq}, M_{CLd}, M_{CLq}]$ — converter and grid-side filter
+currents, filter capacitor voltage, DC-link voltage and current, then the
+outer law's own states (below), then the voltage-loop/current-loop PI
+integrator states.
+
+#### Selectable power-control laws
+
+All five of `symGFM_types.m`'s laws are chosen per unit through
+`DerUnit.controller`. They differ in exactly three things — which states the
+outer loop carries, how it forms the frequency deviation $\Delta\omega$ that
+the angle integrates, and how it forms the voltage reference the cascade
+then tracks. Everything downstream is identical for all five.
+
+| Law | Outer states | $\Delta\omega$ | $v_{ed}^{ref}$ | Parameters |
+|---|---|---|---|---|
+| `droop` (default) | $p_m, \theta, q_m$ | $m_p(P_{ref}-p_m)$ | $V_{ref} + (Q_{ref}-q_m)n_q$ | $m_p, n_q, w_f$ |
+| `droop_filtered` | $p_m, \Delta\omega, \theta, q_m$ | a state | same | $m_p, n_q, w_f, w_c$ |
+| `dvoc` | $p_m, \theta, q_m, v_{ed}^{ref}$ | $\eta(P_{ref}/V_{ref}^2 - p_m/(v_{ed}^{ref})^2)$ | a state | $\eta, \alpha, w_f$ |
+| `vsm` | $\Delta\omega, \theta, \Phi$ | a state (swing, $J$/$D_p$) | $\omega\Phi$ | $J, D_p, K, D_q$ |
+| `matching` | $v_{dc,m}, \theta$ | $K_\theta(v_{dc,m} - V_{dc,ref})$ | $V_{ref}$ | $K_\theta, w_f$ |
+
+**A virtual synchronous machine and matching control carry no power filters
+at all.** VSM measures $p$ and $q$ directly — its emulated inertia is what
+smooths the response — and matching takes its frequency from the DC link,
+which is what a machine's speed does physically. So $p_m$/$q_m$ are absent
+from those two rather than merely retuned.
+
+The gains are `script_generic.m`'s, and every one is written in terms of the
+droop tuning ($\eta = m_p$, $J = 1/(m_p w_f)$, $K_\theta = m_p K_{pdc}$, and
+so on). That is deliberate: the laws are meant to be *comparable*, tuned to
+the same equivalent inertia and reactive gain, so a study that swaps one for
+another sees what the law changes rather than what a different tuning
+changes.
 
 **Algebraic** $z = [m_d, m_q, \omega]$ (modulation index, own frequency).
 **Inputs**: $u_s = [P_{ref}, Q_{ref}, V_{ref}, \omega_{ref}, V_{dc,ref}]$,

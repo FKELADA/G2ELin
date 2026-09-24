@@ -4,6 +4,14 @@ G2ELin is an open-access tool for power system linearization and time-domain sim
 
 Every element is modelled in full detail by default, which makes a run an Electromagnetic Transient (EMT) simulation. The model order of each element is also selectable — the network can be made quasi-stationary and the machines and converters lower-order, which turns the same case into an electromechanical (RMS) study for large networks. A built-in adequacy check compares the reduced model against the full one on *your* network and says whether the reduction is safe for it.
 
+Which *model* each unit runs is selectable too, not just how much of it is
+kept. A synchronous machine's exciter, power system stabiliser and governor
+are chosen per unit — including fitting no stabiliser or no governor at all —
+and a grid-forming converter runs any of five power-control laws: droop,
+droop behind a filter, dVOC, a virtual synchronous machine, or matching
+control. Each model brings its own parameters under its own names, so what
+you type is what that model's diagram shows.
+
 This repository contains two implementations:
 
 - **[`matlab/`](matlab/README.md)** — the original MATLAB/Simulink implementation (model library + linearization/modal analysis toolbox).

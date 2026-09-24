@@ -157,7 +157,7 @@ _notebooks/random_network
 |---|---|---|
 | P0 | Foundations (schema, pu-base, presets) | done |
 | P1 | Static power flow (pandapower) | done |
-| P2 | Linear small-signal / modal analysis | done — SM, GFM(Droop), GFL, IB slack; full toolbox (sensitivity, mode shape, free/step response) |
+| P2 | Linear small-signal / modal analysis | done — SM (selectable exciter/PSS/governor), GFM (five power-control laws), GFL, IB slack; full toolbox (sensitivity, mode shape, free/step response) |
 | P3 | Time-series load flow | done |
 | P4 | EMT / nonlinear time-domain simulation | done — analytic Newton Jacobian |
 | P7 | Web UI | presets + 5 result tabs (incl. Network) + this doc tab, always-light theme |

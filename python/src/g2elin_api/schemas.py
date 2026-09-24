@@ -520,6 +520,23 @@ class UnitDefaultsRequest(BaseModel):
     controller: str | None = None  # grid-forming converters: which power-control law
 
 
+class UnitRetuneRequest(BaseModel):
+    """Re-express a grid-forming converter's parameters for another control
+    law, another tuning, or both. See operating_point.gfm_retuned."""
+
+    controller: str  # the law `params` are currently written in
+    params: dict[str, float]
+    to_controller: str | None = None  # swap the law, keeping the tuning
+    #: Any of mp / nq / wf / H, to set before rebuilding. H wins over wf.
+    tuning: dict[str, float] = {}
+
+
+class UnitRetuneResponse(BaseModel):
+    params: dict[str, float]
+    #: What the result is tuned to: mp, nq, wf and the equivalent inertia H.
+    tuning: dict[str, float]
+
+
 class UnitDefaultsResponse(BaseModel):
     params: dict[str, float]  # empty for a unit type without its own parameter set (infinite bus)
 

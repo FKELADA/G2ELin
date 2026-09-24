@@ -75,7 +75,11 @@ builds the same network at full order and says whether the reduction is safe
 for it. The catalogue they are read against is static, so it is a plain
 `GET /api/model-levels`: every element type's named levels and the state
 groups behind them, which is what the web UI builds its model-order controls
-from rather than hard-coding either. There's no
+from rather than hard-coding either. A machine's regulators and a
+converter's power-control law arrive on the same response, under
+`regulators` — each option carrying the state group (or groups) it
+contributes, so the UI can redraw the per-group controls when one is swapped
+without knowing a single model name. There's no
 preset-side equivalent of `POST /api/network/validate` (a preset is always
 already known-valid) — it runs `network.validate_network()` (see
 {doc}`network <modules/network>`) and returns every structural issue
@@ -236,8 +240,16 @@ persisted server-side. Always light-themed.
   default) and applied on top of `sm_params()`/`gfm_params()`/`gfl_params()`
   by `operating_point.compute_operating_point`, so modal analysis and EMT
   both use them; an unknown parameter name is a validation error. Defaults
-  come from `POST /api/units/defaults` (unit type + base values only), so
-  they're available before the unit is connected. For GFM/GFL units a
+  come from `POST /api/units/defaults` (unit type, base values, and which
+  regulator models or control law the unit runs — each brings its own
+  parameter names, so the key set depends on them), so they're available
+  before the unit is connected. `POST /api/units/retune` re-expresses a
+  converter's outer loop: for another control law, for another tuning, or
+  both. Every grid-forming law is written in terms of the same droop tuning,
+  so the editor can offer $m_p$, $n_q$, $w_f$ and the equivalent inertia $H$
+  on any of them — including the laws that carry no parameter by those
+  names — and can swap a law without throwing the tuning away. The formulas
+  stay in `operating_point` rather than being mirrored in the frontend. For GFM/GFL units a
   **loop tuner** converts response time t_r and damping ζ to Kp/Ki and back
   with the same pole-placement formulas as the defaults (ωn = 3/(ζ·t_r)).
   Changing a plant value a loop was tuned against (Rf, Lf, Cf, Cdc, Gdc)
@@ -484,3 +496,21 @@ perturbed is never hidden away.
 ```{eval-rst}
 .. automodule:: g2elin_api.schemas
 ```
+
+## Zooming a plot
+
+Every time-series chart — free and step response, the time-domain traces —
+can be windowed: pick **X**, **Y** or **Box** above the plot and drag. The
+rubber band shows exactly what the release will keep, so a horizontal zoom
+draws full height rather than a box the user then finds was read
+differently. **Reset**, or a double-click on the plot, goes back.
+
+A zoom is a window over the data's *measured* extent, never a re-measure, so
+zooming out lands back exactly where it started. The traces are clipped to
+the plot area, and the crosshair keeps reading the full data underneath —
+the downsampling that keeps long traces cheap to draw is a drawing detail
+and never what the tooltip reports.
+
+The power-flow batch chart is deliberately not zoomable: its x axis is a
+handful of discrete snapshots, and a window over it would say less than the
+whole thing already does.

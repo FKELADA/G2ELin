@@ -14,7 +14,7 @@ const SWEEP_FIELDS = {
   transformer: [["r_pu", "Resistance R (pu)"], ["x_pu", "Reactance X (pu)"], ["sn_mva", "Rating (MVA)"]],
   load: [["p_mw", "Active power P (MW)"], ["q_mvar", "Reactive power Q (MVAr)"]],
   unit: [["p_set_mw", "Active power setpoint (MW)"], ["q_set_mvar", "Reactive power setpoint (MVAr)"], ["v_set_pu", "Voltage setpoint (pu)"],
-    ["p_cons_mw", "Auxiliary load P (MW)"], ["q_cons_mvar", "Auxiliary load Q (MVAr)"], ["xd_pu", "Transient reactance Xd (pu) — SCR only, no effect on dynamics"]],
+    ["p_cons_mw", "Auxiliary load P (MW)"], ["q_cons_mvar", "Auxiliary load Q (MVAr)"], ["xd_pu", "Transient reactance Xd (pu) — SCR only, no effect on dynamics", ["sm"]]],
 };
 const ELEMENT_LABELS = { network: "Network", bus: "Bus", line: "Line", transformer: "Transformer", load: "Load", unit: "Unit" };
 
@@ -145,7 +145,12 @@ const RootLocus = {
     const sel = node.querySelector('[data-r="field"]');
     const elm = this.element(row);
     if (!elm) { sel.innerHTML = ""; this.showCurrent(row, node, !keepRange); return; }
-    let html = `<optgroup label="${esc(ELEMENT_LABELS[row.element])}">${SWEEP_FIELDS[row.element].map(([f, lab]) => `<option value="${f}">${esc(lab)}</option>`).join("")}</optgroup>`;
+    // A third entry restricts a field to certain unit types -- a transient
+    // reactance is a machine's, and offering it on a converter would sweep
+    // something that unit does not have.
+    const offered = SWEEP_FIELDS[row.element]
+      .filter(([, , only]) => !only || (row.element === "unit" && only.includes(elm.unit_type)));
+    let html = `<optgroup label="${esc(ELEMENT_LABELS[row.element])}">${offered.map(([f, lab]) => `<option value="${f}">${esc(lab)}</option>`).join("")}</optgroup>`;
     row.defaults = null;
     if (row.element === "unit" && elm.unit_type !== "infinite_bus") {
       try {

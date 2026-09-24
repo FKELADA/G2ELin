@@ -22,7 +22,9 @@ from g2elin_core.modal import analyze
 from g2elin_core.network.presets import gfm_smib
 from g2elin_core.network.schema import GfmController
 from g2elin_core.network.validation import validate_network
-from g2elin_core.operating_point import compute_operating_point, gfm_params, unit_params
+from g2elin_core.operating_point import (
+    compute_operating_point, gfm_outer_tuning, gfm_params, gfm_retuned, unit_params,
+)
 from g2elin_core.pipeline import linearize_network
 from g2elin_core.powerflow import run_power_flow
 from g2elin_core.timedomain.emt import nonlinear_gfm_block
@@ -222,3 +224,63 @@ def test_a_unit_reports_the_parameters_of_the_law_it_runs():
     p = unit_params(vsm, der)
     assert {"J", "Dp", "K", "Dq"} <= set(p)
     assert "mp" not in p and "nq" not in p
+
+
+# --- keeping the tuning across a swap or an edit ----------------------------------
+@pytest.mark.parametrize("law", LAWS)
+def test_every_law_reports_the_same_equivalent_tuning(law):
+    """Every law's gains are written in terms of mp, nq and wf, so every
+    law's gains can be read back as those three. That is what lets a
+    converter be re-tuned or switched without losing what it was tuned to."""
+    p = gfm_params(**PARAM_BASE, controller=law)
+    t = gfm_outer_tuning(p, law, kpdc=p.get("Kpdc"))
+    droop = gfm_params(**PARAM_BASE, controller="droop")
+    assert t["mp"] == pytest.approx(droop["mp"])
+    assert t["nq"] == pytest.approx(droop["nq"])
+    assert t["wf"] == pytest.approx(droop["wf"])
+    assert t["H"] == pytest.approx(1 / (2 * droop["mp"] * droop["wf"]))
+
+
+@pytest.mark.parametrize("law", LAWS)
+def test_swapping_a_law_carries_the_tuning_across(law):
+    """A converter tuned away from the defaults keeps that tuning when its
+    law is swapped, instead of silently reverting."""
+    tuned = dict(gfm_params(**PARAM_BASE, controller="droop"))
+    tuned["mp"] = 0.01          # half the equivalent inertia
+    moved, tuning = gfm_retuned(tuned, "droop", law)
+    assert tuning["mp"] == pytest.approx(0.01)
+    assert tuning["H"] == pytest.approx(1 / (2 * 0.01 * tuned["wf"]))
+
+    # And back again, unchanged: the mapping is invertible.
+    back, _ = gfm_retuned(moved, law, "droop")
+    assert back["mp"] == pytest.approx(0.01)
+    assert back["nq"] == pytest.approx(tuned["nq"])
+    assert back["wf"] == pytest.approx(tuned["wf"])
+
+
+def test_the_tuning_can_be_set_on_a_law_with_no_such_parameter():
+    """A VSM has J and Dp, not mp and wf -- but it is *tuned* by them, so
+    setting the equivalent inertia has to rewrite the gains it does have."""
+    vsm = gfm_params(**PARAM_BASE, controller="vsm")
+    doubled, tuning = gfm_retuned(vsm, "vsm", tuning={"H": 2 * (vsm["J"] / 2)})
+
+    assert tuning["H"] == pytest.approx(vsm["J"])          # H = J/2 for a VSM
+    assert doubled["J"] == pytest.approx(2 * vsm["J"])
+    assert doubled["Dp"] == pytest.approx(vsm["Dp"]), "H moves wf, not mp"
+
+
+def test_H_wins_over_wf_when_both_are_given():
+    """They say the same thing twice, H = 1/(2*mp*wf). H is the physical one
+    and the one a comparison holds fixed, so it is the one that counts."""
+    p = gfm_params(**PARAM_BASE, controller="droop")
+    out, tuning = gfm_retuned(p, "droop", tuning={"wf": 99.0, "H": 4.0})
+    assert tuning["H"] == pytest.approx(4.0)
+    assert out["wf"] == pytest.approx(1 / (2 * p["mp"] * 4.0))
+    assert out["wf"] != pytest.approx(99.0)
+
+
+def test_a_tuning_that_is_not_a_tuning_is_refused():
+    p = gfm_params(**PARAM_BASE, controller="droop")
+    for bad in ({"mp": 0.0}, {"mp": -1.0}, {"wf": 0.0}):
+        with pytest.raises(ValueError, match="must be positive"):
+            gfm_retuned(p, "droop", tuning=bad)

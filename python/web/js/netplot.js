@@ -14,6 +14,77 @@
 const BUS_LABEL_LIMIT = 40;
 const BREAKER_DETAIL_LIMIT = 60;
 
+// --- Unit glyphs -----------------------------------------------------------
+// A unit is drawn as its own schematic symbol rather than an abbreviation.
+// Letters have to be read; a symbol is recognised, and at the sizes a network
+// diagram uses (a 16px radius, less once zoomed out) three letters were close
+// to unreadable anyway.
+//
+// All four are stroked and never filled, so one colour works on whatever disc
+// the styling puts behind them, and all are drawn in a box of side 2u centred
+// on the origin so they drop into a node group unchanged.
+function unitGlyph(unitType, u, stroke) {
+  const g = svgEl("g", {
+    class: "nd-unit-glyph", fill: "none", stroke,
+    "stroke-width": Math.max(1.1, u * 0.11),
+    "stroke-linecap": "round", "stroke-linejoin": "round",
+  });
+  const add = (tag, attrs) => g.appendChild(svgEl(tag, attrs));
+  const P = n => +(n * u).toFixed(2);
+  // One period of a sine, centred on (cx, cy).
+  const wave = (cx, cy, span, amp) =>
+    `M ${P(cx - span)},${P(cy)} C ${P(cx - span * 0.45)},${P(cy - amp * 2)} ` +
+    `${P(cx - span * 0.18)},${P(cy - amp * 2)} ${P(cx)},${P(cy)} ` +
+    `C ${P(cx + span * 0.18)},${P(cy + amp * 2)} ${P(cx + span * 0.45)},${P(cy + amp * 2)} ` +
+    `${P(cx + span)},${P(cy)}`;
+
+  if (unitType === "sm") {
+    // The IEC AC source: a ring with a sine across it. The node's own disc is
+    // filled, so the ring is drawn inside it rather than reused.
+    add("circle", { r: P(0.62), cx: 0, cy: 0 });
+    add("path", { d: wave(0, 0, 0.34, 0.15) });
+    return g;
+  }
+  if (unitType === "gfm" || unitType === "gfl") {
+    // The converter symbol: a square split by a diagonal, DC bars on one side
+    // and the AC side on the other. Which AC symbol says what the control
+    // does -- a grid-*forming* converter behaves as a voltage source and
+    // forms a waveform, a grid-*following* one injects a current into a
+    // waveform somebody else formed -- so the two differ where they genuinely
+    // differ rather than by colour alone.
+    add("rect", { x: P(-0.64), y: P(-0.64), width: P(1.28), height: P(1.28), rx: P(0.15) });
+    add("line", { x1: P(-0.64), y1: P(0.64), x2: P(0.64), y2: P(-0.64) });
+    add("line", { x1: P(-0.44), y1: P(-0.34), x2: P(-0.14), y2: P(-0.34) });
+    add("line", { x1: P(-0.44), y1: P(-0.12), x2: P(-0.14), y2: P(-0.12) });
+    if (unitType === "gfm") {
+      add("path", { d: wave(0.3, 0.3, 0.19, 0.1) });
+    } else {
+      add("line", { x1: P(0.08), y1: P(0.3), x2: P(0.52), y2: P(0.3) });
+      add("path", { d: `M ${P(0.34)},${P(0.16)} L ${P(0.52)},${P(0.3)} L ${P(0.34)},${P(0.44)}` });
+    }
+    return g;
+  }
+  // An infinite bus: the lemniscate, for a source that never runs out.
+  add("path", {
+    d: `M 0,0 C ${P(-0.18)},${P(-0.44)} ${P(-0.66)},${P(-0.44)} ${P(-0.66)},0 ` +
+       `C ${P(-0.66)},${P(0.44)} ${P(-0.18)},${P(0.44)} 0,0 ` +
+       `C ${P(0.18)},${P(-0.44)} ${P(0.66)},${P(-0.44)} ${P(0.66)},0 ` +
+       `C ${P(0.66)},${P(0.44)} ${P(0.18)},${P(0.44)} 0,0 Z`,
+  });
+  return g;
+}
+
+// The same symbol at legend size, as standalone markup.
+function unitGlyphHtml(unitType, color, size = 17) {
+  const svg = svgEl("svg", {
+    width: size, height: size, viewBox: "-10 -10 20 20",
+    style: "vertical-align:-3px;margin-right:0.35em",
+  });
+  svg.appendChild(unitGlyph(unitType, 8, color));
+  return svg.outerHTML;
+}
+
+
 class NetworkView {
   constructor(host, opts = {}) {
     this.host = host;
@@ -202,10 +273,8 @@ class NetworkView {
       if (st.fill && der) { core.setAttribute("stroke", UNIT_COLOR[der.unit_type] || "#666"); core.setAttribute("stroke-width", 3.5); }
       g.appendChild(core);
       if (der) {
-        const t = svgEl("text", { class: "nd-unit-label", fill: st.fill ? (isDark(st.fill) ? "#fff" : "#111") : "#fff" });
-        if (detail.scale < 1) t.setAttribute("style", `font-size:${(10 * detail.scale).toFixed(1)}px`);
-        t.textContent = UNIT_LABEL[der.unit_type] || "?";
-        g.appendChild(t);
+        g.appendChild(unitGlyph(der.unit_type, r * 0.78,
+          st.fill ? (isDark(st.fill) ? "#fff" : "#111") : "#fff"));
       }
       // Loads and shunt compensation: one stub each under the bus, fanned out
       // and sharing the fan so they never overlap, each with its own breaker.
@@ -410,7 +479,7 @@ function elementTooltip(sel) {
 }
 
 function unitLegendHtml() {
-  return `<div class="legend">${Object.keys(UNIT_LABEL).map(u => `<span><span class="swatch" style="background:${UNIT_COLOR[u]}"></span>${UNIT_LABEL[u]} — ${UNIT_NAME[u]}</span>`).join("")}
+  return `<div class="legend">${Object.keys(UNIT_LABEL).map(u => `<span>${unitGlyphHtml(u, UNIT_COLOR[u])}${UNIT_NAME[u]}</span>`).join("")}
     <span><span class="swatch" style="background:#77766f"></span>Network bus</span>
     <span><svg width="12" height="12" style="vertical-align:-2px;margin-right:0.3em"><polygon points="1,2 11,2 6,11" fill="var(--text-secondary)"/></svg>Load</span>
     <span><svg width="14" height="12" style="vertical-align:-2px;margin-right:0.3em"><line x1="2" y1="4" x2="12" y2="4" class="nd-cap"/><line x1="2" y1="8" x2="12" y2="8" class="nd-cap"/></svg>Capacitor bank</span>

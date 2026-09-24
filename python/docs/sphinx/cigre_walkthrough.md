@@ -77,7 +77,7 @@ of these.
 ## 4. Components, in isolation
 
 Before interconnection, each unit's own linearization gives its
-open-loop state count: **19 states** for the SM (electrical + mechanical
+open-loop state count: **19 states** for an SM with its default regulators (electrical + mechanical
 + AVR + PSS), **15** for the GFM (LCL filter + DC link + droop +
 voltage/current loops), **14** for the GFL (the same filter/DC-link
 structure, current-controlled with a PLL instead of self-clocking) — see

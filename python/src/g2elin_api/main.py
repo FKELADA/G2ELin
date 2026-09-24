@@ -40,7 +40,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from g2elin_core.network.schema import Network
-from g2elin_core.operating_point import gfl_params, gfm_params, sm_params
+from g2elin_core.operating_point import gfl_params, gfm_params, gfm_retuned, sm_params
 
 from . import analysis
 from .network_routes import router as network_router
@@ -68,6 +68,8 @@ from .schemas import (
     TimeSeriesResponse,
     TopologyResponse,
     UnitDefaultsRequest,
+    UnitRetuneRequest,
+    UnitRetuneResponse,
     UnitDefaultsResponse,
 )
 
@@ -202,6 +204,26 @@ def unit_defaults(req: UnitDefaultsRequest) -> UnitDefaultsResponse:
     else:
         raise HTTPException(status_code=422, detail=f"unknown unit type {req.unit_type!r}")
     return UnitDefaultsResponse(params=params)
+
+
+@app.post("/api/units/retune", response_model=UnitRetuneResponse)
+def unit_retune(req: UnitRetuneRequest) -> UnitRetuneResponse:
+    """A converter's outer-loop parameters, re-expressed.
+
+    Every grid-forming law's gains are written in terms of the same droop
+    tuning, which is what makes them comparable. So the editor can offer
+    ``mp``, ``nq``, ``wf`` and the equivalent inertia ``H`` on any of them --
+    including the ones that carry no parameter by those names -- and can
+    swap a law without throwing the tuning away. The formulas live in
+    ``operating_point`` and are not mirrored in the frontend.
+    """
+    try:
+        params, tuning = gfm_retuned(
+            req.params, req.controller, req.to_controller, req.tuning or None
+        )
+    except (ValueError, KeyError, ZeroDivisionError) as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    return UnitRetuneResponse(params=params, tuning=tuning)
 
 
 @app.post("/api/presets/{preset_id}/powerflow", response_model=PowerFlowResponse)

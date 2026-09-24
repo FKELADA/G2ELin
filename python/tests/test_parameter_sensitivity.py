@@ -25,7 +25,9 @@ from g2elin_core.interconnect.network_assembly import build_blocks_and_wiring
 from g2elin_core.modal import analyze, classify_modes, parameter_sensitivity
 from g2elin_core.modal.parameters import _EntryReach, _block_index
 from g2elin_core.components.sm import linearize_sm, sm_dae
-from g2elin_core.network.presets import kundur_two_area, wscc9_3sm
+from g2elin_core.network.presets import (
+    cigre_islanded_1sm_1gfm_1gfl, kundur_two_area, wscc9_3sm,
+)
 from g2elin_core.operating_point import (
     REBASED_PARAM_KEYS, compute_operating_point, rebase_params,
 )
@@ -376,7 +378,7 @@ def test_entry_reach_agrees_with_the_matrix_it_avoids_building(wscc9):
     P, Q = GE @ parts.C_ol, parts.B_ol @ GE
 
     for der in net.der_units:
-        index = _block_index(blocks, der.id, net)
+        index, _label = _block_index(blocks, der.id, net)
         xs, us, ys = parts.block_slices(index)
         base, modes = op.sm_ops[der.id].p, net.unit_modes(der)
         for name in ("H", "Ra", "Ka"):
@@ -396,3 +398,31 @@ def test_entry_reach_agrees_with_the_matrix_it_avoids_building(wscc9):
 
             expected = np.array([abs(full[i, j]) for i, j in cells])
             assert np.allclose(reach.at(index, dA, dB, dC, dD), expected, rtol=0, atol=1e-15)
+
+
+def test_a_scanned_unit_is_named_as_the_model_names_it():
+    """Blocks are labelled per *type* -- the first converter is GFM_1
+    whatever its unit id -- while the unit id counts every unit in the
+    network. On a mixed fleet the two part company, and building the label
+    from the id reported units that do not exist: CIGRE's islanded case has
+    one converter, and the scan called it GFM_2.
+
+    The labels also have to match the state names beside them, since the
+    entry table pairs an entry of A with the parameters inside it.
+    """
+    net = cigre_islanded_1sm_1gfm_1gfl()
+    result = run_power_flow(net)
+    system = linearize_network(net, result)
+    modal = analyze(system.A, system.state_names)
+    mode = max(
+        (j for j, ev in enumerate(modal.eigenvalues) if ev.imag > 0.5),
+        key=lambda j: -abs(modal.eigenvalues[j]),
+    )
+    report = parameter_sensitivity(net, result, modal, mode)
+
+    blocks = {n.rsplit("_{", 1)[1].rstrip("}") for n in system.state_names if "_{" in n}
+    scanned = {e.unit_label for e in report.effects}
+    assert scanned, "nothing was scanned"
+    assert scanned <= blocks, f"reported units that are not in the model: {scanned - blocks}"
+    assert {"SM_1", "GFM_1", "GFL_1"} <= blocks
+    assert not any(lbl.startswith("GFM_2") for lbl in scanned)

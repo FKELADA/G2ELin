@@ -79,147 +79,265 @@ function lineChart(series, opts = {}) {
   const live = series.filter(s => s.t.length);
   if (!live.length) { wrap.appendChild(el(`<p class="empty">No data.</p>`)); return wrap; }
 
-  let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
-  live.forEach(s => {
-    xMin = Math.min(xMin, s.t[0]); xMax = Math.max(xMax, s.t[s.t.length - 1]);
-    s.y.forEach(v => { if (Number.isFinite(v)) { yMin = Math.min(yMin, v); yMax = Math.max(yMax, v); } });
-  });
-  if (opts.xMax !== undefined) xMax = Math.max(xMax, opts.xMax);
-  if (!Number.isFinite(yMin)) { yMin = -1; yMax = 1; }
-  const pad = (yMax - yMin) * 0.08 || Math.max(Math.abs(yMax), 1e-6) * 0.05 || 0.01;
-  const y0 = yMin - pad, y1 = yMax + pad;
-  const sx = v => PADL + ((v - xMin) / ((xMax - xMin) || 1)) * (W - PADL - PADR);
-  const sy = v => (H - PADB) - ((v - y0) / ((y1 - y0) || 1)) * (H - PADT - PADB);
-
-  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": opts.title || "Line chart" });
-  const yt = niceTicks(y0, y1, 5);
-  yt.ticks.forEach(v => {
-    const y = sy(v).toFixed(1);
-    svg.appendChild(svgEl("line", { x1: PADL, x2: W - PADR, y1: y, y2: y, stroke: "var(--gridline)" }));
-    const tx = svgEl("text", { x: PADL - 8, y: +y + 3, "text-anchor": "end", class: "axis-text" });
-    tx.textContent = tickLabel(v, yt.step);
-    svg.appendChild(tx);
-  });
-  const xt = niceTicks(xMin, xMax, 6);
-  xt.ticks.forEach(v => {
-    const x = sx(v).toFixed(1);
-    svg.appendChild(svgEl("line", { x1: x, x2: x, y1: H - PADB, y2: H - PADB + 4, stroke: "var(--baseline)" }));
-    const tx = svgEl("text", { x, y: H - PADB + 16, "text-anchor": "middle", class: "axis-text" });
-    const tf = opts.xTickFormat || opts.xFormat;
-    tx.textContent = tf ? tf(v) : tickLabel(v, xt.step) + xUnit;
-    svg.appendChild(tx);
-  });
-  svg.appendChild(svgEl("line", { x1: PADL, x2: W - PADR, y1: H - PADB, y2: H - PADB, stroke: "var(--baseline)" }));
-  if (opts.xTitle) {
-    const tx = svgEl("text", { x: (PADL + W - PADR) / 2, y: H - 6, "text-anchor": "middle", class: "axis-title" });
-    tx.textContent = opts.xTitle;
-    svg.appendChild(tx);
-  }
-  if (opts.yTitle) {
-    const tx = svgEl("text", { x: 12, y: (PADT + H - PADB) / 2, "text-anchor": "middle", class: "axis-title", transform: `rotate(-90 12 ${(PADT + H - PADB) / 2})` });
-    tx.textContent = opts.yTitle;
-    svg.appendChild(tx);
-  }
-  (opts.markers || []).forEach(m => {
-    if (m.x < xMin || m.x > xMax) return;
-    const x = sx(m.x).toFixed(1);
-    svg.appendChild(svgEl("line", { x1: x, x2: x, y1: PADT, y2: H - PADB, stroke: "var(--text-muted)", "stroke-dasharray": "2 3" }));
-    const tx = svgEl("text", { x: +x + 4, y: PADT + 9, class: "axis-text" });
-    tx.textContent = m.label;
-    svg.appendChild(tx);
-  });
-
-  // Downsample very long series for drawing (hover still reads full data).
-  const pathEls = live.map(s => {
-    const n = s.t.length, stride = Math.max(1, Math.floor(n / 2500));
-    let d = "", gap = true;  // a missing value (null/NaN) breaks the line
-    for (let j = 0; j < n; j += stride) {
-      if (!Number.isFinite(s.y[j])) { gap = true; continue; }
-      d += `${gap ? "M" : "L"}${sx(s.t[j]).toFixed(1)},${sy(s.y[j]).toFixed(1)}`;
-      gap = false;
-    }
-    if (stride > 1 && n && Number.isFinite(s.y[n - 1]) && !gap) d += `L${sx(s.t[n - 1]).toFixed(1)},${sy(s.y[n - 1]).toFixed(1)}`;
-    const el = svgEl("path", {
-      d, fill: "none", stroke: s.color, "stroke-width": s.width || (s.dash ? 2.2 : 1.8), "stroke-linejoin": "round",
-      "stroke-linecap": "round", "data-series": s.name, ...(s.dash ? { "stroke-dasharray": "1.5 4" } : {}),
+  // The full extent of the data, measured once. A zoom is a window over
+  // this, never a re-measure, so zooming out always lands back exactly here.
+  const full = (() => {
+    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+    live.forEach(s => {
+      xMin = Math.min(xMin, s.t[0]); xMax = Math.max(xMax, s.t[s.t.length - 1]);
+      s.y.forEach(v => { if (Number.isFinite(v)) { yMin = Math.min(yMin, v); yMax = Math.max(yMax, v); } });
     });
-    svg.appendChild(el);
-    return el;
-  });
+    if (opts.xMax !== undefined) xMax = Math.max(xMax, opts.xMax);
+    if (!Number.isFinite(yMin)) { yMin = -1; yMax = 1; }
+    const pad = (yMax - yMin) * 0.08 || Math.max(Math.abs(yMax), 1e-6) * 0.05 || 0.01;
+    return { xMin, xMax, y0: yMin - pad, y1: yMax + pad };
+  })();
 
-  // Hover: crosshair + a dot per series + the shared floating tooltip.
-  const hoverLine = svgEl("line", { class: "hover-line", y1: PADT, y2: H - PADB });
-  hoverLine.style.display = "none";
-  svg.appendChild(hoverLine);
-  // Signals hidden from the legend (by name, so a trace and its dotted
-  // linearised twin go together).
+  // State that has to outlive a redraw: which signals are switched off, and
+  // the window a zoom has set.
   const hidden = new Set();
-  const dots = live.map(s => {
-    const c = svgEl("circle", { r: 3.5, class: "hover-dot", fill: s.color });
-    c.style.display = "none";
-    svg.appendChild(c);
-    return c;
-  });
-  const capture = svgEl("rect", { class: "capture", x: PADL, y: PADT, width: W - PADL - PADR, height: H - PADT - PADB });
-  svg.appendChild(capture);
-
-  const showAt = tx => {
-    const xPix = sx(tx);
-    hoverLine.setAttribute("x1", xPix); hoverLine.setAttribute("x2", xPix);
-    hoverLine.style.display = "";
-    return live.map((s, i) => {
-      if (hidden.has(s.name)) { dots[i].style.display = "none"; return null; }
-      const k = nearestIndex(s.t, tx);
-      const v = s.y[k];
-      dots[i].setAttribute("cx", sx(s.t[k])); dots[i].setAttribute("cy", sy(v));
-      dots[i].style.display = Number.isFinite(v) ? "" : "none";
-      return { s, v };
-    }).filter(Boolean);
-  };
-  const hide = () => { hoverLine.style.display = "none"; dots.forEach(d => { d.style.display = "none"; }); };
-  const handle = { showAt, hide };
+  let win = null;
+  let impl = null;                                   // the current drawing
+  const handle = { showAt: t => impl && impl.showAt(t), hide: () => impl && impl.hide() };
   if (opts.group) (opts.group.charts ||= []).push(handle);
 
-  // What the legend drives, and what the CSV export reads.
-  const applyHidden = () => live.forEach((s, i) => {
-    const off = hidden.has(s.name);
-    pathEls[i].style.display = off ? "none" : "";
-    if (off) dots[i].style.display = "none";
-  });
+  const zoomable = opts.zoomable !== false;
+  let mode = opts.zoomMode || "x";
+  let bar = null;
+
+  const draw = () => {
+    const { xMin, xMax, y0, y1 } = win || full;
+    const sx = v => PADL + ((v - xMin) / ((xMax - xMin) || 1)) * (W - PADL - PADR);
+    const sy = v => (H - PADB) - ((v - y0) / ((y1 - y0) || 1)) * (H - PADT - PADB);
+    const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": opts.title || "Line chart" });
+
+    const yt = niceTicks(y0, y1, 5);
+    yt.ticks.forEach(v => {
+      if (v < y0 || v > y1) return;
+      const y = sy(v).toFixed(1);
+      svg.appendChild(svgEl("line", { x1: PADL, x2: W - PADR, y1: y, y2: y, stroke: "var(--gridline)" }));
+      const tx = svgEl("text", { x: PADL - 8, y: +y + 3, "text-anchor": "end", class: "axis-text" });
+      tx.textContent = tickLabel(v, yt.step);
+      svg.appendChild(tx);
+    });
+    const xt = niceTicks(xMin, xMax, 6);
+    xt.ticks.forEach(v => {
+      if (v < xMin || v > xMax) return;
+      const x = sx(v).toFixed(1);
+      svg.appendChild(svgEl("line", { x1: x, x2: x, y1: H - PADB, y2: H - PADB + 4, stroke: "var(--baseline)" }));
+      const tx = svgEl("text", { x, y: H - PADB + 16, "text-anchor": "middle", class: "axis-text" });
+      const tf = opts.xTickFormat || opts.xFormat;
+      tx.textContent = tf ? tf(v) : tickLabel(v, xt.step) + xUnit;
+      svg.appendChild(tx);
+    });
+    svg.appendChild(svgEl("line", { x1: PADL, x2: W - PADR, y1: H - PADB, y2: H - PADB, stroke: "var(--baseline)" }));
+    if (opts.xTitle) {
+      const tx = svgEl("text", { x: (PADL + W - PADR) / 2, y: H - 6, "text-anchor": "middle", class: "axis-title" });
+      tx.textContent = opts.xTitle;
+      svg.appendChild(tx);
+    }
+    if (opts.yTitle) {
+      const tx = svgEl("text", { x: 12, y: (PADT + H - PADB) / 2, "text-anchor": "middle", class: "axis-title", transform: `rotate(-90 12 ${(PADT + H - PADB) / 2})` });
+      tx.textContent = opts.yTitle;
+      svg.appendChild(tx);
+    }
+    (opts.markers || []).forEach(m => {
+      if (m.x < xMin || m.x > xMax) return;
+      const x = sx(m.x).toFixed(1);
+      svg.appendChild(svgEl("line", { x1: x, x2: x, y1: PADT, y2: H - PADB, stroke: "var(--text-muted)", "stroke-dasharray": "2 3" }));
+      const tx = svgEl("text", { x: +x + 4, y: PADT + 9, class: "axis-text" });
+      tx.textContent = m.label;
+      svg.appendChild(tx);
+    });
+
+    // Everything is clipped to the plot area, so a zoomed-in trace does not
+    // draw over the axes.
+    const clipId = `clip-${Math.random().toString(36).slice(2)}`;
+    const defs = svgEl("defs", {});
+    const cp = svgEl("clipPath", { id: clipId });
+    cp.appendChild(svgEl("rect", { x: PADL, y: PADT, width: W - PADL - PADR, height: H - PADT - PADB }));
+    defs.appendChild(cp);
+    svg.appendChild(defs);
+    const plot = svgEl("g", { "clip-path": `url(#${clipId})` });
+    svg.appendChild(plot);
+
+    // Downsample very long series for drawing (hover still reads full data).
+    const pathEls = live.map(s => {
+      const n = s.t.length, stride = Math.max(1, Math.floor(n / 2500));
+      let d = "", gap = true;  // a missing value (null/NaN) breaks the line
+      for (let j = 0; j < n; j += stride) {
+        if (!Number.isFinite(s.y[j])) { gap = true; continue; }
+        d += `${gap ? "M" : "L"}${sx(s.t[j]).toFixed(1)},${sy(s.y[j]).toFixed(1)}`;
+        gap = false;
+      }
+      if (stride > 1 && n && Number.isFinite(s.y[n - 1]) && !gap) d += `L${sx(s.t[n - 1]).toFixed(1)},${sy(s.y[n - 1]).toFixed(1)}`;
+      const node = svgEl("path", {
+        d, fill: "none", stroke: s.color, "stroke-width": s.width || (s.dash ? 2.2 : 1.8), "stroke-linejoin": "round",
+        "stroke-linecap": "round", "data-series": s.name, ...(s.dash ? { "stroke-dasharray": "1.5 4" } : {}),
+      });
+      plot.appendChild(node);
+      return node;
+    });
+
+    const hoverLine = svgEl("line", { class: "hover-line", y1: PADT, y2: H - PADB });
+    hoverLine.style.display = "none";
+    svg.appendChild(hoverLine);
+    const dots = live.map(s => {
+      const c = svgEl("circle", { r: 3.5, class: "hover-dot", fill: s.color });
+      c.style.display = "none";
+      plot.appendChild(c);
+      return c;
+    });
+    const band = svgEl("rect", { class: "zoom-band", y: PADT, height: H - PADT - PADB, width: 0 });
+    band.style.display = "none";
+    svg.appendChild(band);
+    const capture = svgEl("rect", { class: "capture", x: PADL, y: PADT, width: W - PADL - PADR, height: H - PADT - PADB });
+    svg.appendChild(capture);
+
+    const applyHidden = () => live.forEach((s, i) => {
+      const off = hidden.has(s.name);
+      pathEls[i].style.display = off ? "none" : "";
+      if (off) dots[i].style.display = "none";
+    });
+    applyHidden();
+
+    const showAt = tx => {
+      const xPix = sx(tx);
+      hoverLine.setAttribute("x1", xPix); hoverLine.setAttribute("x2", xPix);
+      hoverLine.style.display = (tx >= xMin && tx <= xMax) ? "" : "none";
+      return live.map((s, i) => {
+        if (hidden.has(s.name)) { dots[i].style.display = "none"; return null; }
+        const k = nearestIndex(s.t, tx);
+        const v = s.y[k];
+        dots[i].setAttribute("cx", sx(s.t[k])); dots[i].setAttribute("cy", sy(v));
+        dots[i].style.display = Number.isFinite(v) ? "" : "none";
+        return { s, v };
+      }).filter(Boolean);
+    };
+    const hide = () => { hoverLine.style.display = "none"; dots.forEach(d => { d.style.display = "none"; }); };
+    impl = { showAt, hide, applyHidden };
+
+    // Pixel -> data, through the SVG's own transform so it survives any
+    // CSS scaling of the chart.
+    const at = evt => {
+      const ctm = svg.getScreenCTM();
+      if (!ctm) return null;
+      const pt = svg.createSVGPoint(); pt.x = evt.clientX; pt.y = evt.clientY;
+      const q = pt.matrixTransform(ctm.inverse());
+      return {
+        px: q.x, py: q.y,
+        x: xMin + ((q.x - PADL) / (W - PADL - PADR)) * (xMax - xMin),
+        y: y0 + ((H - PADB - q.y) / (H - PADT - PADB)) * (y1 - y0),
+      };
+    };
+
+    let drag = null;
+    capture.addEventListener("mousemove", evt => {
+      const q = at(evt);
+      if (!q) return;
+      if (drag) {
+        // The rubber band shows exactly what the release will keep, so a
+        // horizontal zoom draws a full-height band and not a box the user
+        // then finds was interpreted differently.
+        const x0 = Math.min(drag.px, q.px), x1p = Math.max(drag.px, q.px);
+        const yA = Math.min(drag.py, q.py), yB = Math.max(drag.py, q.py);
+        const horiz = mode !== "y", vert = mode !== "x";
+        band.setAttribute("x", horiz ? x0 : PADL);
+        band.setAttribute("width", horiz ? Math.max(0, x1p - x0) : W - PADL - PADR);
+        band.setAttribute("y", vert ? yA : PADT);
+        band.setAttribute("height", vert ? Math.max(0, yB - yA) : H - PADT - PADB);
+        band.style.display = "";
+        hideTooltip();
+        return;
+      }
+      const vals = showAt(q.x);
+      if (opts.group) opts.group.charts.forEach(c => { if (c !== handle) c.showAt(q.x); });
+      const xLab = opts.xFormat ? opts.xFormat(q.x) : `${fmt(q.x, 4)} ${xUnit}`;
+      const rows = vals.slice(0, 16).map(({ s, v }) => [s.name + (s.dash ? " (lin.)" : ""), fmtSmart(v)]);
+      showTooltip(`<div class="tt-title">${esc(opts.xLabel || "t")} = ${esc(xLab)}</div>` +
+        ttTable(rows.map((r, i) => Object.assign(r, { sw: vals[i].s.color }))) +
+        (vals.length > 16 ? `<div class="muted">+${vals.length - 16} more</div>` : ""), evt);
+    });
+    capture.addEventListener("mouseleave", () => {
+      hide(); hideTooltip();
+      if (opts.group) opts.group.charts.forEach(c => c.hide());
+    });
+
+    if (zoomable) {
+      capture.addEventListener("mousedown", evt => {
+        if (evt.button !== 0) return;
+        evt.preventDefault();
+        drag = at(evt);
+        hide(); hideTooltip();
+      });
+      capture.addEventListener("mouseup", evt => {
+        const from = drag, to = at(evt);
+        drag = null;
+        band.style.display = "none";
+        if (!from || !to) return;
+        // A click, or a band too thin to mean anything, is not a zoom: a
+        // stray click would otherwise blow the axes up to a single point.
+        const next = { ...(win || full) };
+        const wideX = Math.abs(to.x - from.x) > (next.xMax - next.xMin) * 0.01;
+        const wideY = Math.abs(to.y - from.y) > (next.y1 - next.y0) * 0.01;
+        const takeX = mode !== "y" && wideX, takeY = mode !== "x" && wideY;
+        if (!takeX && !takeY) return;
+        if (takeX) { next.xMin = Math.min(from.x, to.x); next.xMax = Math.max(from.x, to.x); }
+        if (takeY) { next.y0 = Math.min(from.y, to.y); next.y1 = Math.max(from.y, to.y); }
+        win = next;
+        redraw();
+      });
+      capture.addEventListener("mouseleave", () => { drag = null; band.style.display = "none"; });
+      capture.addEventListener("dblclick", () => { if (win) { win = null; redraw(); } });
+    }
+
+    return svg;
+  };
+
+  let svgNode = null;
+  const redraw = () => {
+    const next = draw();
+    if (svgNode) wrap.replaceChild(next, svgNode); else wrap.appendChild(next);
+    svgNode = next;
+    if (bar) bar.refresh();
+  };
+
+  if (zoomable) {
+    const modes = [["x", "X", "Drag to window the time axis"],
+                   ["y", "Y", "Drag to window the value axis"],
+                   ["box", "Box", "Drag a box to window both"]];
+    bar = el(`<div class="chart-zoombar">${modes.map(([id, label, tip]) =>
+      `<button type="button" class="ghost small${id === mode ? " on" : ""}" data-zmode="${id}" title="${tip}">${label}</button>`).join("")}
+      <button type="button" class="ghost small" data-zreset title="Back to the full extent (or double-click the plot)">Reset</button>
+      <span class="muted zoom-note"></span></div>`);
+    bar.refresh = () => {
+      bar.querySelectorAll("[data-zmode]").forEach(b => b.classList.toggle("on", b.dataset.zmode === mode));
+      bar.querySelector("[data-zreset]").disabled = !win;
+      bar.querySelector(".zoom-note").textContent = win ? "zoomed" : "";
+    };
+    bar.querySelectorAll("[data-zmode]").forEach(b => b.addEventListener("click", () => {
+      mode = b.dataset.zmode; bar.refresh();
+    }));
+    bar.querySelector("[data-zreset]").addEventListener("click", () => { win = null; redraw(); });
+    wrap.appendChild(bar);
+  }
+
   wrap.__chart = {
     series: live,
     names: [...new Set(live.map(s => s.name))],
     isHidden: name => hidden.has(name),
-    toggle(name) { hidden.has(name) ? hidden.delete(name) : hidden.add(name); applyHidden(); },
+    toggle(name) { hidden.has(name) ? hidden.delete(name) : hidden.add(name); impl.applyHidden(); },
     isolate(name) {
       const others = this.names.filter(n => n !== name);
       const already = !hidden.has(name) && others.every(n => hidden.has(n));
       hidden.clear();
       if (!already) others.forEach(n => hidden.add(n));   // a second double-click brings them back
-      applyHidden();
+      impl.applyHidden();
     },
   };
 
-  capture.addEventListener("mousemove", evt => {
-    const ctm = svg.getScreenCTM();
-    if (!ctm) return;
-    const pt = svg.createSVGPoint(); pt.x = evt.clientX; pt.y = evt.clientY;
-    const p = pt.matrixTransform(ctm.inverse());
-    const tx = xMin + ((p.x - PADL) / (W - PADL - PADR)) * (xMax - xMin);
-    const vals = showAt(tx);
-    if (opts.group) opts.group.charts.forEach(c => { if (c !== handle) c.showAt(tx); });
-    const xLab = opts.xFormat ? opts.xFormat(tx) : `${fmt(tx, 4)} ${xUnit}`;
-    const rows = vals.slice(0, 16).map(({ s, v }) => [s.name + (s.dash ? " (lin.)" : ""), fmtSmart(v)]);
-    showTooltip(`<div class="tt-title">${esc(opts.xLabel || "t")} = ${esc(xLab)}</div>` +
-      ttTable(rows.map((r, i) => Object.assign(r, { sw: vals[i].s.color }))) +
-      (vals.length > 16 ? `<div class="muted">+${vals.length - 16} more</div>` : ""), evt);
-  });
-  capture.addEventListener("mouseleave", () => {
-    hide(); hideTooltip();
-    if (opts.group) opts.group.charts.forEach(c => c.hide());
-  });
-
-  wrap.appendChild(svg);
+  redraw();
+  if (bar) bar.refresh();
   return wrap;
 }
 

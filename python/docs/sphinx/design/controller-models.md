@@ -822,14 +822,25 @@ the linear and the nonlinear builder. VSM and matching drop the power
 filters entirely, which was the case that made a per-type catalogue
 untenable in the first place.
 
-Two things that work differently there. A law brings a *set* of groups where
-a regulator brings one, so the catalogue hands the UI the whole set to swap
+Two things work differently there. A law brings a *set* of groups where a
+regulator brings one, so the catalogue hands the UI the whole set to swap
 in. And the parameters are written in terms of the droop tuning, as
 `script_generic.m` writes them: `eta = mp`, `J = 1/(mp*wf)`, `K_theta =
 mp*Kpdc` and so on. That is deliberate -- the laws are meant to be
 *comparable*, tuned to the same equivalent inertia and reactive gain, so a
 study that swaps one for another sees what the law changes rather than what
 a different tuning changes.
+
+That second point turned out to be worth more than a comment. Because every
+law is written in the same three quantities, every law can be read *back* as
+them, which makes the tuning a thing in its own right rather than a property
+of whichever law happens to be running. So `mp`, `nq`, `wf` and the
+equivalent inertia `H` can be set on a VSM or a matching converter that has
+no parameter by those names, and swapping a law carries the tuning across
+instead of dropping the unit back to the defaults. The machine's regulators
+have no such correspondence -- a rate-feedback gain is not a transient gain
+reduction -- so theirs are simply discarded on a swap, and that asymmetry is
+the physics, not an omission.
 
 One trap found there and worth stating generally: **a state name must mean
 one group.** The filtered droop's filter state and the VSM's swing state are

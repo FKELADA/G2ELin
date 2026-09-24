@@ -154,8 +154,18 @@ class ParameterSensitivityResult:
         }
 
 
-def _block_index(blocks, unit_id: int, network: Network) -> int | None:
-    """Where one DER unit's block sits in the assembled ordering."""
+def _block_index(blocks, unit_id: int, network: Network) -> tuple[int, str] | None:
+    """Where one DER unit's block sits in the assembled ordering, and what it
+    is called there.
+
+    The name matters as much as the index. A block is labelled per *type* --
+    the first converter is ``GFM_1`` whatever its unit id -- while the unit
+    id counts every unit in the network, so on a mixed fleet the two part
+    company: CIGRE's islanded case has a converter with id 2 whose block is
+    ``GFM_1``, and there is no ``GFM_2`` at all. Building a label from the
+    id would report a unit that does not exist, and would not match the
+    state names beside it.
+    """
     from g2elin_core.network.breakers import block_labels
 
     name = block_labels(network).der.get(unit_id)
@@ -163,7 +173,7 @@ def _block_index(blocks, unit_id: int, network: Network) -> int | None:
         return None
     for i, b in enumerate(blocks):
         if b.name == name:
-            return i
+            return i, name
     return None
 
 
@@ -237,9 +247,10 @@ def parameter_sensitivity(
             continue                      # an infinite bus has none
         if not keys:
             continue
-        index = _block_index(blocks, der.id, network)
-        if index is None:
+        located = _block_index(blocks, der.id, network)
+        if located is None:
             continue
+        index, label = located
         xs, _, _ = parts.block_slices(index)
         share = float(np.abs(modal.participation[xs, mode]).sum())
         if participation_floor and share < participation_floor:
@@ -258,7 +269,6 @@ def parameter_sensitivity(
         # the other would, which is why the scan stays on this one.
         current = unit_op.p
         modes = network.unit_modes(der)
-        label = f"{kind.upper()}_{der.id}"
         # The one unit whose parameters reach past its own block. In the
         # MATLAB-compatible frame the slack machine's rotor angle *is* the
         # reference every other unit's angle is measured from, so the three

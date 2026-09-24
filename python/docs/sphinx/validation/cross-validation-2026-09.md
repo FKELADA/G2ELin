@@ -12,6 +12,13 @@ one of those tests.
 This is the first check against references that were not produced by this
 code.
 
+> **A dated record.** The numbers below are what the presets gave in
+> September 2026 and are left as they were. `kundur_two_area_classic` has
+> since been rebuilt on the Kundur exciter model with the book's own values
+> and an explicit "no governor", so a re-run will not reproduce them
+> exactly. What the report concluded about *why* the models differ still
+> holds; the figures are a snapshot, not a current baseline.
+
 ---
 
 ## Summary

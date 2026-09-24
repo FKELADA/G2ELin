@@ -81,6 +81,21 @@ function regulatorGroups(der) {
   }).filter(([, keys]) => keys.length);
 }
 
+// The droop-equivalent tuning a set of parameters stands for. Display only:
+// anything that *writes* goes through /api/units/retune, so the five laws'
+// formulas live in one place. Kept in step with
+// operating_point.gfm_outer_tuning.
+function gfmTuning(p, law) {
+  let mp, nq, wf;
+  if (law === "droop" || law === "droop_filtered") { mp = p.mp; nq = p.nq; wf = p.wf; }
+  else if (law === "dvoc") { mp = p.eta; nq = 1 / (2 * p.alfa); wf = p.wf; }
+  else if (law === "vsm") { mp = 1 / p.Dp; nq = 1 / p.Dq; wf = p.Dp / p.J; }
+  else if (law === "matching") { mp = p.Kpdc ? p.K_theta / p.Kpdc : NaN; nq = p.nq ?? 1e-4; wf = p.wf; }
+  else return null;
+  if (![mp, nq, wf].every(x => Number.isFinite(x) && x > 0)) return null;
+  return { mp, nq, wf, H: 1 / (2 * mp * wf) };
+}
+
 const PARAM_HELP = {
   Ra: "stator resistance", Ll: "stator leakage inductance", Lad: "d-axis mutual inductance", Laq: "q-axis mutual inductance",
   Lfd: "field leakage inductance", Rfd: "field resistance", L1d: "d damper inductance", R1d: "d damper resistance",
@@ -208,6 +223,47 @@ const UnitParams = {
     catch (e) { this._defaultsCache.delete(key); throw e; }
   },
 
+  // The droop-equivalent tuning a converter's outer loop stands for,
+  // whichever law it runs. Every law's gains are written in terms of these
+  // (script_generic.m), which is what makes the laws comparable -- so they
+  // can be set on a VSM or a matching converter that carries no parameter
+  // by these names at all.
+  tuningHtml(der, defaults) {
+    const t = gfmTuning({ ...defaults, ...(der.params || {}) }, der.controller || "droop");
+    if (!t) return "";
+    const row = (key, label, help, value) => `<div class="urow" data-key="${key}">
+        <label for="tune-${der.id}-${key}" title="${esc(help)}"><code>${esc(label)}</code><span>${esc(help)}</span></label>
+        <input id="tune-${der.id}-${key}" type="number" step="any" data-tuning="${key}" value="${+value.toPrecision(8)}">
+        <span></span><span></span></div>`;
+    return `<div class="ugroup"><div class="ugroup-title">Equivalent tuning</div>
+      <p class="muted" style="font-size:0.74rem;margin:0 0 0.3rem">Every control law is tuned from these, so setting one here rewrites whichever law this unit runs \u2014 and swapping laws keeps them. H and \u03c9f say the same thing twice (H = 1/(2\u00b7mp\u00b7\u03c9f)); setting H moves \u03c9f.</p>
+      ${row("mp", "mp", "active power / frequency droop (pu)", t.mp)}
+      ${row("nq", "nq", "reactive power / voltage droop (pu)", t.nq)}
+      ${row("wf", "\u03c9f", "power-measurement filter cut-off (rad/s)", t.wf)}
+      ${row("H", "H", "equivalent inertia constant (s)", t.H)}
+      <div class="notice warn-bg" data-role="tune-err" style="display:none;font-size:0.76rem"></div></div>`;
+  },
+
+  // Re-express a converter's outer loop: another law, another tuning, or
+  // both. The formulas are the backend's (operating_point.gfm_retuned) and
+  // are deliberately not mirrored here -- there are five laws and they all
+  // have to agree. Only what differs from the new defaults is stored, so
+  // der.params stays a set of overrides rather than a full copy.
+  async retune(box, der, { to_controller = null, tuning = null } = {}) {
+    const from = der.controller || "droop";
+    const current = { ...box._defaults, ...(der.params || {}) };
+    const r = await api("/api/units/retune", jsonPost({
+      controller: from, params: current, to_controller, tuning,
+    }));
+    if (to_controller) der.controller = to_controller;
+    const { defaults } = await this.defaultsFor(der);
+    der.params = Object.fromEntries(Object.entries(r.params).filter(([k, v]) =>
+      !(k in defaults) || Math.abs(v - defaults[k]) > 1e-9 * Math.max(1, Math.abs(v))));
+    box.dataset.key = "";
+    networkChanged();
+    await this.render(box, der);
+  },
+
   // box: container; der: the DerUnit (mutated in place)
   async render(box, der) {
     let got;
@@ -243,6 +299,7 @@ const UnitParams = {
      : noTransformer ? " Rt/Lt will follow this unit's transformer; there is none yet, so they show placeholder defaults."
      : " This unit has no transformer of its own yet; Rt/Lt show the network's first transformer until it has one."}</p>
           <div class="notice warn-bg" data-role="plant-note" style="display:none;font-size:0.76rem;margin:0.4rem 0"></div>
+          ${der.unit_type === "gfm" ? this.tuningHtml(der, defaults) : ""}
           ${unitModelSlots(der).length ? `<div class="ugroup uregulators"><div class="ugroup-title">${der.unit_type === "sm" ? "Regulator models" : "Control law"}</div>
             ${unitModelSlots(der).map(([slot, title, models]) => {
               const chosen = der[slot] || (models.g2elin ? "g2elin" : "droop");
@@ -272,8 +329,17 @@ const UnitParams = {
     // overridden under a name the new model does not have is dropped rather
     // than left behind to be rejected by the backend. The panel is rebuilt
     // from scratch: its key includes the models.
-    box.querySelectorAll("select[data-regulator]").forEach(sel => sel.addEventListener("change", () => {
+    box.querySelectorAll("select[data-regulator]").forEach(sel => sel.addEventListener("change", async () => {
       const slot = sel.dataset.regulator;
+      // A converter's laws are all written in terms of the same droop
+      // tuning, so swapping one carries that tuning across rather than
+      // dropping the unit back to the defaults. A machine's regulators have
+      // no such correspondence -- a rate-feedback gain is not a transient
+      // gain reduction -- so theirs are simply discarded.
+      if (der.unit_type === "gfm" && slot === "controller") {
+        try { await this.retune(box, der, { to_controller: sel.value }); return; }
+        catch (e) { /* fall through to the plain swap below */ }
+      }
       der[slot] = sel.value;
       const kept = new Set(regulatorGroups(der).flatMap(g => g[1]));
       const ownedByAny = new Set(unitModelSlots(der).flatMap(([, , models]) =>
@@ -284,6 +350,16 @@ const UnitParams = {
       box.dataset.key = "";
       networkChanged();
       this.render(box, der);
+    }));
+
+    box.querySelectorAll("input[data-tuning]").forEach(inp => inp.addEventListener("change", async () => {
+      const value = parseFloat(inp.value);
+      if (!Number.isFinite(value) || value <= 0) return this.render(box, der);
+      try { await this.retune(box, der, { tuning: { [inp.dataset.tuning]: value } }); }
+      catch (e) {
+        const slot = box.querySelector('[data-role="tune-err"]');
+        if (slot) { slot.textContent = String(e.message || e); slot.style.display = ""; }
+      }
     }));
 
     // SI value typed -> per-unit value (the stored one) -> the usual path.

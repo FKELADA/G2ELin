@@ -120,15 +120,48 @@ every WSCC/CIGRE preset in this codebase uses these values unmodified.
 | $L_{1d}$ | 0.1713 | | | |
 | $R_{1d}$ | 0.0284 | | | |
 
-| Mechanical | Value | AVR | Value | PSS | Value |
-|---|---|---|---|---|---|
-| $H$ (s) | 5.0 | $T_r$ (s) | 0.02 | $T_{LP}$ (s) | 0.03 |
-| $K_D$ | 0.0 | $K_a$ | 300.0 | $K_{PSS}$ | 2.0 |
-| $m_p$ (droop, pu) | 0.005 | $T_a$ (s) | 0.001 | $T_{HP}$ (s) | 2.0 |
-| $T_G$ (s) | 0.2 | $K_e$ | 1.0 | $T_{1n}/T_{1d}$ (s) | 0.05 / 0.02 |
-| | | $T_e$ (s) | 0.0001 | $T_{2n}/T_{2d}$ (s) | 3.0 / 5.4 |
-| | | $K_{fd}$ | 0.001 | | |
-| | | $T_{fd}$ (s) | 0.1 | | |
+| Mechanical | Value | Governor (`g2elin`) | Value |
+|---|---|---|---|
+| $H$ (s) | 5.0 | $m_p$ (droop, pu) | 0.005 |
+| $K_D$ | 0.0 | $T_G$ (s) | 0.2 |
+
+**The regulator half depends on which models the machine carries.** Each
+exciter and stabiliser brings its own parameters under its own names
+(`DerUnit.exciter` / `DerUnit.pss` / `DerUnit.governor`; see
+{doc}`components <components>`), so a machine's key set is a function of the
+models fitted and not of its type. `overridable_param_keys(kind, exciter=,
+pss=, governor=, controller=)` — or `unit_keys(der)` for a caller holding a
+unit — is what everything that asks "what may this unit override" goes
+through.
+
+| Exciter `g2elin` | Value | Exciter `kundur` | Value |
+|---|---|---|---|
+| $T_r$ (s) | 0.02 | $T_R$ (s) | 0.01 |
+| $K_a$ | 300.0 | $K_A$ | 200.0 |
+| $T_a$ (s) | 0.001 | $T_A$ (s, TGR lead) | 1.0 |
+| $K_e$ | 1.0 | $T_B$ (s, TGR lag) | 10.0 |
+| $T_e$ (s) | 0.0001 | | |
+| $K_{fd}$ | 0.001 | | |
+| $T_{fd}$ (s) | 0.1 | | |
+
+| PSS `g2elin` | Value | PSS `kundur` | Value |
+|---|---|---|---|
+| $K_{PSS}$ | 2.0 | $K_{STAB}$ | 20.0 |
+| $T_{LP}$ (s) | 0.03 | $T_W$ (s) | 10.0 |
+| $T_{HP}$ (s) | 2.0 | $T_1/T_2$ (s) | 0.05 / 0.02 |
+| $T_{1n}/T_{1d}$ (s) | 0.05 / 0.02 | $T_3/T_4$ (s) | 3.0 / 5.4 |
+| $T_{2n}/T_{2d}$ (s) | 3.0 / 5.4 | | |
+
+The `kundur` values are the book's own, from the data for Example 12.9. Note
+that the book pairs its stabiliser with *high transient gain* — case (iv),
+$T_A = T_B$, TGR switched off — while the TGR values above are case (iii).
+The two are alternatives, not a combination.
+
+> **$K_e$ is not IEEE's $K_E$.** In IEEE DC-exciter models the exciter
+> equation is $T_E \dot E_{fd} = V_R - (K_E + S_E)E_{fd}$, with $K_E$
+> multiplying the *output*. Here it multiplies the input. They coincide at
+> $K_e = 1$, which is the default, but a value taken off a datasheet will
+> not mean what it says.
 
 ### GFM/GFL loop-tuning: rise-time pole placement
 
@@ -159,6 +192,39 @@ loop below is this same formula with different $(\tau, g, t_r)$:
 | GFL DC-link voltage | $C_{dc}/(\omega_b G_{dc})$ | $-1/G_{dc}$ | 100 ms | $K_{pd}, K_{id}$ |
 | GFL reactive-power loop | — (I-only) | — | 100 ms | $K_{iq} = -3/t_r$ |
 | GFL PLL | — ($g=\omega_b$) | $\omega_b$ | 50 ms | $K_{p,pll}, K_{i,pll}$ |
+
+A converter's outer law brings its own parameters the same way
+(`DerUnit.controller`): `droop` has $m_p, n_q, w_f$, `droop_filtered` adds
+$w_c$, `dvoc` has $\eta, \alpha, w_f$, `vsm` has $J, D_p, K, D_q$ and
+`matching` has $K_\theta, w_f$. Every one is derived from the droop tuning
+so the laws stay comparable — see {doc}`components <components>`.
+
+#### Equivalent tuning, and swapping a law
+
+Because every law's gains are written in terms of the same $m_p$, $n_q$ and
+$w_f$, every law's gains can be read *back* as those three —
+`gfm_outer_tuning(params, controller)` — together with the equivalent
+inertia $H = 1/(2 m_p w_f)$ they imply.
+
+`gfm_retuned(params, from_controller, to_controller=None, tuning=None)` is
+the pair of things that follow from that, and is what the editor calls:
+
+- **Swapping a law** carries the tuning across, so a converter tuned away
+  from the defaults keeps its inertia and reactive gain instead of silently
+  reverting. The mapping is invertible, so swapping back returns the
+  original numbers.
+- **Editing the tuning** rebuilds whichever law is running from the new
+  numbers. That is what lets $m_p$, $H$ and $w_f$ be set on a VSM or a
+  matching converter, which carry no parameter by those names at all — a
+  VSM's $H$ is $J/2$, and setting it moves $J$ and $K$.
+
+$H$ and $w_f$ say the same thing twice, so when both are given $H$ wins: it
+is the physical quantity, and the one a comparison between laws is usually
+held fixed at.
+
+Matching control is the one law that cannot report everything: it carries no
+reactive gain of its own, so $n_q$ comes back as the default rather than as
+something inferred from nothing.
 
 The droop coefficients themselves are fixed, not pole-placed: $m_p =
 1/K_{D,opt}$ with $K_{D,opt}=200$ (so $m_p = 0.005$ pu, matching the SM's

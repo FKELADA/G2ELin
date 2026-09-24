@@ -105,6 +105,7 @@ _GFM_DC_LINK_T_DC = 1e-3
 _H_FIRST_ORDER = 3.0
 _H_SECOND_ORDER = 6.0  # the equivalent inertia the filtered droop is tuned for
 _KD_OPT = 200.0
+DEFAULT_GFM_DROOP_MP = 1.0 / _KD_OPT
 _DROOP_NQ = 0.0001
 _GFM_INNER_CURRENT_LOOP_TR_S = 0.1e-3  # script_generic.m's Inner_current_loop.tr
 
@@ -138,6 +139,80 @@ def _gfm_outer_params(controller: str, *, mp: float, nq: float, wf: float, kpdc:
     raise ValueError(f"unknown GFM controller {controller!r}")
 
 
+def gfm_outer_tuning(params: dict, controller: str, *, kpdc: float | None = None) -> dict:
+    """The droop-equivalent tuning a law's own parameters stand for.
+
+    The inverse of :func:`_gfm_outer_params`. Every law's gains are written
+    in terms of ``mp``, ``nq`` and ``wf`` -- that is what makes them
+    comparable -- so every law's gains can be read back as those three, and
+    a unit re-tuned or switched to another law without losing what it was
+    tuned to.
+
+    ``H`` comes out with them: the equivalent inertia is ``1/(2*mp*wf)``,
+    which is the quantity ``script_generic.m`` starts from and the one worth
+    holding fixed when comparing laws.
+
+    A law that does not carry a quantity cannot report it: matching control
+    has no reactive gain of its own, so ``nq`` comes back as the default
+    rather than as something inferred from nothing.
+    """
+    base = {"mp": DEFAULT_GFM_DROOP_MP, "nq": _DROOP_NQ}
+    if controller in ("droop", "droop_filtered"):
+        mp, nq, wf = params["mp"], params["nq"], params["wf"]
+    elif controller == "dvoc":
+        mp, nq, wf = params["eta"], 1.0 / (2.0 * params["alfa"]), params["wf"]
+    elif controller == "vsm":
+        # Dp = 1/mp and J = 1/(mp*wf), so wf = Dp/J.
+        mp, nq = 1.0 / params["Dp"], 1.0 / params["Dq"]
+        wf = params["Dp"] / params["J"]
+    elif controller == "matching":
+        # K_theta = mp*Kpdc, and nothing in this law carries a reactive gain.
+        if kpdc in (None, 0.0):
+            raise ValueError("matching control needs Kpdc to report its equivalent mp")
+        mp, nq, wf = params["K_theta"] / kpdc, base["nq"], params["wf"]
+    else:
+        raise ValueError(f"unknown GFM controller {controller!r}")
+    return {"mp": mp, "nq": nq, "wf": wf, "H": 1.0 / (2.0 * mp * wf)}
+
+
+def gfm_retuned(
+    params: dict, from_controller: str, to_controller: str | None = None,
+    tuning: dict | None = None,
+) -> tuple[dict, dict]:
+    """``params`` re-expressed, for another control law or another tuning.
+
+    Returns ``(params, tuning)`` -- the new parameter dict and the
+    droop-equivalent tuning it stands for.
+
+    This is what the editor calls for both of the things a user can do to a
+    converter's outer loop. Swapping the law carries the tuning across, so
+    the unit keeps the inertia and reactive gain it had rather than silently
+    reverting to the defaults. Editing the tuning rebuilds whichever law is
+    running from the new numbers, so ``mp``, ``H`` and ``wf`` can be set on
+    a VSM or a matching converter that has no parameter by those names.
+
+    ``H`` and ``wf`` say the same thing twice (``H = 1/(2*mp*wf)``), so when
+    both are given ``H`` wins: it is the physical quantity, and the one a
+    comparison between laws is usually held fixed at.
+    """
+    kpdc = params.get("Kpdc")
+    now = gfm_outer_tuning(params, from_controller, kpdc=kpdc)
+    now.update({k: v for k, v in (tuning or {}).items() if k in now and v is not None})
+    if tuning and tuning.get("H"):
+        now["wf"] = 1.0 / (2.0 * now["mp"] * tuning["H"])
+    for name in ("mp", "nq", "wf"):
+        if not now[name] > 0:
+            raise ValueError(f"{name} must be positive, got {now[name]!r}")
+    now["H"] = 1.0 / (2.0 * now["mp"] * now["wf"])
+
+    to_controller = to_controller or from_controller
+    owned = set(_gfm_outer_params(from_controller, mp=1, nq=1, wf=1, kpdc=1))
+    shared = {k: v for k, v in params.items() if k not in owned}
+    rebuilt = _gfm_outer_params(to_controller, mp=now["mp"], nq=now["nq"],
+                                wf=now["wf"], kpdc=kpdc or 0.0)
+    return {**shared, **rebuilt}, now
+
+
 def gfm_params(
     *, sn_mva: float, f_hz: float, un_kv: float, rt_pu: float, lt_pu: float,
     tr_cl: float = _GFM_INNER_CURRENT_LOOP_TR_S, controller: str = "droop",
@@ -159,7 +234,7 @@ def gfm_params(
     dc_g_pu = 1.0 / dc_r_pu
     dc_c_pu = _GFM_DC_LINK_C_F / base.cb_dc
 
-    mp = 1.0 / _KD_OPT
+    mp = DEFAULT_GFM_DROOP_MP
     wf = 1.0 / (2 * mp * _H_FIRST_ORDER)
 
     zita = 0.707

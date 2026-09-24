@@ -304,7 +304,9 @@ const PowerFlowPage = {
     const lossSeries = [{ name: "Total losses (MW)", t, color: seriesColor(0), y: snaps.map(s => s.converged ? s.total_losses_mw : NaN) }];
     const slack = [{ name: "Slack P (MW)", t, color: seriesColor(1), y: snaps.map(s => s.converged && s.external_grid[0] ? s.external_grid[0].p_mw : NaN) }];
     box.innerHTML = `<div class="card"><div class="card-title">Batch overview <span class="card-sub">— across the ${snaps.length} snapshots</span></div><div class="two-col"><div id="pf-ch-v"></div><div id="pf-ch-l"></div></div></div>`;
-    const opts = { xUnit: "", xLabel: "snapshot", xFormat, xTickFormat: v => `#${Math.round(v)}`, height: 250 };
+    // No zoom here: the x axis is a handful of discrete snapshots, so a
+    // window over it would say less than the whole thing already does.
+    const opts = { xUnit: "", xLabel: "snapshot", xFormat, xTickFormat: v => `#${Math.round(v)}`, height: 250, zoomable: false };
     $("#pf-ch-v").appendChild(lineChart(vSeries, { ...opts, title: "Bus voltage magnitudes (pu)" }));
     $("#pf-ch-v").insertAdjacentHTML("beforeend", legendHtml(vSeries));
     $("#pf-ch-l").appendChild(lineChart([...lossSeries, ...slack], { ...opts, title: "Losses and slack injection (MW)" }));

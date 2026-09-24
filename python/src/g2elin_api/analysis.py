@@ -1107,8 +1107,11 @@ def model_summary_response(network: Network) -> ModelSummaryResponse:
         fast = "trafo_current" if kind == "sm" else "trafo_current"
         if group_modes.get(fast) == reduction.DYNAMIC:
             unit_fast_dynamic = True
+        # This unit's own catalogue: a machine's AVR and PSS groups depend on
+        # which regulator models it carries, so their state counts do too.
+        element = network.unit_element(der)
         n_states = sum(
-            len(reduction.element(kind).group(gid).symbols)
+            len(element.group(gid).symbols)
             for gid, mode in group_modes.items() if mode == reduction.DYNAMIC
         )
         units.append(UnitModelRow(
@@ -1118,6 +1121,9 @@ def model_summary_response(network: Network) -> ModelSummaryResponse:
             level=network.unit_level(der),
             modes=group_modes,
             n_states=n_states,
+            exciter=der.exciter_model if kind == "sm" else None,
+            pss=der.pss_model if kind == "sm" else None,
+            governor=der.governor_model if kind == "sm" else None,
         ))
 
     if network_dynamic and unit_fast_dynamic:
@@ -1136,11 +1142,18 @@ def model_summary_response(network: Network) -> ModelSummaryResponse:
     # deliberately, by the adequacy check.
     model = build_nonlinear_model_from_network(network)
     n_states = sum(b.comp.n_states for b in model.blocks)
+    # A machine's full-order count depends on its regulators, so it is read
+    # off that unit's own catalogue where the block can be traced back to one.
+    unit_elements = {
+        f"{der.unit_type.value.upper()}_{der.id}": network.unit_element(der)
+        for der in network.der_units if der.unit_type.value in reduction.ELEMENTS
+    }
     n_full = 0
     for block in model.blocks:
         kind = block.kind.removesuffix("_slack")
         if kind in reduction.ELEMENTS:
-            n_full += sum(len(g.symbols) for g in reduction.element(kind).groups)
+            element = unit_elements.get(block.name) or reduction.element(kind)
+            n_full += sum(len(g.symbols) for g in element.groups)
         elif kind in ("node", "line", "load", "shunt"):
             n_full += 2  # every passive element is a dq pair at full order
         else:

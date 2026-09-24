@@ -185,7 +185,11 @@ def unit_defaults(req: UnitDefaultsRequest) -> UnitDefaultsResponse:
         raise HTTPException(status_code=422, detail="sn_mva, f_hz and un_kv must be positive")
     base = dict(sn_mva=req.sn_mva, f_hz=req.f_hz, rt_pu=req.rt_pu, lt_pu=req.lt_pu)
     if req.unit_type == "sm":
-        params = sm_params(**base)
+        try:
+            params = sm_params(**base, exciter=req.exciter or "g2elin",
+                               pss=req.pss or "g2elin", governor=req.governor or "g2elin")
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
     elif req.unit_type == "gfm":
         params = gfm_params(**base, un_kv=req.un_kv)
     elif req.unit_type == "gfl":

@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import cmath
 from collections.abc import Mapping
+from dataclasses import dataclass
+from enum import Enum
 from functools import lru_cache
 
 import numpy as np
@@ -31,7 +33,7 @@ import sympy as sp
 from .base import (
     ComponentDAE, LinearComponent, NonlinearFuncs, NonlinearJacobians,
     RebuiltWithParams,
-    apply_reduction, build_dae, equilibrium_subs, mode_key,
+    apply_reduction, build_dae, eq_symbol, equilibrium_subs, mode_key,
 )
 
 # Parameters
@@ -39,6 +41,18 @@ wb, Rt, Lt, Rg, Ra, Ll, Lad, Laq, Lfd, Rfd = sp.symbols("wb Rt Lt Rg Ra Ll Lad L
 L1d, L1q, L2q, R1d, R1q, R2q, H, KD, mp, TG = sp.symbols("L1d L1q L2q R1d R1q R2q H KD mp TG")
 T_LP, T_HP, K_PSS, T1n, T1d, T2n, T2d = sp.symbols("T_LP T_HP K_PSS T1n T1d T2n T2d")
 Tr, Ka, Ta, Ke, Te, Kfd, Tfd = sp.symbols("Tr Ka Ta Ke Te Kfd Tfd")
+# Kundur Fig. E12.9's own names, for the blocks drawn there: the exciter's
+# transducer 1/(1+sTR), its gain KA and its transient gain reduction
+# (1+sTA)/(1+sTB); the stabiliser's gain KSTAB, its washout sTW/(1+sTW) and
+# its two lead-lag stages (1+sT1)/(1+sT2) and (1+sT3)/(1+sT4).
+#
+# Each regulator model carries its *own* parameter set under its own names --
+# nothing is shared with the original models and nothing is renamed to a
+# common spelling, so what a user types is what the figure shows. A machine
+# only ever has one exciter and one stabiliser, so `TA` here and the original
+# regulator's `Ta` never appear together despite differing only in case.
+TR, KA, TA, TB = sp.symbols("TR KA TA TB")
+KSTAB, TW, T1, T2, T3, T4 = sp.symbols("KSTAB TW T1 T2 T3 T4")
 
 # States (PSS on)
 igd, igq, phi_d, phi_q, phi_fd, phi_1d, phi_1q, phi_2q = sp.symbols(
@@ -47,6 +61,7 @@ igd, igq, phi_d, phi_q, phi_fd, phi_1d, phi_1q, phi_2q = sp.symbols(
 Dwr, theta, Pm, Dw1, v1, v2, vpss, e1, e2, efd, e3 = sp.symbols(
     "Dwr theta Pm Dw1 v1 v2 vpss e1 e2 efd e3"
 )
+e_tgr = sp.Symbol("e_tgr")   # the Kundur exciter's transient-gain-reduction state
 
 # Algebraic
 wr, ved, veq, id_, i1d, ifd, iq, i1q, i2q, vgd, vgq, Cm, Ce, DP, Et = sp.symbols(
@@ -56,22 +71,169 @@ wr, ved, veq, id_, i1d, ifd, iq, i1q, i2q, vgd, vgq, Cm, Ce, DP, Et = sp.symbols
 # Inputs
 v_ref, p_ref, w_ref, theta_g, vgd_g, vgq_g = sp.symbols("v_ref p_ref w_ref theta_g vgd_g vgq_g")
 
-_STATE_NAMES_PSS_ON = [
+_MACHINE_STATE_NAMES = [
     "i_gd", "i_gq", "psi_d", "psi_q", "psi_fd", "psi_1d", "psi_1q", "psi_2q",
-    "dw_r", "theta", "P_m", "dw_1", "v_1", "v_2", "v_pss", "e_1", "e_2", "e_fd", "e_3",
+    "dw_r", "theta",
 ]
 
 
-@lru_cache(maxsize=16)
-def sm_dae(is_slack: bool, modes: tuple[tuple[str, str], ...] = ()) -> ComponentDAE:
+class ExciterKind(str, Enum):
+    """Which AVR/exciter this machine carries.
+
+    See ``docs/sphinx/design/controller-models.md`` for how these relate to
+    the IEEE 421.5 model library.
+    """
+
+    G2ELIN = "g2elin"
+    KUNDUR = "kundur"
+
+
+class PssKind(str, Enum):
+    """Which power system stabiliser this machine carries, if any."""
+
+    G2ELIN = "g2elin"
+    KUNDUR = "kundur"
+    #: No stabiliser at all -- no states, and nothing added at the
+    #: regulator's summing junction.
+    NONE = "none"
+
+
+class GovernorKind(str, Enum):
+    """Whether this machine's prime mover responds to speed."""
+
+    G2ELIN = "g2elin"
+    #: No governor: the mechanical power stays at whatever the operating
+    #: point set, which is the "constant mechanical torque" assumption most
+    #: textbook small-signal examples are worked under.
+    NONE = "none"
+
+
+@dataclass(frozen=True)
+class _ControlBlock:
+    """One regulator, as the pieces :func:`sm_dae` has to splice together."""
+
+    states: tuple[tuple[sp.Symbol, sp.Expr, str], ...]
+    output: sp.Expr
+    #: ``(symbol, residual)`` for anything the block solves algebraically
+    #: rather than integrating -- a lead-lag with no lag behind it has direct
+    #: feedthrough, so its output is not a state.
+    alg: tuple[tuple[sp.Symbol, sp.Expr], ...] = ()
+
+
+def _lead_lag(u: sp.Expr, du: sp.Expr, T_n, T_d, state: sp.Symbol) -> sp.Expr:
+    """``d/dt`` of the state realising ``(1 + s T_n)/(1 + s T_d)`` applied to
+    ``u``, whose own derivative ``du`` is known symbolically.
+
+    Writing it this way -- rather than splitting off a feedthrough term --
+    keeps the block strictly proper, so its output stays a state and the
+    component keeps a clean A/B/C/D split. It only works when ``du`` is
+    available, which it is whenever the upstream block is itself dynamic.
+    """
+    return (T_n * du + u - state) / T_d
+
+
+def _governor_block(kind: GovernorKind) -> _ControlBlock:
+    """The prime mover's response to speed.
+
+    ``none`` is not the governor with its droop turned down: the state and
+    its droop are gone, and the mechanical power is pinned to its
+    operating-point value through the same ``x_0`` symbol a frozen state
+    uses, so it needs no new initialisation.
+    """
+    if kind is GovernorKind.NONE:
+        return _ControlBlock(states=(), output=eq_symbol(Pm))
+    return _ControlBlock(
+        states=((Pm, (p_ref - DP - Pm) / TG, "P_m"),),
+        output=Pm,
+        alg=((DP, DP - (wr - w_ref) / mp),),
+    )
+
+
+def _pss_block(kind: PssKind, *, dwr: sp.Symbol, d_dwr: sp.Expr) -> _ControlBlock:
+    """The stabiliser, driven by rotor speed deviation.
+
+    Both real variants are a washout followed by two lead-lag stages; they
+    differ only in what sits in front of the washout. ``g2elin`` filters the
+    speed signal first, ``kundur`` (Fig. E12.9) takes it raw. ``none`` adds
+    nothing at the regulator's summing junction.
+    """
+    if kind is PssKind.NONE:
+        return _ControlBlock(states=(), output=sp.Integer(0))
+    if kind is PssKind.G2ELIN:
+        dDw1 = (dwr - Dw1) / T_LP
+        dv1 = K_PSS * dDw1 - v1 / T_HP
+        dv2 = _lead_lag(v1, dv1, T1n, T1d, v2)
+        dvpss = _lead_lag(v2, dv2, T2n, T2d, vpss)
+        return _ControlBlock(
+            states=((Dw1, dDw1, "dw_1"), (v1, dv1, "v_1"), (v2, dv2, "v_2"),
+                    (vpss, dvpss, "v_pss")),
+            output=vpss,
+        )
+    # Kundur Fig. E12.9: KSTAB -> sTW/(1+sTW) -> (1+sT1)/(1+sT2) -> (1+sT3)/(1+sT4).
+    # The washout sees the speed deviation itself, so its input derivative is
+    # the swing equation's right-hand side.
+    dv1 = KSTAB * d_dwr - v1 / TW
+    dv2 = _lead_lag(v1, dv1, T1, T2, v2)
+    dvpss = _lead_lag(v2, dv2, T3, T4, vpss)
+    return _ControlBlock(
+        states=((v1, dv1, "v_1"), (v2, dv2, "v_2"), (vpss, dvpss, "v_pss")),
+        output=vpss,
+    )
+
+
+def _avr_block(kind: ExciterKind, *, v_pss: sp.Expr) -> _ControlBlock:
+    """The voltage regulator, returning field voltage.
+
+    ``g2elin`` is the original four-state regulator: transducer, first-order
+    amplifier, first-order exciter and a rate feedback. ``kundur`` is Fig.
+    E12.9's thyristor exciter -- a transducer, a gain and transient gain
+    reduction, with no exciter lag at all.
+    """
+    if kind is ExciterKind.G2ELIN:
+        de1 = (Et - e1) / Tr
+        de2 = (Ka * (v_ref - e1 - e3 + v_pss) - e2) / Ta
+        defd = (Ke * e2 - efd) / Te
+        de3 = (Kfd * defd - e3) / Tfd
+        return _ControlBlock(
+            states=((e1, de1, "e_1"), (e2, de2, "e_2"), (efd, defd, "e_fd"), (e3, de3, "e_3")),
+            output=efd,
+        )
+    # A thyristor bridge has no time constant of its own, so the field
+    # voltage follows the regulator instantaneously and the lead-lag has
+    # direct feedthrough: E_fd is algebraic here, not a state.
+    de1 = (Et - e1) / TR
+    u = KA * (v_ref - e1 + v_pss)
+    de_tgr = (u - e_tgr) / TB
+    efd_expr = (TA / TB) * u + (1 - TA / TB) * e_tgr
+    return _ControlBlock(
+        states=((e1, de1, "e_1"), (e_tgr, de_tgr, "e_tgr")),
+        output=efd,
+        alg=((efd, efd - efd_expr),),
+    )
+
+
+@lru_cache(maxsize=64)
+def sm_dae(
+    is_slack: bool,
+    modes: tuple[tuple[str, str], ...] = (),
+    exciter: ExciterKind = ExciterKind.G2ELIN,
+    pss: PssKind = PssKind.G2ELIN,
+    governor: GovernorKind = GovernorKind.G2ELIN,
+) -> ComponentDAE:
     """``modes`` is a :func:`~g2elin_core.components.base.mode_key` tuple
     naming the states this machine gives up -- see
     :mod:`g2elin_core.reduction` for the catalogue and the named orders it
-    builds out of them. The default ``()`` is the full 19-state model.
+    builds out of them. The default ``()`` is the full model.
+
+    ``exciter`` and ``pss`` choose the regulators. The defaults are the
+    models this component has always had, so the default machine is the same
+    19 states it always was; ``kundur`` on both gives the 16-state machine of
+    Kundur Fig. E12.9 (three states fewer: the exciter loses its amplifier,
+    exciter lag and rate feedback but gains a TGR state, and the stabiliser
+    loses its input filter).
     """
-    state_vec = [igd, igq, phi_d, phi_q, phi_fd, phi_1d, phi_1q, phi_2q, Dwr, theta, Pm,
-                 Dw1, v1, v2, vpss, e1, e2, efd, e3]
-    alg_vec = [wr, ved, veq, id_, i1d, ifd, iq, i1q, i2q, vgd, vgq, Cm, Ce, DP, Et]
+    exciter, pss, governor = ExciterKind(exciter), PssKind(pss), GovernorKind(governor)
+    alg_vec = [wr, ved, veq, id_, i1d, ifd, iq, i1q, i2q, vgd, vgq, Cm, Ce, Et]
     us_vec = [v_ref, p_ref, w_ref]
     ug_vec = [vgd_g, vgq_g] if is_slack else [theta_g, vgd_g, vgq_g]
     input_vec = us_vec + ug_vec
@@ -82,7 +244,7 @@ def sm_dae(is_slack: bool, modes: tuple[tuple[str, str], ...] = ()) -> Component
 
     dphi_d = wb * (ved + Ra * id_ + wr * phi_q)
     dphi_q = wb * (veq + Ra * iq - wr * phi_d)
-    dphi_fd = (wb * Rfd / Lad) * efd - wb * Rfd * ifd
+    dphi_fd = (wb * Rfd / Lad) * efd - wb * Rfd * ifd   # efd: a state, or the AVR's algebraic output
     dphi_1d = wb * (-R1d * i1d)
     dphi_1q = wb * (-R1q * i1q)
     dphi_2q = wb * (-R2q * i2q)
@@ -90,20 +252,19 @@ def sm_dae(is_slack: bool, modes: tuple[tuple[str, str], ...] = ()) -> Component
     dDwr = (Cm - Ce - KD * Dwr) / (2 * H)
     dtheta = wb * wr
 
-    dPm = (p_ref - DP - Pm) / TG
+    # The regulators, spliced in after the machine's own states so that the
+    # default trio reproduces the original state ordering exactly.
+    gov_block = _governor_block(governor)
+    pss_block = _pss_block(pss, dwr=Dwr, d_dwr=dDwr)
+    avr_block = _avr_block(exciter, v_pss=pss_block.output)
 
-    dDw1 = (1 / T_LP) * (Dwr - Dw1)
-    dv1 = (1 / T_HP) * (T_HP * K_PSS * dDw1 - v1)
-    dv2 = (1 / T1d) * (T1n * dv1 + v1 - v2)
-    dvpss = (1 / T2d) * (T2n * dv2 + v2 - vpss)
-
-    de1 = (Et - e1) / Tr
-    de2 = (Ka * (v_ref - e1 - e3 + vpss) - e2) / Ta
-    defd = (Ke * e2 - efd) / Te
-    de3 = (Kfd * defd - e3) / Tfd
-
-    diffeq_vec = [digd, digq, dphi_d, dphi_q, dphi_fd, dphi_1d, dphi_1q, dphi_2q, dDwr,
-                  dtheta, dPm, dDw1, dv1, dv2, dvpss, de1, de2, defd, de3]
+    machine_states = list(zip(
+        [igd, igq, phi_d, phi_q, phi_fd, phi_1d, phi_1q, phi_2q, Dwr, theta],
+        [digd, digq, dphi_d, dphi_q, dphi_fd, dphi_1d, dphi_1q, dphi_2q, dDwr, dtheta],
+        _MACHINE_STATE_NAMES,
+    ))
+    all_states = (machine_states + list(gov_block.states)
+                  + list(pss_block.states) + list(avr_block.states))
 
     # --- Algebraic constraints ---
     invd = sp.Matrix([[-Lad - Ll, Lad, Lad], [-Lad, L1d + Lad, Lad], [-Lad, Lad, Lfd + Lad]]).inv()
@@ -130,11 +291,15 @@ def sm_dae(is_slack: bool, modes: tuple[tuple[str, str], ...] = ()) -> Component
             vgq - vgd_g * sp.sin(theta_g - theta) - vgq_g * sp.cos(theta_g - theta),
         ]
     alg += [
-        Cm - Pm / wr,
+        Cm - gov_block.output / wr,
         Ce - (phi_d * iq - phi_q * id_),
-        DP - (wr - w_ref) / mp,
         Et - sp.sqrt(ved**2 + veq**2),
     ]
+    # Anything a regulator solves rather than integrates goes on the end of
+    # both lists together, so the two stay aligned.
+    for block in (gov_block, pss_block, avr_block):
+        alg_vec += [sym for sym, _ in block.alg]
+        alg += [res for _, res in block.alg]
 
     # --- Outputs ---
     if is_slack:
@@ -150,7 +315,7 @@ def sm_dae(is_slack: bool, modes: tuple[tuple[str, str], ...] = ()) -> Component
     output_vec = outputeq_s + outputeq_g
 
     state_vec, diffeq_vec, state_names, alg_vec, alg, output_vec = apply_reduction(
-        states=list(zip(state_vec, diffeq_vec, _STATE_NAMES_PSS_ON)),
+        states=all_states,
         modes=dict(modes),
         alg_vec=alg_vec,
         algeq_vec=alg,
@@ -175,19 +340,31 @@ def sm_dae(is_slack: bool, modes: tuple[tuple[str, str], ...] = ()) -> Component
 
 
 @lru_cache(maxsize=16)
-def sm_nonlinear_funcs(is_slack: bool, modes: tuple[tuple[str, str], ...] = ()) -> NonlinearFuncs:
+def sm_nonlinear_funcs(
+    is_slack: bool,
+    modes: tuple[tuple[str, str], ...] = (),
+    exciter: ExciterKind = ExciterKind.G2ELIN,
+    pss: PssKind = PssKind.G2ELIN,
+    governor: GovernorKind = GovernorKind.G2ELIN,
+) -> NonlinearFuncs:
     """Numeric callables for the full nonlinear SM DAE — see
     :meth:`g2elin_core.components.base.ComponentDAE.nonlinear_funcs`.
     """
-    return sm_dae(is_slack, modes).nonlinear_funcs()
+    return sm_dae(is_slack, modes, exciter, pss, governor).nonlinear_funcs()
 
 
 @lru_cache(maxsize=16)
-def sm_nonlinear_jacobians(is_slack: bool, modes: tuple[tuple[str, str], ...] = ()) -> NonlinearJacobians:
+def sm_nonlinear_jacobians(
+    is_slack: bool,
+    modes: tuple[tuple[str, str], ...] = (),
+    exciter: ExciterKind = ExciterKind.G2ELIN,
+    pss: PssKind = PssKind.G2ELIN,
+    governor: GovernorKind = GovernorKind.G2ELIN,
+) -> NonlinearJacobians:
     """Numeric Jacobian callables for the SM DAE's algebraic/output
     equations — see :meth:`g2elin_core.components.base.ComponentDAE.nonlinear_jacobians`.
     """
-    return sm_dae(is_slack, modes).nonlinear_jacobians()
+    return sm_dae(is_slack, modes, exciter, pss, governor).nonlinear_jacobians()
 
 
 class SmOperatingPoint(RebuiltWithParams):
@@ -209,6 +386,9 @@ class SmOperatingPoint(RebuiltWithParams):
         p_ref_pu: float,
         theta_g_rad: float,
         is_slack: bool,
+        exciter: ExciterKind = ExciterKind.G2ELIN,
+        pss: PssKind = PssKind.G2ELIN,
+        governor: GovernorKind = GovernorKind.G2ELIN,
     ):
         # locals() here, before anything else runs, is exactly the
         # arguments -- see RebuiltWithParams.
@@ -263,6 +443,12 @@ class SmOperatingPoint(RebuiltWithParams):
         self.vgd_g0, self.vgq_g0 = vg_global.real, vg_global.imag
         self.theta_g0 = theta_g_rad
         self.is_slack = is_slack
+        # Carried, not used: which regulators this machine has does not change
+        # any initial value below -- see e_tgr0 for why -- but linearize_sm
+        # needs to know, and with_params() has to preserve it.
+        self.exciter = ExciterKind(exciter)
+        self.pss = PssKind(pss)
+        self.governor = GovernorKind(governor)
 
         self.p_ref0 = p_ref_pu
         self.w_ref0 = 1.0
@@ -276,8 +462,15 @@ class SmOperatingPoint(RebuiltWithParams):
         self.Et0 = abs(vdq0)
         self.e1_0 = self.Et0
         self.e3_0 = 0.0
-        self.v_ref0 = self.efd0 / params["Ka"] + self.e1_0
-        self.e2_0 = params["Ka"] * (self.v_ref0 - self.e1_0 - self.e3_0 + self.vpss0)
+        gain = params[EXCITER_GAIN_KEY[self.exciter]]
+        self.v_ref0 = self.efd0 / gain + self.e1_0
+        self.e2_0 = gain * (self.v_ref0 - self.e1_0 - self.e3_0 + self.vpss0)
+        # The Kundur exciter's TGR state. At rest a lead-lag passes its input
+        # through unchanged, so the state sits at the regulator output, which
+        # is the field voltage -- and v_ref0 above solves to the same value
+        # either way, which is why this operating point does not depend on
+        # which exciter the machine has.
+        self.e_tgr0 = self.efd0
 
         # i1d, i1q, i2q (damper-winding currents) never appear in a nonlinear
         # (product) term anywhere in the model, so they're irrelevant to the
@@ -303,7 +496,41 @@ class SmOperatingPoint(RebuiltWithParams):
 
         self.Cm0 = self.Pm0 / self.wr0
         self.Ce0 = self.psi_d0 * self.iq0 - self.psi_q0 * self.id0
-        self.DP0 = (self.wr0 - self.w_ref0) / params["mp"]
+        # Zero at any droop, since the machine starts at reference speed --
+        # and there is no droop at all without a governor.
+        self.DP0 = 0.0
+
+
+#: The parameter symbols each regulator model owns. The symbol name *is* the
+#: key in the unit's parameter dict, so a model's parameters are spelled the
+#: same in the equations, in the stored network and in the editor.
+#:
+#: Kept per slot rather than in one dict: these enums are ``str`` enums, so
+#: ``ExciterKind.G2ELIN`` and ``PssKind.G2ELIN`` are the same dict key.
+EXCITER_SYMBOLS: dict[str, tuple[sp.Symbol, ...]] = {
+    ExciterKind.G2ELIN: (Tr, Ka, Ta, Ke, Te, Kfd, Tfd),
+    ExciterKind.KUNDUR: (TR, KA, TA, TB),
+}
+
+#: Each exciter's regulator gain, whatever it is called in that model. The
+#: reference voltage is solved from it at initialisation -- V_ref is whatever
+#: makes the regulator ask for the field voltage the power flow implies.
+EXCITER_GAIN_KEY = {ExciterKind.G2ELIN: "Ka", ExciterKind.KUNDUR: "KA"}
+
+GOVERNOR_SYMBOLS: dict[str, tuple[sp.Symbol, ...]] = {
+    GovernorKind.G2ELIN: (mp, TG),
+    GovernorKind.NONE: (),
+}
+GOVERNOR_PARAM_NAMES = {k: tuple(s.name for s in v) for k, v in GOVERNOR_SYMBOLS.items()}
+PSS_SYMBOLS: dict[str, tuple[sp.Symbol, ...]] = {
+    PssKind.G2ELIN: (K_PSS, T_LP, T_HP, T1n, T1d, T2n, T2d),
+    PssKind.KUNDUR: (KSTAB, TW, T1, T2, T3, T4),
+    PssKind.NONE: (),
+}
+
+#: ``{model id: (parameter name, ...)}`` for whoever needs the names alone.
+EXCITER_PARAM_NAMES = {k: tuple(s.name for s in v) for k, v in EXCITER_SYMBOLS.items()}
+PSS_PARAM_NAMES = {k: tuple(s.name for s in v) for k, v in PSS_SYMBOLS.items()}
 
 
 def _sm_operating_subs(op: SmOperatingPoint) -> dict:
@@ -312,14 +539,17 @@ def _sm_operating_subs(op: SmOperatingPoint) -> dict:
         wb: p["wb"], Rt: p["Rt"], Lt: p["Lt"], Rg: p["RL_pu"], Ra: p["Ra"], Ll: p["Ll"],
         Lad: p["Lad"], Laq: p["Laq"], Lfd: p["Lfd"], Rfd: p["Rfd"],
         L1d: p["L1d"], L1q: p["L1q"], L2q: p["L2q"], R1d: p["R1d"], R1q: p["R1q"], R2q: p["R2q"],
-        H: p["H"], KD: p["KD"], mp: p["mp"], TG: p["TG"],
-        T_LP: p["T_LP"], T_HP: p["T_HP"], K_PSS: p["K_PSS"],
-        T1n: p["T1n"], T1d: p["T1d"], T2n: p["T2n"], T2d: p["T2d"],
-        Tr: p["Tr"], Ka: p["Ka"], Ta: p["Ta"], Ke: p["Ke"], Te: p["Te"], Kfd: p["Kfd"], Tfd: p["Tfd"],
+        H: p["H"], KD: p["KD"],
         igd: op.igd0, igq: op.igq0, phi_d: op.psi_d0, phi_q: op.psi_q0, phi_fd: op.psi_fd0,
         phi_1d: op.psi_1d0, phi_1q: op.psi_1q0, phi_2q: op.psi_2q0, Dwr: op.Dwr0, theta: op.theta0,
         Pm: op.Pm0, Dw1: op.Dw1_0, v1: op.v1_0, v2: op.v2_0, vpss: op.vpss0,
-        e1: op.e1_0, e2: op.e2_0, efd: op.efd0, e3: op.e3_0,
+        e1: op.e1_0, e2: op.e2_0, efd: op.efd0, e3: op.e3_0, e_tgr: op.e_tgr0,
+        # Each regulator's own parameters, under its own names. Only the
+        # chosen pair is present in `p`, and only their symbols appear in the
+        # equations, so only they are substituted.
+        **{sym: p[sym.name] for sym in EXCITER_SYMBOLS[op.exciter]},
+        **{sym: p[sym.name] for sym in PSS_SYMBOLS[op.pss]},
+        **{sym: p[sym.name] for sym in GOVERNOR_SYMBOLS[op.governor]},
         wr: op.wr0, ved: op.ved0, veq: op.veq0, id_: op.id0, i1d: op.i1d0, ifd: op.ifd0,
         iq: op.iq0, i1q: op.i1q0, i2q: op.i2q0, vgd: op.vgd0, vgq: op.vgq0,
         Cm: op.Cm0, Ce: op.Ce0, DP: op.DP0, Et: op.Et0,
@@ -332,11 +562,13 @@ def _sm_operating_subs(op: SmOperatingPoint) -> dict:
 
 
 def linearize_sm(op: SmOperatingPoint, modes: Mapping[str, str] | None = None) -> LinearComponent:
-    return sm_dae(op.is_slack, mode_key(modes)).linearize(_sm_operating_subs(op))
+    return sm_dae(op.is_slack, mode_key(modes), op.exciter, op.pss, op.governor).linearize(_sm_operating_subs(op))
 
 
 def sm_nonlinear_point(op: SmOperatingPoint, modes: Mapping[str, str] | None = None) -> tuple:
     """``(x0, z0, u0, p0)`` for :func:`sm_nonlinear_funcs`, at the same
     operating point :func:`linearize_sm` uses.
     """
-    return sm_dae(op.is_slack, mode_key(modes)).point_from_subs(_sm_operating_subs(op))
+    return sm_dae(op.is_slack, mode_key(modes), op.exciter, op.pss, op.governor).point_from_subs(
+        _sm_operating_subs(op)
+    )

@@ -36,7 +36,10 @@ from typing import NamedTuple
 
 from .machine_data import flux_linkage_params
 
-from .schema import Bus, BusType, DerUnit, GfmController, Line, Load, Network, Shunt, Transformer, UnitType
+from .schema import (
+    Bus, BusType, DerUnit, ExciterModel, GfmController, GovernorModel, Line, Load, Network,
+    PssModel, Shunt, Transformer, UnitType,
+)
 
 # Base values, from WSCC/script_WSCC.m Section II ("General network parameters"):
 #   f_hz = 60, Sn = 100 MVA, LV = 18 kV (generator terminals), HV = 230 kV (transmission)
@@ -730,15 +733,32 @@ def kundur_machine_params(h_s: float) -> dict[str, float]:
     )
 
 
-# What the book's own study assumes, which the tool does not by default:
-# a fast static exciter, no power-system stabilizer, and constant mechanical
-# torque. The governor has no off switch, so its droop is set so large that it
-# does not respond -- without this its 0.5% droop adds a mode of its own near
-# 0.25 Hz and stiffens the inter-area mode (0.61 -> 0.71 Hz).
-_KUNDUR_CLASSIC_CONTROLS = {"K_PSS": 0.0, "Ka": 200.0, "Tr": 0.01, "mp": 1e6}
+# Both presets carry the book's own regulator models (components/sm.py's
+# `kundur` exciter and stabilizer, drawn in Fig. E12.9) with the book's own
+# parameter values, and assume constant mechanical torque as the examples do.
+#
+# Note which example is which. The *network* here is Example 12.6's two-area
+# system; the *regulator data* is Example 12.9's, which the book works on a
+# single machine against an infinite bus. Combining them is a legitimate
+# study and gives the behaviour the chapter describes -- a high-gain exciter
+# destabilizing the inter-area mode, a stabilizer damping it -- but it is not
+# Example 12.9, and the numbers here are not the ones printed there.
+_KUNDUR_EXCITER = dict(exciter=ExciterModel.KUNDUR, governor=GovernorModel.NONE)
+
+# Example 12.9's case (iv): a thyristor exciter with *high transient gain*
+# -- TA = TB, so the transient gain reduction is transparent -- and a
+# stabilizer to damp what that gain would otherwise excite. KA/TR and the
+# stabilizer values are the Kundur models' own defaults, which are the
+# book's; TA is set here because the default is case (iii).
+_KUNDUR_HIGH_GAIN_PSS = {"TA": 10.0, "TB": 10.0}
+
+# The same machines with neither of the book's fixes: high transient gain,
+# and no stabilizer at all. That is the point of the case -- the AVR drives
+# the inter-area mode unstable.
+_KUNDUR_NO_PSS = dict(pss=PssModel.NONE)
 
 
-def _kundur_two_area(name: str, extra_params: dict[str, float]) -> Network:
+def _kundur_two_area(name: str, extra_params: dict, unit_kwargs: dict) -> Network:
     buses = (
         [Bus(id=i, name=f"G{i}_terminal", vn_kv=_KUNDUR_LV_KV) for i in (1, 2, 3, 4)]
         + [Bus(id=i, name=f"bus{i}", vn_kv=_KUNDUR_HV_KV) for i in range(5, 12)]
@@ -779,6 +799,8 @@ def _kundur_two_area(name: str, extra_params: dict[str, float]) -> Network:
             id=i, bus=bus, unit_type=UnitType.SYNCHRONOUS_MACHINE, bus_type=bus_type,
             v_set_pu=v, p_set_mw=p, xd_pu=0.3,
             sn_mva=_KUNDUR_MACHINE_MVA,
+            **_KUNDUR_EXCITER,
+            **unit_kwargs,
             params={**kundur_machine_params(h), **extra_params},
         )
         for i, bus, bus_type, p, v, h in spec
@@ -791,19 +813,28 @@ def _kundur_two_area(name: str, extra_params: dict[str, float]) -> Network:
 
 
 def kundur_two_area() -> Network:
-    """Kundur's two-area system with this tool's own controls (AVR, PSS and
-    governor on every machine), which damp the inter-area mode."""
-    return _kundur_two_area("Kundur_two_area", {})
+    """Kundur's two-area system with Example 12.9's case (iv) regulators: a
+    thyristor exciter with high transient gain plus a power-system
+    stabilizer, which damps the inter-area mode.
+
+    Case (iii) -- transient gain reduction instead of a stabilizer -- is the
+    same network with ``TA = 1.0`` and the stabilizer set to ``none``. On
+    *this* network that is not a fix: see the note above on which example
+    supplies the network and which supplies the regulator data.
+    """
+    return _kundur_two_area("Kundur_two_area", _KUNDUR_HIGH_GAIN_PSS,
+                            {"pss": PssModel.KUNDUR})
 
 
 def kundur_two_area_classic() -> Network:
-    """Kundur's two-area system under the book's own assumptions: a fast static
-    exciter, no PSS and constant mechanical torque.
+    """Kundur's two-area system under the book's own assumptions: a thyristor
+    exciter with high transient gain, no stabilizer and constant mechanical
+    torque.
 
     This is the case the example exists for -- the inter-area mode comes out
     *negatively damped*, so the system is unstable until a stabilizer is added.
     """
-    return _kundur_two_area("Kundur_two_area_classic", _KUNDUR_CLASSIC_CONTROLS)
+    return _kundur_two_area("Kundur_two_area_classic", _KUNDUR_HIGH_GAIN_PSS, _KUNDUR_NO_PSS)
 
 
 # --- IEEE test cases ----------------------------------------------------------

@@ -220,6 +220,36 @@ def kundur():
     return net, result, analyze(system.A, system.state_names)
 
 
+def closest_measured_error(net, result, modal, mode, der_id, name, value, to_mva=None):
+    """Smallest relative error between the chain rule and a *measured*
+    derivative, over a range of perturbation sizes.
+
+    One fixed step will not do. Differencing two separate eigensolves of a
+    hundred-state matrix trades truncation against round-off, so the error is
+    U-shaped in the step and where its minimum falls differs per parameter --
+    on this network, between 1e-3 and 1e-4. Pinning one step makes the test
+    measure that trade-off rather than the thing it is for.
+
+    Taking the best over several steps is still a real check: it asserts that
+    the finite difference converges on the chain rule *somewhere*, which a
+    wrong derivative does not do at any step. The error this guards against
+    is a base conversion, which would be a factor of nine.
+    """
+    from g2elin_core.modal.parameters import parameter_sensitivity as _ps
+
+    effect = next(e for e in _ps(net, result, modal, mode, units=[der_id],
+                                parameters=[name]).effects)
+    best = float("inf")
+    for rel in (1e-2, 1e-3, 1e-4):
+        bumped = value * (1 + rel)
+        raw = bumped if to_mva is None else rebase_params(
+            {name: bumped}, from_mva=net.sn_mva, to_mva=to_mva)[name]
+        measured = true_d_lambda(net, result, modal, mode, der_id, name, raw,
+                                 value) / (bumped - value)
+        best = min(best, abs(measured - effect.d_lambda) / abs(effect.d_lambda))
+    return best
+
+
 def true_d_lambda(net, result, modal, mode, der_id, name, raw_value, from_value):
     """d(lambda)/dp measured by relinearising the whole network.
 
@@ -254,13 +284,9 @@ def test_a_machine_on_its_own_rating_is_perturbed_on_the_right_base(kundur):
     assert {e.parameter for e in report.effects} == {"H", "Ll", "Lad"}
     for effect in report.effects:
         assert effect.parameter in REBASED_PARAM_KEYS, "the point of the test is a rebased key"
-        bumped = effect.value * 1.0001
-        # Back to the unit's own base, which is what an override is read in.
-        raw = rebase_params({effect.parameter: bumped},
-                            from_mva=net.sn_mva, to_mva=unit.sn_mva)[effect.parameter]
-        measured = true_d_lambda(net, result, modal, mode, unit.id, effect.parameter,
-                                 raw, effect.value) / (bumped - effect.value)
-        assert abs(measured - effect.d_lambda) < 0.01 * abs(effect.d_lambda), effect.parameter
+        error = closest_measured_error(net, result, modal, mode, unit.id, effect.parameter,
+                                       effect.value, to_mva=unit.sn_mva)
+        assert error < 0.01, f"{effect.parameter}: best error {error:.2%}"
 
 
 def test_rebuilding_one_unit_gives_the_same_component_as_rebuilding_the_network(kundur):
@@ -275,7 +301,9 @@ def test_rebuilding_one_unit_gives_the_same_component_as_rebuilding_the_network(
     base = op.sm_ops[der.id].p
     modes = net.unit_modes(der)
 
-    for name in ("H", "Ra", "Ll", "Laq", "Ka"):
+    # KA, not Ka: this fixture's machines carry the Kundur exciter, and each
+    # exciter model brings its own parameter names.
+    for name in ("H", "Ra", "Ll", "Laq", "KA"):
         moved = base[name] * 1.10
         fast = linearize_sm(op.sm_ops[der.id].with_params({**base, name: moved}), modes=modes)
         raw = rebase_params({name: moved}, from_mva=net.sn_mva, to_mva=der.sn_mva)[name]

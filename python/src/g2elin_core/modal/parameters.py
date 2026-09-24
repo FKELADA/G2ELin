@@ -74,8 +74,8 @@ from g2elin_core.modal.analysis import ModalAnalysisResult
 from g2elin_core.network.schema import Network
 from g2elin_core.operating_point import (
     compute_operating_point,
-    overridable_param_keys,
     rebase_params,
+    unit_keys,
 )
 from g2elin_core.pipeline import linear_components, linearize_network
 from g2elin_core.powerflow import PowerFlowResult
@@ -230,7 +230,9 @@ def parameter_sensitivity(
         if wanted_units is not None and der.id not in wanted_units:
             continue
         try:
-            keys = sorted(overridable_param_keys(kind))
+            # This unit's own keys: a machine's regulator models each bring
+            # their own parameters, so the set is per unit, not per type.
+            keys = sorted(unit_keys(der))
         except Exception:
             continue                      # an infinite bus has none
         if not keys:

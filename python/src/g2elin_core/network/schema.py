@@ -49,6 +49,44 @@ class GfmController(str, Enum):
     MATCHING = "matching"
 
 
+class ExciterModel(str, Enum):
+    """Which AVR/exciter a synchronous machine carries.
+
+    See ``docs/sphinx/design/controller-models.md`` for the equations and for
+    how these relate to the IEEE 421.5 library.
+    """
+
+    #: The regulator this tool has always had: terminal-voltage transducer,
+    #: first-order amplifier, first-order exciter and a rate feedback.
+    G2ELIN = "g2elin"
+    #: Kundur Fig. E12.9: a thyristor exciter -- transducer, gain and
+    #: transient gain reduction, with no exciter lag. IEEE ST1A family.
+    KUNDUR = "kundur"
+
+
+class PssModel(str, Enum):
+    """Which power system stabiliser a synchronous machine carries, if any."""
+
+    #: The stabiliser this tool has always had: an input low-pass, a washout
+    #: and two lead-lag stages.
+    G2ELIN = "g2elin"
+    #: Kundur Fig. E12.9: gain, washout and two lead-lag stages, taking the
+    #: speed deviation unfiltered.
+    KUNDUR = "kundur"
+    #: No stabiliser fitted.
+    NONE = "none"
+
+
+class GovernorModel(str, Enum):
+    """Whether a synchronous machine's prime mover responds to speed."""
+
+    #: Droop into a first-order lag, the governor this tool has always had.
+    G2ELIN = "g2elin"
+    #: No governor: constant mechanical power, which is what most textbook
+    #: small-signal examples assume.
+    NONE = "none"
+
+
 class Bus(BaseModel):
     """A network node. Corresponds to one row of ``Y_network``."""
 
@@ -287,6 +325,22 @@ class DerUnit(BaseModel):
     controller: GfmController | None = Field(
         default=None, description="Outer power-control law, only meaningful for GFM units"
     )
+    exciter: ExciterModel | None = Field(
+        default=None,
+        description="Which AVR/exciter model this machine carries; only meaningful for SM units. "
+        "None = this tool's original regulator, which is also what every saved network predating "
+        "the choice keeps.",
+    )
+    pss: PssModel | None = Field(
+        default=None,
+        description="Which power system stabiliser model this machine carries, or 'none' for a machine "
+        "without one; only meaningful for SM units. None = this tool's original stabiliser.",
+    )
+    governor: GovernorModel | None = Field(
+        default=None,
+        description="Whether this machine has a governor, and which model; 'none' holds the mechanical "
+        "power constant. Only meaningful for SM units. None = this tool's original governor.",
+    )
     xd_pu: float | None = Field(
         default=None, description="Equivalent transient reactance, used for SCR calculations only"
     )
@@ -320,6 +374,29 @@ class DerUnit(BaseModel):
         if self.controller is not None and self.unit_type is not UnitType.GFM:
             raise ValueError("controller is only meaningful for GFM units")
         return self
+
+    @model_validator(mode="after")
+    def _regulators_only_for_sm(self) -> "DerUnit":
+        if self.unit_type is not UnitType.SYNCHRONOUS_MACHINE:
+            for name in ("exciter", "pss", "governor"):
+                if getattr(self, name) is not None:
+                    raise ValueError(f"{name} is only meaningful for synchronous machines")
+        return self
+
+    @property
+    def exciter_model(self) -> str:
+        """This machine's exciter, defaulted -- what the model builders take."""
+        return (self.exciter or ExciterModel.G2ELIN).value
+
+    @property
+    def pss_model(self) -> str:
+        """This machine's stabiliser, defaulted."""
+        return (self.pss or PssModel.G2ELIN).value
+
+    @property
+    def governor_model(self) -> str:
+        """This machine's governor, defaulted."""
+        return (self.governor or GovernorModel.G2ELIN).value
 
     @model_validator(mode="after")
     def _level_and_groups_exist(self) -> "DerUnit":
@@ -426,21 +503,31 @@ class Network(BaseModel):
         level = der.level or getattr(self.models, f"{kind}_level")
         overrides = _mode_values(getattr(self.models, f"{kind}_states"))
         overrides.update(_mode_values(der.states))
-        modes = reduction.element(kind).modes_by_group(level, overrides)
+        modes = self.unit_element(der).modes_by_group(level, overrides)
         # A unit's own settings and the network's defaults are each valid on
         # their own; only their combination can be unsolvable, so this is
         # where that is caught.
         _check_requirements(kind, modes)
         return modes
 
+    @staticmethod
+    def unit_element(der: DerUnit) -> "reduction.ElementModel":
+        """The reduction catalogue for one unit. A machine's AVR and PSS
+        groups depend on which regulator models it carries, so the catalogue
+        is per unit rather than per type."""
+        if der.unit_type is UnitType.SYNCHRONOUS_MACHINE:
+            return reduction.element("sm", exciter=der.exciter_model, pss=der.pss_model,
+                                     governor=der.governor_model)
+        return reduction.element(der.unit_type.value)
+
     def unit_modes(self, der: DerUnit) -> dict[str, str]:
         """``{symbol name: mode}`` for one unit -- what its ``*_dae()``
         builder takes."""
-        e = reduction.element(der.unit_type.value)
+        e = self.unit_element(der)
         by_group = self.unit_group_modes(der)
         return {sym: by_group[g.id] for g in e.groups for sym in g.symbols}
 
     def unit_level(self, der: DerUnit) -> str | None:
         """The named level this unit's settings correspond to, or None when
         its per-group overrides don't match any."""
-        return reduction.element(der.unit_type.value).matching_level(self.unit_group_modes(der))
+        return self.unit_element(der).matching_level(self.unit_group_modes(der))

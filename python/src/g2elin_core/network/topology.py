@@ -19,7 +19,7 @@ import networkx as nx
 import numpy as np
 
 from g2elin_core.operating_point import (
-    gfl_params, gfm_params, overridable_param_keys, rebase_params, sm_params, unit_transformer_rx,
+    gfl_params, gfm_params, rebase_params, sm_params, unit_keys, unit_transformer_rx,
 )
 
 from .schema import DerUnit, Network
@@ -75,7 +75,8 @@ def _der_info(der: DerUnit, network: Network) -> dict:
         return info
     rt, lt = unit_transformer_rx(network, der)
     if der.unit_type.value == "sm":
-        defaults = sm_params(sn_mva=network.sn_mva, f_hz=network.f_hz, rt_pu=rt, lt_pu=lt)
+        defaults = sm_params(sn_mva=network.sn_mva, f_hz=network.f_hz, rt_pu=rt, lt_pu=lt,
+                             exciter=der.exciter_model, pss=der.pss_model)
     elif der.unit_type.value in ("gfm", "gfl"):
         un_kv = network.bus(der.bus).vn_kv
         fn = gfm_params if der.unit_type.value == "gfm" else gfl_params
@@ -88,7 +89,7 @@ def _der_info(der: DerUnit, network: Network) -> dict:
     # control_params_default: the defaults alone, so the UI can show which
     # values were changed and restore them. Unknown names are dropped rather
     # than raised on here -- validate_network reports those.
-    valid = overridable_param_keys(der.unit_type.value)
+    valid = unit_keys(der)
     overrides = {k: v for k, v in der.params.items() if k in valid}
     if der.sn_mva is not None:
         overrides = rebase_params(overrides, from_mva=der.sn_mva, to_mva=network.sn_mva)

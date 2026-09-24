@@ -96,7 +96,10 @@ def _check_one(network: Network, t: SweepTarget) -> None:
         if t.element != "unit":
             raise HTTPException(status_code=422, detail="params.* fields only exist on units")
         name = t.field.split(".", 1)[1]
-        if name not in overridable_param_keys(el["unit_type"]):
+        if name not in overridable_param_keys(
+            el["unit_type"], exciter=el.get("exciter"), pss=el.get("pss"),
+            governor=el.get("governor"),
+        ):
             raise HTTPException(status_code=422, detail=f"a {el['unit_type']} unit has no parameter {name!r}")
     elif t.field not in SWEEPABLE_FIELDS.get(t.element, set()):
         raise HTTPException(

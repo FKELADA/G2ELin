@@ -511,6 +511,9 @@ class UnitDefaultsRequest(BaseModel):
     un_kv: float
     rt_pu: float = 0.0
     lt_pu: float = 0.05
+    exciter: str | None = None  # synchronous machines: which regulator models,
+    pss: str | None = None      # since each brings its own parameter names
+    governor: str | None = None
 
 
 class UnitDefaultsResponse(BaseModel):
@@ -572,12 +575,31 @@ class ModelLevelInfo(BaseModel):
     modes: dict[str, str]  # group id -> mode
 
 
+class RegulatorOptionInfo(BaseModel):
+    """One AVR or PSS model a machine can carry, with the state group it
+    contributes -- what lets the UI redraw its per-group rows when the model
+    is swapped."""
+
+    id: str
+    label: str
+    #: None for a model with no states of its own, such as "no governor".
+    group: StateGroupInfo | None = None
+
+
+class RegulatorSlotInfo(BaseModel):
+    id: str  # "exciter" | "pss"
+    label: str
+    default: str
+    options: list[RegulatorOptionInfo]
+
+
 class ElementModelInfo(BaseModel):
     kind: str  # "network" | "sm" | "gfm" | "gfl"
     label: str
     default_level: str
     levels: list[ModelLevelInfo]
     groups: list[StateGroupInfo]
+    regulators: list[RegulatorSlotInfo] = []  # synchronous machines only
 
 
 class ModelLevelsResponse(BaseModel):
@@ -598,6 +620,9 @@ class UnitModelRow(BaseModel):
     level: str | None  # None = a custom combination matching no named level
     modes: dict[str, str]  # group id -> mode
     n_states: int
+    exciter: str | None = None  # synchronous machines only
+    pss: str | None = None
+    governor: str | None = None
 
 
 class ModelSummaryResponse(BaseModel):

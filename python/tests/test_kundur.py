@@ -20,7 +20,8 @@ import math
 import numpy as np
 import pytest
 
-from g2elin_core.modal import analyze
+from g2elin_core import reduction
+from g2elin_core.modal import analyze, classify_modes
 from g2elin_core.network.presets import (
     kundur_machine_params, kundur_two_area, kundur_two_area_classic,
 )
@@ -35,21 +36,23 @@ def _solved(build=kundur_two_area):
 
 
 def _electromechanical(net):
-    """(frequency Hz, damping %) of the modes the machines' speeds dominate."""
+    """(frequency Hz, damping %) of the electromechanical modes.
+
+    Uses the tool's own mode classifier rather than a fixed share of
+    rotor-speed participation. An absolute cutoff is not a stable test: a
+    strongly tuned stabiliser takes a real share of an electromechanical
+    mode, so the rotor's share of it falls while the mode stays exactly what
+    it was. That is the field's own definition -- rotor states participate
+    *significantly*, not most -- and it is what classify_modes encodes.
+    """
     sys_ = linearize_network(net, run_power_flow(net))
     res = analyze(sys_.A, sys_.state_names)
-    speeds = [i for i, n in enumerate(sys_.state_names) if n.startswith("dw_r")]
-    out = []
-    for i, ev in enumerate(res.eigenvalues):
-        if ev.imag <= 0:
-            continue
-        f = ev.imag / (2 * math.pi)
-        if not 0.2 < f < 2.0:
-            continue
-        if np.abs(res.participation[speeds, i].real).sum() < 0.25:
-            continue
-        out.append((f, -ev.real / abs(ev) * 100))
-    return sorted(out)
+    kinds = classify_modes(res)
+    return sorted(
+        (ev.imag / (2 * math.pi), -ev.real / abs(ev) * 100)
+        for j, ev in enumerate(res.eigenvalues)
+        if ev.imag > 0 and kinds[j].category == reduction.SYNCHRONISATION
+    )
 
 
 # --- the machine data ----------------------------------------------------------

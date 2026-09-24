@@ -34,14 +34,55 @@ DEFAULT_SM_ELECTRICAL_PARAMS = dict(
     Ra=0.003, Ll=0.15, Lad=1.66, Laq=1.61, Lfd=0.165, Rfd=0.0006,
     L1d=0.1713, R1d=0.0284, L1q=0.7252, R1q=0.00619, L2q=0.125, R2q=0.02368,
 )
-DEFAULT_SM_MECHANICAL_PARAMS = dict(H=5.0, KD=0.0, mp=0.005, TG=0.2)  # mp already /100 (0.5%)
+DEFAULT_SM_MECHANICAL_PARAMS = dict(H=5.0, KD=0.0)
+DEFAULT_SM_GOVERNOR_PARAMS = dict(mp=0.005, TG=0.2)  # mp already /100 (0.5%)
 DEFAULT_SM_AVR_PARAMS = dict(Tr=20e-3, Ka=300.0, Ta=0.001, Ke=1.0, Te=0.0001, Kfd=0.001, Tfd=0.1)
 DEFAULT_SM_PSS_PARAMS = dict(T_LP=0.03, K_PSS=2.0, T_HP=2.0, T1n=0.05, T1d=0.02, T2n=3.0, T2d=5.4)
+
+# Kundur Fig. E12.9's regulators, each under the figure's own parameter names
+# (components/sm.py). A machine carries one exciter and one stabiliser, so
+# only the chosen models' keys are in its parameter dict -- nothing is shared
+# with the originals and nothing is renamed to a common spelling.
+#
+# TA = TB makes the transient gain reduction transparent, leaving a plain
+# high-gain thyristor exciter; TB > TA is what actually reduces the gain the
+# regulator shows across the electromechanical band.
+# Both sets are the book's own, from the data for Kundur Example 12.9:
+#   (iii) thyristor exciter with TGR:  KA 200, TR 0.01, TA 1.0, TB 10.0
+#   (iv)  thyristor exciter with high transient gain and PSS:
+#         KA 200, TR 0.01, KSTAB 20.0, TW 10.0, T1 0.05, T2 0.02, T3 3.0, T4 5.4
+# The book pairs the stabiliser with *high transient gain*, i.e. with TGR
+# switched off (TA = TB): (iii) and (iv) are alternatives, not a combination.
+# The TGR values here are case (iii), so a machine taking both defaults has
+# TGR on; set TA = TB for case (iv).
+KUNDUR_AVR_PARAMS = dict(TR=0.01, KA=200.0, TA=1.0, TB=10.0)
+KUNDUR_PSS_PARAMS = dict(KSTAB=20.0, TW=10.0, T1=0.05, T2=0.02, T3=3.0, T4=5.4)
+
+SM_EXCITER_PARAMS = {"g2elin": DEFAULT_SM_AVR_PARAMS, "kundur": KUNDUR_AVR_PARAMS}
+SM_PSS_PARAMS = {"g2elin": DEFAULT_SM_PSS_PARAMS, "kundur": KUNDUR_PSS_PARAMS, "none": {}}
+SM_GOVERNOR_PARAMS = {"g2elin": DEFAULT_SM_GOVERNOR_PARAMS, "none": {}}
 DEFAULT_SM_AUX_LOAD_MVA_FRACTION = 1e-3  # SM.PL = 100 kW at Sb = 100 MVA -> RL_pu = Sb/PL = 1000
 
 
-def sm_params(*, sn_mva: float, f_hz: float, rt_pu: float, lt_pu: float) -> dict:
-    """Full parameter dict for :func:`g2elin_core.components.sm.linearize_sm`."""
+def sm_params(
+    *, sn_mva: float, f_hz: float, rt_pu: float, lt_pu: float,
+    exciter: str = "g2elin", pss: str = "g2elin", governor: str = "g2elin",
+) -> dict:
+    """Full parameter dict for :func:`g2elin_core.components.sm.linearize_sm`.
+
+    The regulator half depends on which models the machine carries: each one
+    brings its own parameters under its own names, so what a user edits is
+    the model's own data sheet rather than a shared set of near-equivalents.
+    A machine's key set therefore depends on ``exciter`` and ``pss``, which
+    is why everything that asks what a unit may override has to be told them
+    -- see :func:`overridable_param_keys`.
+    """
+    if exciter not in SM_EXCITER_PARAMS:
+        raise ValueError(f"unknown exciter {exciter!r} -- have {sorted(SM_EXCITER_PARAMS)}")
+    if pss not in SM_PSS_PARAMS:
+        raise ValueError(f"unknown PSS {pss!r} -- have {sorted(SM_PSS_PARAMS)}")
+    if governor not in SM_GOVERNOR_PARAMS:
+        raise ValueError(f"unknown governor {governor!r} -- have {sorted(SM_GOVERNOR_PARAMS)}")
     rl_pu = 1.0 / DEFAULT_SM_AUX_LOAD_MVA_FRACTION  # = Sb / PL, dimensionless regardless of Sb
     return {
         "wb": 2 * math.pi * f_hz,
@@ -50,8 +91,9 @@ def sm_params(*, sn_mva: float, f_hz: float, rt_pu: float, lt_pu: float) -> dict
         "RL_pu": rl_pu,
         **DEFAULT_SM_ELECTRICAL_PARAMS,
         **DEFAULT_SM_MECHANICAL_PARAMS,
-        **DEFAULT_SM_AVR_PARAMS,
-        **DEFAULT_SM_PSS_PARAMS,
+        **SM_GOVERNOR_PARAMS[governor],
+        **SM_EXCITER_PARAMS[exciter],
+        **SM_PSS_PARAMS[pss],
     }
 
 
@@ -173,14 +215,22 @@ def gfl_params(*, sn_mva: float, f_hz: float, un_kv: float, rt_pu: float, lt_pu:
 NON_OVERRIDABLE_PARAMS = frozenset({"wb"})
 
 
-def overridable_param_keys(unit_type: str) -> frozenset[str]:
+def overridable_param_keys(
+    unit_type: str, *, exciter: str | None = None, pss: str | None = None,
+    governor: str | None = None,
+) -> frozenset[str]:
     """Names a ``DerUnit.params`` override may use for ``unit_type`` (empty for
-    an infinite bus, which has no parameter set of its own). The key set of
-    each ``*_params()`` dict doesn't depend on its arguments, so any values do.
+    an infinite bus, which has no parameter set of its own).
+
+    The key set depends on nothing but the type and, for a machine, its
+    regulator models -- each of which brings its own parameters under its own
+    names -- so any base values do. Callers holding a unit should pass
+    ``exciter``/``pss``, or use :func:`unit_keys`.
     """
     probe = dict(sn_mva=100.0, f_hz=50.0, rt_pu=0.0, lt_pu=0.1)
     if unit_type == "sm":
-        keys = sm_params(**probe)
+        keys = sm_params(**probe, exciter=exciter or "g2elin", pss=pss or "g2elin",
+                         governor=governor or "g2elin")
     elif unit_type == "gfm":
         keys = gfm_params(**probe, un_kv=20.0)
     elif unit_type == "gfl":
@@ -188,6 +238,15 @@ def overridable_param_keys(unit_type: str) -> frozenset[str]:
     else:
         return frozenset()
     return frozenset(keys) - NON_OVERRIDABLE_PARAMS
+
+
+def unit_keys(der) -> frozenset[str]:
+    """Names ``der`` may override, for the regulator models it carries."""
+    if der.unit_type.value == "sm":
+        return overridable_param_keys(
+            "sm", exciter=der.exciter_model, pss=der.pss_model, governor=der.governor_model
+        )
+    return overridable_param_keys(der.unit_type.value)
 
 
 def unit_transformer_rx(network: Network, der) -> tuple[float, float]:
@@ -221,7 +280,8 @@ def unit_params(network: Network, der) -> dict:
     base = dict(sn_mva=network.sn_mva, f_hz=network.f_hz, rt_pu=rt, lt_pu=lt)
     kind = der.unit_type.value
     if kind == "sm":
-        defaults = sm_params(**base)
+        defaults = sm_params(**base, exciter=der.exciter_model, pss=der.pss_model,
+                             governor=der.governor_model)
     elif kind in ("gfm", "gfl"):
         fn = gfm_params if kind == "gfm" else gfl_params
         defaults = fn(**base, un_kv=network.bus(der.bus).vn_kv)
@@ -275,7 +335,7 @@ def apply_param_overrides(der, params: dict, network_sn_mva: float | None = None
     first -- see :func:`rebase_params`. ``params`` itself (the type's
     defaults) is already on the network base and is left alone.
     """
-    unknown = set(der.params) - overridable_param_keys(der.unit_type.value)
+    unknown = set(der.params) - unit_keys(der)
     if unknown:
         raise ValueError(f"unit id={der.id} ({der.unit_type.value}): unknown parameter override(s) {sorted(unknown)}")
     overrides = der.params
@@ -362,7 +422,11 @@ def compute_operating_point(network: Network, result: PowerFlowResult) -> Networ
         tr = transformer_by_lv_bus[der.bus]
         rt, lt = unit_transformer_rx(network, der)
         params = apply_param_overrides(
-            der, sm_params(sn_mva=network.sn_mva, f_hz=network.f_hz, rt_pu=rt, lt_pu=lt), network.sn_mva
+            der,
+            sm_params(sn_mva=network.sn_mva, f_hz=network.f_hz, rt_pu=rt, lt_pu=lt,
+                      exciter=der.exciter_model, pss=der.pss_model,
+                      governor=der.governor_model),
+            network.sn_mva,
         )
         v_t, a_t = bus_vm_va(der.bus)
         p_net, q_net = bus_pq(der.bus)
@@ -382,6 +446,9 @@ def compute_operating_point(network: Network, result: PowerFlowResult) -> Networ
             # A unit only *owns* the frame in the MATLAB-compatible mode; with
             # a frame of its own (components/frame.py) every unit is ordinary.
             is_slack=network.frame_follows_slack and der.bus_type.value == "slack",
+            exciter=der.exciter_model,
+            pss=der.pss_model,
+            governor=der.governor_model,
         )
 
     # The reference angle theta_g_0: the slack machine's own rotor angle, as

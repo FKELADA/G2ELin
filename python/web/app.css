@@ -633,3 +633,13 @@ tbody tr.bad-row td { background: #fdeeee; }
    bottom of the cell: label, control, hint then reads as one rhythm across
    the whole row, and only the ends are ragged. */
 .solver-grid .field > .hint { padding-top: 0.15rem; }
+
+/* Regulator pickers sit above the state-group rows they change, separated
+   so it reads as "which model" then "what of it is dynamic". */
+.mo-regulators { margin-bottom: .5rem; border-bottom: 1px solid var(--line); padding-bottom: .5rem; }
+.mo-regulators select { max-width: 22rem; }
+
+/* The regulator pickers sit with the parameter groups, above the parameters
+   each one brings, so "which model" reads as the heading for "its data". */
+.uregulators select { width: 100%; font-size: 0.78rem; }
+.ureg-row { align-items: center; }

@@ -226,7 +226,7 @@ def validate_network(network: Network) -> list[NetworkIssue]:
                 dynamics_caps,
             ))
 
-    from g2elin_core.operating_point import REBASED_PARAM_KEYS, overridable_param_keys  # lazy: it imports this module
+    from g2elin_core.operating_point import REBASED_PARAM_KEYS, unit_keys  # lazy: it imports this module
 
     for der in network.der_units:
         if der.sn_mva is not None and not der.params:
@@ -239,7 +239,7 @@ def validate_network(network: Network) -> list[NetworkIssue]:
             ))
         if not der.params:
             continue
-        unknown = sorted(set(der.params) - overridable_param_keys(der.unit_type.value))
+        unknown = sorted(set(der.params) - unit_keys(der))
         if unknown:
             issues.append(NetworkIssue(
                 "error",

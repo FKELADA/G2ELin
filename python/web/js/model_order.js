@@ -59,10 +59,52 @@ const ModelOrder = {
     return out;
   },
 
-  // Which named level a set of group modes is, or null for a custom one.
-  matchingLevel(kind, modes) {
+  // The state groups one unit really has. A machine's AVR and PSS groups
+  // depend on which regulator models it carries, so the catalogue's default
+  // groups are swapped for the chosen ones. Everything else — levels,
+  // cascades, the mode controls — works off this, so none of it has to know
+  // that regulators are selectable at all.
+  groupsFor(kind, der = null) {
     const e = this.catalogue[kind];
-    const lvl = e.levels.find(l => e.groups.every(g => (l.modes[g.id] || g.default) === modes[g.id]));
+    if (!e || !e.regulators || !e.regulators.length || !der) return e ? e.groups : [];
+    const chosen = {};
+    const dropped = new Set();
+    e.regulators.forEach(slot => {
+      const id = der[slot.id] || slot.default;
+      const opt = slot.options.find(o => o.id === id);
+      if (!opt) return;
+      // A model with no states of its own carries no group, so the machine
+      // simply does not have that group at all.
+      if (opt.group) chosen[opt.group.id] = opt.group;
+      else slot.options.forEach(o => { if (o.group) dropped.add(o.group.id); });
+    });
+    return e.groups.filter(g => !dropped.has(g.id) || chosen[g.id]).map(g => chosen[g.id] || g);
+  },
+
+  setRegulator(kind, slotId, modelId, der) {
+    // The group ids are the same whichever model is chosen, so a level or an
+    // override stays meaningful across a swap; only the states behind the
+    // group change. Any override that the new model disallows is dropped.
+    der[slotId] = modelId;
+    const allowed = Object.fromEntries(this.groupsFor(kind, der).map(g => [g.id, g.allowed]));
+    Object.keys(der.states || {}).forEach(gid => {
+      if (allowed[gid] && !allowed[gid].includes(der.states[gid])) delete der.states[gid];
+    });
+    this.afterEdit();
+  },
+
+  // A regulator model's short name, for the summary table.
+  regulatorLabel(slotId, modelId) {
+    const slot = (this.catalogue.sm?.regulators || []).find(r => r.id === slotId);
+    const opt = slot && slot.options.find(o => o.id === (modelId || slot.default));
+    return opt ? opt.label.replace(/\s*\(.*\)\s*$/, "") : (modelId || "");
+  },
+
+  // Which named level a set of group modes is, or null for a custom one.
+  matchingLevel(kind, modes, der = null) {
+    const e = this.catalogue[kind];
+    const groups = this.groupsFor(kind, der);
+    const lvl = e.levels.find(l => groups.every(g => (l.modes[g.id] || g.default) === modes[g.id]));
     return lvl ? lvl.id : null;
   },
 
@@ -89,8 +131,8 @@ const ModelOrder = {
   // told no, carry the dependency along: making a loop algebraic makes what
   // it needs algebraic, and putting one of those back dynamic puts the
   // loops that depend on it back too. Mutates `modes` in place.
-  applyCascade(kind, modes, groupId, mode) {
-    const groups = this.catalogue[kind].groups;
+  applyCascade(kind, modes, groupId, mode, der = null) {
+    const groups = this.groupsFor(kind, der);
     const by = Object.fromEntries(groups.map(g => [g.id, g]));
     if (mode === "algebraic") {
       const pending = [...(by[groupId].requires || [])];
@@ -121,18 +163,19 @@ const ModelOrder = {
     const modes = der
       ? { ...this.groupModes(kind, { level: der.level, overrides: der.states || {} }), [groupId]: mode }
       : { ...this.groupModes(kind), [groupId]: mode };
-    this.applyCascade(kind, modes, groupId, mode);
+    this.applyCascade(kind, modes, groupId, mode, der);
     // Store the result as a level plus the smallest set of overrides that
     // reproduces it, so the saved network says "6th order" where it can
     // rather than a list of nine groups that happens to mean that.
-    const named = this.matchingLevel(kind, modes);
+    const named = this.matchingLevel(kind, modes, der);
     const e = this.catalogue[kind];
+    const groups = this.groupsFor(kind, der);
     if (der) {
       if (named) { der.level = named; der.states = {}; }
       else {
         const base = e.levels.find(l => l.id === (der.level || e.default_level)) || e.levels[0];
         der.states = Object.fromEntries(
-          e.groups.filter(g => modes[g.id] !== (base.modes[g.id] || g.default)).map(g => [g.id, modes[g.id]])
+          groups.filter(g => modes[g.id] !== (base.modes[g.id] || g.default)).map(g => [g.id, modes[g.id]])
         );
       }
     } else if (named) {
@@ -157,10 +200,14 @@ const ModelOrder = {
     const modes = der
       ? this.groupModes(kind, { level: der.level, overrides: der.states || {} })
       : this.groupModes(kind);
-    const current = this.matchingLevel(kind, modes);
+    const current = this.matchingLevel(kind, modes, der);
     const scope = der ? `der:${der.id}` : "net";
-    const nDyn = e.groups.filter(g => modes[g.id] === "dynamic").reduce((n, g) => n + g.states.length, 0);
-    const nAll = e.groups.reduce((n, g) => n + g.states.length, 0);
+    const groups = this.groupsFor(kind, der);
+    const nDyn = groups.filter(g => modes[g.id] === "dynamic").reduce((n, g) => n + g.states.length, 0);
+    const nAll = groups.reduce((n, g) => n + g.states.length, 0);
+    // Regulator pickers, for one machine at a time: which exciter a unit has
+    // is a property of that unit, not a network-wide default.
+    const regs = (der && e.regulators) ? e.regulators : [];
 
     const lvl = e.levels.find(l => l.id === current);
     return `
@@ -174,14 +221,25 @@ const ModelOrder = {
         </div>
         ${lvl && lvl.note ? `<p class="mo-note">${esc(lvl.note)}</p>` : ""}
         ${current === null ? `<p class="mo-note warn">Custom combination — not one of the named models. Run the adequacy check below before trusting it.</p>` : ""}
+        ${regs.length ? `<table class="mo-groups mo-regulators">
+          ${regs.map(slot => {
+            const chosen = der[slot.id] || slot.default;
+            const opt = slot.options.find(o => o.id === chosen);
+            const states = (opt && opt.group) ? opt.group.states : [];
+            return `<tr><td><span class="mo-g">${esc(slot.label)}</span><span class="mo-s">${esc(states.length ? states.join(", ") : "no states")}</span></td>
+              <td><select class="mo-regulator" data-mo-kind="${kind}" data-mo-scope="${scope}" data-mo-slot="${slot.id}" title="${esc((opt && opt.group && opt.group.note) || "")}">
+                ${slot.options.map(o => `<option value="${o.id}"${o.id === chosen ? " selected" : ""}>${esc(o.label)}</option>`).join("")}
+              </select></td></tr>`;
+          }).join("")}
+        </table>` : ""}
         <table class="mo-groups">
-          ${e.groups.map(g => {
+          ${groups.map(g => {
             const mode = modes[g.id];
             if (g.locked) {
               return `<tr class="locked"><td><span class="mo-g">${esc(g.label)}</span><span class="mo-s">${esc(g.states.join(", "))}</span></td>
                 <td><span class="badge">always dynamic</span></td></tr>`;
             }
-            const needs = (g.requires || []).map(r => e.groups.find(x => x.id === r)?.label || r);
+            const needs = (g.requires || []).map(r => groups.find(x => x.id === r)?.label || r);
             const title = [g.note, needs.length ? `Making this algebraic also makes ${needs.join(" and ")} algebraic.` : ""]
               .filter(Boolean).join(" — ");
             return `<tr><td><span class="mo-g">${esc(g.label)}</span><span class="mo-s">${esc(g.states.join(", "))}</span></td>
@@ -202,6 +260,10 @@ const ModelOrder = {
     }));
     $$(".mo-group", root).forEach(sel => sel.addEventListener("change", () =>
       this.setGroup(sel.dataset.moKind, sel.dataset.moGroup, sel.value, this.scopeDer(sel.dataset.moScope))));
+    $$(".mo-regulator", root).forEach(sel => sel.addEventListener("change", () => {
+      const der = this.scopeDer(sel.dataset.moScope);
+      if (der) this.setRegulator(sel.dataset.moKind, sel.dataset.moSlot, sel.value, der);
+    }));
   },
 
   // Re-render every block in place after an edit: picking a level changes
@@ -287,7 +349,7 @@ const ModelOrder = {
         <span><b>${r.n_states}</b> states${saved > 0 ? ` <span class="muted">(${saved} fewer than the full model's ${r.n_states_full})</span>` : ""}</span></div>
         <p class="mo-note">${esc(MODEL_CLASS_NOTE[r.model_class] || "")}</p>
         ${r.units.length ? `<table class="mo-units"><thead><tr><th>Unit</th><th>Model</th><th>States</th></tr></thead><tbody>
-          ${r.units.map(u => `<tr><td>${esc(u.label)}</td><td>${esc(this.levelLabel(u.unit_type, u.level))}</td><td>${u.n_states}</td></tr>`).join("")}
+          ${r.units.map(u => `<tr><td>${esc(u.label)}</td><td>${esc(this.levelLabel(u.unit_type, u.level))}${u.exciter ? `<span class="mo-s">${esc(this.regulatorLabel("exciter", u.exciter))} · ${esc(this.regulatorLabel("pss", u.pss))} · ${esc(this.regulatorLabel("governor", u.governor))}</span>` : ""}</td><td>${u.n_states}</td></tr>`).join("")}
         </tbody></table>` : ""}`;
     } catch (e) {
       if (version !== state.version) return;

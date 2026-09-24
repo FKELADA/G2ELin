@@ -6,12 +6,32 @@
 // The tuner uses the same pole-placement formulas as operating_point.py,
 // in both directions: response time t_r and damping ζ -> Kp, Ki, and back.
 
+// The regulator models a machine can carry, and the parameters each one
+// brings. Every model uses its *own* names -- nothing is shared between them
+// and nothing is renamed to a common spelling -- so a machine's parameter set
+// depends on which pair it carries. The backend's key set agrees
+// (operating_point.SM_EXCITER_PARAMS / SM_PSS_PARAMS); an override under a
+// name the chosen model does not have is rejected there.
+const SM_REGULATORS = [
+  ["governor", "Governor", {
+    g2elin: ["Droop into a first-order lag", ["mp", "TG"]],
+    none: ["None (constant mechanical power)", []],
+  }],
+  ["exciter", "Exciter / AVR", {
+    g2elin: ["G2ELin original", ["Tr", "Ka", "Ta", "Ke", "Te", "Kfd", "Tfd"]],
+    kundur: ["Thyristor with TGR (Kundur Fig. E12.9)", ["TR", "KA", "TA", "TB"]],
+  }],
+  ["pss", "Power system stabiliser", {
+    g2elin: ["G2ELin original", ["K_PSS", "T_LP", "T_HP", "T1n", "T1d", "T2n", "T2d"]],
+    kundur: ["Washout and two lead-lags (Kundur Fig. E12.9)", ["KSTAB", "TW", "T1", "T2", "T3", "T4"]],
+    none: ["None (no stabiliser fitted)", []],
+  }],
+];
+
 const PARAM_GROUPS = {
   sm: [
     ["Stator & rotor windings (pu)", ["Ra", "Ll", "Lad", "Laq", "Lfd", "Rfd", "L1d", "R1d", "L1q", "R1q", "L2q", "R2q"]],
-    ["Mechanical & governor", ["H", "KD", "mp", "TG"]],
-    ["Exciter / AVR", ["Tr", "Ka", "Ta", "Ke", "Te", "Kfd", "Tfd"]],
-    ["Power system stabiliser", ["K_PSS", "T_LP", "T_HP", "T1n", "T1d", "T2n", "T2d"]],
+    ["Mechanical", ["H", "KD"]],
     ["Transformer & auxiliary load (pu)", ["Rt", "Lt", "RL_pu"]],
   ],
   gfm: [
@@ -31,6 +51,18 @@ const PARAM_GROUPS = {
   ],
 };
 
+// The two regulator groups a machine shows, for the models it carries.
+function regulatorGroups(der) {
+  if (der.unit_type !== "sm") return [];
+  // A model fitted as "none" brings no parameters, so it contributes no
+  // group -- the picker for it still shows, above.
+  return SM_REGULATORS.map(([slot, title, models]) => {
+    const chosen = der[slot] || "g2elin";
+    const entry = models[chosen] || models.g2elin;
+    return [title, entry[1]];
+  }).filter(([, keys]) => keys.length);
+}
+
 const PARAM_HELP = {
   Ra: "stator resistance", Ll: "stator leakage inductance", Lad: "d-axis mutual inductance", Laq: "q-axis mutual inductance",
   Lfd: "field leakage inductance", Rfd: "field resistance", L1d: "d damper inductance", R1d: "d damper resistance",
@@ -40,6 +72,10 @@ const PARAM_HELP = {
   Te: "exciter time constant (s)", Kfd: "stabilising feedback gain", Tfd: "stabilising feedback time constant (s)",
   K_PSS: "PSS gain", T_LP: "PSS low-pass time constant (s)", T_HP: "PSS washout time constant (s)",
   T1n: "lead-lag 1 numerator (s)", T1d: "lead-lag 1 denominator (s)", T2n: "lead-lag 2 numerator (s)", T2d: "lead-lag 2 denominator (s)",
+  TR: "voltage transducer time constant (s)", KA: "exciter gain",
+  TA: "transient gain reduction, lead (s)", TB: "transient gain reduction, lag (s) — TA = TB switches TGR off",
+  KSTAB: "stabiliser gain", TW: "washout time constant (s)",
+  T1: "lead-lag 1 lead (s)", T2: "lead-lag 1 lag (s)", T3: "lead-lag 2 lead (s)", T4: "lead-lag 2 lag (s)",
   Rt: "transformer resistance", Lt: "transformer reactance", RL_pu: "auxiliary load resistance",
   Rf: "filter resistance", Lf: "filter inductance", Cf: "filter capacitance",
   nq: "voltage/reactive-power droop", wf: "power-measurement filter cut-off (rad/s)",
@@ -135,6 +171,13 @@ const UnitParams = {
     const bus = net.buses.find(b => b.id === der.bus);
     const { rt, lt, tr } = unitTransformerRx(der);
     const body = { unit_type: der.unit_type, sn_mva: net.sn_mva, f_hz: net.f_hz, un_kv: bus ? bus.vn_kv : 20, rt_pu: rt, lt_pu: lt };
+    // A machine's parameter set depends on its regulators, so they are part
+    // of what the defaults are fetched (and cached) for.
+    if (der.unit_type === "sm") {
+      body.exciter = der.exciter || "g2elin";
+      body.pss = der.pss || "g2elin";
+      body.governor = der.governor || "g2elin";
+    }
     const key = JSON.stringify(body);
     if (!this._defaultsCache.has(key)) this._defaultsCache.set(key, api("/api/units/defaults", jsonPost(body)).then(r => r.params));
     try { return { defaults: await this._defaultsCache.get(key), noTransformer: !tr }; }
@@ -153,7 +196,7 @@ const UnitParams = {
     const link = unitTransformerRx(der);
     // Don't rebuild (and lose focus/typing) when nothing structural changed.
     const { Rt: _rt, Lt: _lt, ...rest } = defaults;
-    const key = `${der.id}|${der.unit_type}|${link.linked}|${JSON.stringify(rest)}`;
+    const key = `${der.id}|${der.unit_type}|${link.linked}|${der.exciter || ""}|${der.pss || ""}|${der.governor || ""}|${JSON.stringify(rest)}`;
     if (box.dataset.key === key && box.querySelector(".uparams")) {
       Object.assign(box._defaults, defaults);  // Rt/Lt follow the transformer
       this.refreshMarks(box, der, box._defaults);
@@ -162,7 +205,7 @@ const UnitParams = {
     box.dataset.key = key;
     box._defaults = defaults;
     der.params ||= {};
-    const groups = PARAM_GROUPS[der.unit_type] || [];
+    const groups = [...(PARAM_GROUPS[der.unit_type] || []), ...regulatorGroups(der)];
     const listed = new Set(groups.flatMap(g => g[1]));
     const extra = Object.keys(defaults).filter(k => !listed.has(k) && k !== "wb");
     const allGroups = [...groups, ...(extra.length ? [["Other", extra]] : [])];
@@ -176,6 +219,15 @@ const UnitParams = {
      : noTransformer ? " Rt/Lt will follow this unit's transformer; there is none yet, so they show placeholder defaults."
      : " This unit has no transformer of its own yet; Rt/Lt show the network's first transformer until it has one."}</p>
           <div class="notice warn-bg" data-role="plant-note" style="display:none;font-size:0.76rem;margin:0.4rem 0"></div>
+          ${der.unit_type === "sm" ? `<div class="ugroup uregulators"><div class="ugroup-title">Regulator models</div>
+            ${SM_REGULATORS.map(([slot, title, models]) => {
+              const chosen = der[slot] || "g2elin";
+              return `<div class="urow ureg-row"><label for="ureg-${der.id}-${slot}"><code>${esc(title)}</code><span>each model brings its own parameters, below</span></label>
+                <select id="ureg-${der.id}-${slot}" data-regulator="${slot}">
+                  ${Object.entries(models).map(([id, [label]]) =>
+                    `<option value="${id}"${id === chosen ? " selected" : ""}>${esc(label)}</option>`).join("")}
+                </select><span></span><span></span></div>`;
+            }).join("")}</div>` : ""}
           ${allGroups.map(([title, keys]) => `<div class="ugroup"><div class="ugroup-title">${esc(title)}</div>
             ${keys.filter(k => k in defaults).map(k => `
               <div class="urow" data-key="${k}">
@@ -189,6 +241,24 @@ const UnitParams = {
           <div class="controls" style="margin-top:0.6rem"><button type="button" class="ghost small" data-role="reset-all">Restore all defaults</button></div>
         </div>
       </details>`;
+
+    // Swapping a regulator changes which parameters exist, so anything
+    // overridden under a name the new model does not have is dropped rather
+    // than left behind to be rejected by the backend. The panel is rebuilt
+    // from scratch: its key includes the models.
+    box.querySelectorAll("select[data-regulator]").forEach(sel => sel.addEventListener("change", () => {
+      const slot = sel.dataset.regulator;
+      der[slot] = sel.value;
+      const kept = new Set(regulatorGroups(der).flatMap(g => g[1]));
+      const ownedByAny = new Set(SM_REGULATORS.flatMap(([, , models]) =>
+        Object.values(models).flatMap(([, keys]) => keys)));
+      Object.keys(der.params || {}).forEach(k => {
+        if (ownedByAny.has(k) && !kept.has(k)) delete der.params[k];
+      });
+      box.dataset.key = "";
+      networkChanged();
+      this.render(box, der);
+    }));
 
     // SI value typed -> per-unit value (the stored one) -> the usual path.
     box.querySelectorAll("input[data-param-si]").forEach(inp => inp.addEventListener("input", () => {

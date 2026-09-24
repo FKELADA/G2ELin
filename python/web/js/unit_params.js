@@ -222,11 +222,13 @@ const UnitParams = {
           ${der.unit_type === "sm" ? `<div class="ugroup uregulators"><div class="ugroup-title">Regulator models</div>
             ${SM_REGULATORS.map(([slot, title, models]) => {
               const chosen = der[slot] || "g2elin";
-              return `<div class="urow ureg-row"><label for="ureg-${der.id}-${slot}"><code>${esc(title)}</code><span>each model brings its own parameters, below</span></label>
-                <select id="ureg-${der.id}-${slot}" data-regulator="${slot}">
+              const help = "Each model brings its own parameters, listed below. Choosing \u2018none\u2019 removes the equipment altogether \u2014 its states and its parameters go with it, rather than being left idle.";
+              return `<div class="ureg-row">
+                <label for="ureg-${der.id}-${slot}" title="${esc(help)}"><code>${esc(title)}</code></label>
+                <select id="ureg-${der.id}-${slot}" data-regulator="${slot}" title="${esc(help)}">
                   ${Object.entries(models).map(([id, [label]]) =>
                     `<option value="${id}"${id === chosen ? " selected" : ""}>${esc(label)}</option>`).join("")}
-                </select><span></span><span></span></div>`;
+                </select></div>`;
             }).join("")}</div>` : ""}
           ${allGroups.map(([title, keys]) => `<div class="ugroup"><div class="ugroup-title">${esc(title)}</div>
             ${keys.filter(k => k in defaults).map(k => `

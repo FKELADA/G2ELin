@@ -316,6 +316,15 @@ class DerUnit(BaseModel):
     unit_type: UnitType
     bus_type: BusType
     v_set_pu: float = Field(gt=0, description="Voltage setpoint (slack/PV) or initial guess (PQ)")
+    angle_set_deg: float = Field(
+        default=0.0,
+        description="Voltage angle this unit's bus is held at, in degrees. Only the island's "
+        "reference (slack) unit has one -- every other bus angle is solved for. It is the origin "
+        "the whole solution is measured from, so moving it rotates every angle together and "
+        "changes no power flow, no current and no eigenvalue. Set it when published bus angles "
+        "are quoted against some other reference: Kundur's two-area case puts G1 at 20.2 degrees, "
+        "and with that set its bus angles can be read against the book directly.",
+    )
     p_set_mw: float = Field(description="Dispatched active power (generation positive)")
     q_set_mvar: float = 0.0
     p_cons_mw: float = Field(
@@ -519,6 +528,32 @@ class Network(BaseModel):
             return reduction.element("sm", exciter=der.exciter_model, pss=der.pss_model,
                                      governor=der.governor_model)
         return reduction.element(der.unit_type.value)
+
+    def frequency_is_regulated(self) -> bool:
+        """Whether anything in this network holds the system frequency.
+
+        A machine's governor does, a grid-forming converter's droop law
+        does, and an infinite bus pins it outright. A grid-following
+        converter does not -- it follows whatever frequency it is given --
+        and the loads here are constant-power, so they contribute nothing
+        either.
+
+        With none of them the common frequency is a *free integrator*:
+        nudge every machine's speed together and nothing brings it back.
+        That leaves the model a marginal direction which is not an
+        instability but the absence of a control loop, and it is why a
+        stability verdict has to know (see
+        :func:`g2elin_core.modal.analysis.unregulated_frequency_mode`).
+        """
+        for der in self.der_units:
+            if not der.closed:
+                continue
+            kind = der.unit_type.value
+            if kind in ("infinite_bus", "gfm"):
+                return True
+            if kind == "sm" and der.governor_model != "none":
+                return True
+        return False
 
     def unit_modes(self, der: DerUnit) -> dict[str, str]:
         """``{symbol name: mode}`` for one unit -- what its ``*_dae()``

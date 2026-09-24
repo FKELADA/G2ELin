@@ -204,6 +204,9 @@ class StepResponseRequest(BaseModel):
 
 
 class StepResponseResponse(BaseModel):
+    # Set when the chosen input cannot move anything, which draws a flat line
+    # that otherwise looks like a bug -- see analysis._inert_input_note.
+    note: str = ""
     t: list[float]
     y: list[float]  # the first requested output, kept for single-output callers
     series: dict[str, list[float]] = {}  # every requested output, by name
@@ -321,7 +324,7 @@ class EmtRequest(BaseModel):
     perturb_name: str = ""
     event: NetworkEventSpec | None = None
     perturb_offset: float = 0.02  # the perturbation's amplitude -- larger can push the coupled Newton solve past convergence, see main.py
-    t_final: float = 1.0
+    t_final: float = 3.0
     dt: float | None = None  # None = 200 samples over [0, t_final] (unchanged default); else t_final/dt (+1) samples, bounded server-side
     # Exact names from GET .../states, not substrings -- lets the frontend
     # use real multi-select pickers over the full list rather than a text

@@ -640,6 +640,13 @@ tbody tr.bad-row td { background: #fdeeee; }
 .mo-regulators select { max-width: 22rem; }
 
 /* The regulator pickers sit with the parameter groups, above the parameters
-   each one brings, so "which model" reads as the heading for "its data". */
+   each one brings, so "which model" reads as the heading for "its data".
+   Unlike a parameter row these have no value column and no reset button, so
+   they drop the grid and let the select have the full width -- a model name
+   is long ("Thyristor with TGR (Kundur Fig. E12.9)") and truncating it to
+   "Thyristor wit..." defeats the point of naming it. The explanation moves
+   to the hover title rather than a second line that would be clipped too. */
+.ureg-row { display: block; margin-bottom: 0.45rem; }
+.ureg-row label { display: block; margin-bottom: 0.15rem; cursor: help; }
+.ureg-row label code { font-size: 0.78rem; }
 .uregulators select { width: 100%; font-size: 0.78rem; }
-.ureg-row { align-items: center; }

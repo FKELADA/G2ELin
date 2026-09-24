@@ -16,13 +16,17 @@ import pytest
 
 from g2elin_core import reduction as R
 from g2elin_core.components.sm import (
-    ExciterKind, GovernorKind, PssKind, sm_dae, sm_nonlinear_funcs, sm_nonlinear_point,
+    ExciterKind, GovernorKind, PssKind, linearize_sm, sm_dae, sm_nonlinear_funcs,
+    sm_nonlinear_point,
 )
+from g2elin_core.timedomain.emt import nonlinear_sm_block
+from g2elin_core.modal import reference_angle_modes, unregulated_frequency_mode
 from g2elin_core.modal.analysis import analyze
 from g2elin_core.network.presets import kundur_two_area, kundur_two_area_classic, wscc9_3sm
 from g2elin_core.network.schema import ExciterModel, GovernorModel, PssModel
+from g2elin_api.analysis import emt_response, modal_response, modal_step_response_response
 from g2elin_api.main import unit_defaults
-from g2elin_api.schemas import UnitDefaultsRequest
+from g2elin_api.schemas import EmtRequest, StepResponseRequest, UnitDefaultsRequest
 from g2elin_core.components.sm import (
     EXCITER_PARAM_NAMES, GOVERNOR_PARAM_NAMES, PSS_PARAM_NAMES,
 )
@@ -417,3 +421,141 @@ def test_the_defaults_endpoint_serves_the_chosen_models_parameters():
     assert "Ka" in original and "KA" not in original
     assert "KA" in kundur and "Ka" not in kundur
     assert kundur["TA"] == 1.0 and kundur["TB"] == 10.0
+
+
+# --- what removing every governor does to the verdict -----------------------------
+def test_a_fleet_with_no_governor_has_a_free_frequency():
+    """Nothing in these presets regulates frequency: every machine has
+    constant mechanical power, and there is no grid-forming converter or
+    infinite bus either. A uniform speed change then meets no restoring
+    torque, so the common frequency is a free integrator."""
+    assert not kundur_two_area().frequency_is_regulated()
+    assert not kundur_two_area_classic().frequency_is_regulated()
+    assert wscc9_3sm().frequency_is_regulated(), "this one keeps its governors"
+
+    with_gov = with_regulators(kundur_two_area(), "kundur", "kundur", governor="g2elin")
+    assert with_gov.frequency_is_regulated()
+
+
+def test_the_free_frequency_is_not_reported_as_an_instability():
+    """It is a marginal direction of the model, like the reference angle --
+    the absence of a control loop, not a dynamic fault. Left in the verdict
+    it reads as a very slow instability, because a *defective* zero lands a
+    few times 1e-4 from the origin numerically rather than a few times 1e-11.
+
+    The case that must still fail is the one next to it: the classic preset
+    is genuinely unstable, and excluding the free frequency must not hide
+    that.
+    """
+    damped = modal_response(kundur_two_area())
+    assert damped.stable, f"max Re = {damped.max_real_part:+.3e}"
+    assert damped.max_real_part < 0
+
+    classic = modal_response(kundur_two_area_classic())
+    assert not classic.stable, "the book's own case is unstable and must stay so"
+    # The inter-area mode at ~0.61 Hz, not the free frequency at ~8e-3.
+    assert classic.max_real_part > 1e-2
+
+
+def test_the_free_frequency_mode_is_identified_not_guessed_at():
+    """It is found as the aperiodic mode nearest the origin made only of
+    angle and speed states, with the reference angles set aside -- no
+    tolerance, because exactly one exists once frequency is unregulated.
+
+    A network that *does* regulate frequency has no such mode, and the same
+    call has to come back empty rather than seize on the slowest real mode
+    it can find.
+    """
+    for preset in (kundur_two_area, kundur_two_area_classic):
+        net = preset()
+        system = linearize_network(net, run_power_flow(net))
+        res = analyze(system.A, system.state_names)
+        found = unregulated_frequency_mode(res, reference_angle_modes(res))
+        assert found is not None, preset.__name__
+        lam = res.eigenvalues[found]
+        assert abs(lam.imag) < 1e-6, "a drifting frequency does not oscillate"
+        assert abs(lam) < 1e-2, f"should sit at the origin, got {lam:+.3e}"
+
+    regulated = wscc9_3sm()
+    system = linearize_network(regulated, run_power_flow(regulated))
+    res = analyze(system.A, system.state_names)
+    assert unregulated_frequency_mode(res, reference_angle_modes(res)) is None
+
+
+# --- the nonlinear path has to agree about which models a machine carries ---------
+def test_the_time_domain_model_is_built_with_the_machines_own_regulators():
+    """The linear and nonlinear builders both have to read the machine's
+    regulators off its operating point.
+
+    They did not: ``linearize_sm`` was updated and ``nonlinear_sm_block`` was
+    not, so a Kundur machine's parameter vector was handed to the original
+    machine's equations and every time-domain run on such a network died in
+    lambdify with a length mismatch. The two builders are checked against
+    each other here rather than only the one that happened to be used.
+    """
+    net = with_regulators(wscc9_3sm(), "kundur", "kundur", governor="none")
+    op = compute_operating_point(net, run_power_flow(net))
+    der = net.der_units[0]
+    unit_op, modes = op.sm_ops[der.id], net.unit_modes(der)
+
+    block = nonlinear_sm_block(unit_op, modes)
+    linear = linearize_sm(unit_op, modes)
+    assert block.n_states == linear.A.shape[0]
+
+    # And it evaluates: the failure was a parameter vector of the wrong length.
+    x0, z0, u0 = block.x0, block.z0, block.u0
+    assert np.all(np.isfinite(block.f(x0, z0, u0)))
+    assert np.all(np.isfinite(block.g(x0, z0, u0)))
+
+
+@pytest.mark.parametrize("preset", [kundur_two_area, kundur_two_area_classic])
+def test_a_time_domain_run_produces_a_trace_stable_or_not(preset):
+    """Including the classic preset, which is genuinely unstable: an unstable
+    system still has a trajectory, and refusing to plot one hides exactly the
+    case a user most wants to look at."""
+    req = EmtRequest(
+        perturb_kind="state", perturb_name="dw_r_{SM_2}", perturb_offset=1e-3,
+        t_final=3.0, plot_states=["dw_r_{SM_1}", "dw_r_{SM_2}"],
+    )
+    r = emt_response(preset(), req)
+    assert len(r.t) > 50
+    for name, values in r.series.items():
+        v = np.asarray(values)
+        assert np.all(np.isfinite(v)), name
+        assert np.ptp(v) > 1e-6, f"{name} never moved"
+
+
+def test_a_power_reference_with_no_governor_says_why_it_does_nothing():
+    """P_ref is the governor's setpoint. With no governor it reaches nothing
+    and the step response is exactly zero -- which is the right answer, but a
+    flat line with no explanation reads as a broken plot."""
+    dead = modal_step_response_response(kundur_two_area(), StepResponseRequest(
+        input_name="P_ref_{SM_2}", output_names=["w_r_{SM_2}"], amplitude=0.01, t_final=3.0))
+    assert max(abs(v) for v in dead.y) == 0.0
+    assert "no governor" in dead.note
+
+    live = modal_step_response_response(kundur_two_area(), StepResponseRequest(
+        input_name="V_ref_{SM_2}", output_names=["w_r_{SM_2}"], amplitude=0.01, t_final=3.0))
+    assert max(abs(v) for v in live.y) > 0
+    assert live.note == "", "an input that works needs no excuse"
+
+
+def test_a_run_longer_than_three_seconds_is_allowed():
+    """How long a simulation is worth watching is the user's call. The slow
+    things -- a governor, an inter-area mode, a frequency drift with no
+    governor at all -- take tens of seconds to say anything, so a ceiling of
+    three seconds decided that for them. What stays bounded is the genuine
+    cost: the number of samples returned.
+    """
+    assert EmtRequest().t_final == 3.0, "three seconds is the default, not the limit"
+
+    long_run = emt_response(kundur_two_area(), EmtRequest(
+        perturb_kind="state", perturb_name="dw_r_{SM_2}", perturb_offset=1e-3,
+        t_final=20.0, plot_states=["dw_r_{SM_1}"]))
+    assert long_run.t[-1] == pytest.approx(20.0)
+    assert np.all(np.isfinite(long_run.series["dw_r_{SM_1}"]))
+
+    for bad in (0.0, -1.0, float("inf"), float("nan")):
+        with pytest.raises(Exception, match="positive, finite"):
+            emt_response(kundur_two_area(), EmtRequest(
+                perturb_kind="state", perturb_name="dw_r_{SM_2}", t_final=bad))

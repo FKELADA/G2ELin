@@ -133,7 +133,9 @@ def build_pandapower_net(network: Network) -> tuple[pp.pandapowerNet, dict[int, 
         if der.id in references:
             # This island's reference: a slack bus for it, whatever the unit's
             # own declared bus type (it may be a PV machine picking up the role).
-            pp.create_ext_grid(net, bus=b, vm_pu=der.v_set_pu, va_degree=0.0, name=name)
+            pp.create_ext_grid(
+                net, bus=b, vm_pu=der.v_set_pu, va_degree=der.angle_set_deg, name=name
+            )
         elif der.bus_type is BusType.PV:
             pp.create_gen(
                 net,

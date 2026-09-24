@@ -105,13 +105,54 @@ def test_the_tie_carries_the_published_400_mw():
     assert tie.p_from_mw.iloc[0] == pytest.approx(tie.p_from_mw.iloc[1], rel=1e-6)   # shared equally
 
 
-def test_the_rotor_angle_differences_match_the_book():
-    """Kundur gives 20.2, 10.5, -6.8 and -17.0 degrees for G1..G4, i.e. 9.7,
-    27.0 and 37.2 degrees behind G1."""
+def test_the_terminal_voltages_and_angles_match_the_book():
+    """Kundur gives 1.03 at 20.2 deg, 1.01 at 10.5, 1.03 at -6.8 and 1.01 at
+    -17.0 for G1..G4.
+
+    The angles are checked absolutely, not only as differences: the preset
+    holds G1 at its published 20.2 degrees (``DerUnit.angle_set_deg``), so
+    the whole solution is on the book's own reference rather than 20.2
+    degrees away from it.
+    """
     net, result = _solved()
-    va = result.bus_table().set_index("bus")["va_degree"]
-    for bus, published in ((2, 9.7), (3, 27.0), (4, 37.2)):
-        assert va[1] - va[bus] == pytest.approx(published, abs=0.5)
+    t = result.bus_table().set_index("bus")
+    for bus, vm, va in ((1, 1.03, 20.2), (2, 1.01, 10.5), (3, 1.03, -6.8), (4, 1.01, -17.0)):
+        assert t.vm_pu[bus] == pytest.approx(vm, abs=0.005), f"G{bus} magnitude"
+        assert t.va_degree[bus] == pytest.approx(va, abs=0.5), f"G{bus} angle"
+
+
+def test_the_reference_angle_is_a_choice_of_origin_and_nothing_else():
+    """Moving the slack unit's angle setpoint turns every angle together and
+    changes nothing physical -- not a voltage, not a power flow, not an
+    eigenvalue. That is what makes it safe to set it to a published value
+    purely so the solved angles can be read against that source.
+    """
+    net = kundur_two_area()
+    zeroed = net.model_copy(update={"der_units": [
+        d.model_copy(update={"angle_set_deg": 0.0}) for d in net.der_units
+    ]})
+    a, b = run_power_flow(net), run_power_flow(zeroed)
+    ta, tb = a.bus_table().set_index("bus"), b.bus_table().set_index("bus")
+
+    assert np.allclose(ta.vm_pu, tb.vm_pu, atol=1e-10)
+    shift = ta.va_degree - tb.va_degree
+    assert np.allclose(shift, 20.2, atol=1e-6), "every angle should move by the same amount"
+
+    # The slow modes -- the ones anyone reads. Compared to six significant
+    # figures rather than exactly: the two runs are separate eigensolves of
+    # the same model built in a different rotation, and this matrix has a
+    # norm around 1e9, so they agree to a few times 1e-8 relative rather
+    # than bit for bit. Anything the rotation actually changed would show up
+    # far above that.
+    def slow(network, result):
+        sys_ = linearize_network(network, result)
+        return np.array(sorted(
+            (ev.imag / (2 * math.pi), -100 * ev.real / abs(ev))
+            for ev in np.linalg.eigvals(sys_.A) if ev.imag > 0.1 and abs(ev) < 100
+        ))
+    before, after = slow(net, a), slow(zeroed, b)
+    assert before.shape == after.shape
+    assert np.allclose(before, after, rtol=1e-6, atol=1e-9)
 
 
 def test_the_slack_machine_lands_on_its_scheduled_700_mw():

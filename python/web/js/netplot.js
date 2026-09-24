@@ -85,6 +85,12 @@ class NetworkView {
 
   render() {
     const net = state.network;
+    // Every node is about to be destroyed, including whichever one the
+    // pointer is over -- and a removed element never fires mouseleave, so
+    // the tooltip it opened would hang around for good. Selecting an element
+    // re-renders, which is how clicking a machine used to leave its tooltip
+    // stuck over the inspector.
+    hideTooltip();
     this.layer.innerHTML = "";
     this.cancelWire();
     if (!net || !net.buses.length) {

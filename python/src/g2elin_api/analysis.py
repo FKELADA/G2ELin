@@ -22,6 +22,7 @@ from fastapi import HTTPException, Request
 from g2elin_core import reduction
 from g2elin_core.interconnect import AssembledSystem
 from g2elin_core.modal import (
+    unregulated_frequency_mode,
     ModalAnalysisResult, analyze, check_adequacy, classify_modes, eigenvalue_sensitivity,
     free_response, mode_shape, parameter_sensitivity, reference_angle_modes, step_response,
 )
@@ -90,9 +91,15 @@ from .schemas import (
 
 # Bounds on user-controlled simulation cost, enforced server-side rather than
 # just documented -- these endpoints run a real nonlinear DAE integration
-# synchronously inside one HTTP request, so an unbounded t_final directly
-# translates to an unbounded request time.
-EMT_MAX_T_FINAL = 3.0
+# synchronously inside one HTTP request.
+#
+# `t_final` deliberately has no ceiling: how long a run is worth watching is
+# the user's call, not this file's, and a governor or an inter-area mode
+# takes tens of seconds to say anything. What is still bounded is the part
+# that is genuinely a *cost*: the number of samples returned, and, for a live
+# run, the number of solver steps streamed. A long run is a long request, so
+# the live endpoint (which streams as it goes) is the better way to watch
+# one.
 EMT_MIN_N_POINTS = 10
 # One-shot runs: samples per trajectory. Each extra one costs a Newton solve
 # when inputs/outputs/measurements are plotted, so this is a cost bound.
@@ -381,6 +388,15 @@ def modal_response(network: Network) -> ModalResponse:
     # construction (see modal.reference_angle_modes), so the verdict and the
     # worst real part are read off the physical ones.
     reference = reference_angle_modes(modal)
+    # A fleet with nothing regulating frequency has one more marginal
+    # direction of the same kind: the common frequency is a free integrator,
+    # so it drifts rather than returning. Left in, it reads as a very slow
+    # instability, which is the absence of a governor being reported as a
+    # dynamic fault.
+    if not network.frequency_is_regulated():
+        free = unregulated_frequency_mode(modal, reference)
+        if free is not None:
+            reference = [*reference, free]
     physical = np.array([z for j, z in enumerate(modal.eigenvalues) if j not in set(reference)])
     if not len(physical):
         physical = modal.eigenvalues
@@ -491,7 +507,31 @@ def modal_step_response_response(network: Network, req: StepResponseRequest) -> 
         named_index_or_422(system.output_names, name, "output")
     t = np.linspace(0.0, req.t_final, 200)
     series = {name: step_response(system, req.input_name, name, req.amplitude, t).tolist() for name in output_names}
-    return StepResponseResponse(t=t.tolist(), y=series[output_names[0]], series=series)
+    return StepResponseResponse(
+        t=t.tolist(), y=series[output_names[0]], series=series,
+        note=_inert_input_note(network, system, req.input_name),
+    )
+
+
+def _inert_input_note(network: Network, system, input_name: str) -> str:
+    """Why this input moves nothing, when it moves nothing.
+
+    A flat response is a real answer, but on its own it looks like a broken
+    plot. The usual cause is an input whose regulator is not fitted: a
+    machine's P_ref is its *governor's* setpoint, so with no governor there
+    is nothing for it to act on and its column of B is exactly zero.
+    """
+    k = system.input_names.index(input_name)
+    if np.any(system.B[:, k]) or np.any(system.D[:, k]):
+        return ""
+    unit = input_name.split("_{")[-1].rstrip("}")
+    der = next((d for d in network.der_units if f"{d.unit_type.value.upper()}_{d.id}" == unit), None)
+    if der is not None and der.unit_type.value == "sm" and der.governor_model == "none":
+        if input_name.startswith("P_ref"):
+            return (f"{unit} has no governor fitted, so its P_ref has nothing to act on and the "
+                    f"response is exactly zero. Fit a governor to make the power reference live.")
+    return (f"{input_name} does not reach the model: its column of B is zero, so every output "
+            f"stays flat. This is the model saying the path is not there, not a failed solve.")
 
 
 def timeseries_response(network: Network) -> TimeSeriesResponse:
@@ -670,8 +710,8 @@ def _validate_emt_t_final_and_n_points(req: EmtRequest) -> int:
     sample count (one-shot endpoint) / step-count safety bound (live
     endpoint), both keyed off the same ``EMT_MIN/MAX_N_POINTS`` constants.
     """
-    if not (0 < req.t_final <= EMT_MAX_T_FINAL):
-        raise HTTPException(status_code=422, detail=f"t_final must be in (0, {EMT_MAX_T_FINAL}]")
+    if not (req.t_final > 0 and math.isfinite(req.t_final)):
+        raise HTTPException(status_code=422, detail="t_final must be a positive, finite number")
     if not (0 <= req.t_pre <= EMT_MAX_T_PRE):
         raise HTTPException(status_code=422, detail=f"t_pre must be in [0, {EMT_MAX_T_PRE}]")
 

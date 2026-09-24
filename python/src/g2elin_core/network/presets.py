@@ -788,22 +788,26 @@ def _kundur_two_area(name: str, extra_params: dict, unit_kwargs: dict) -> Networ
         Shunt(bus=7, q_mvar=-200.0, name="area 1 capacitors"),
         Shunt(bus=9, q_mvar=-350.0, name="area 2 capacitors"),
     ]
+    # The book's own dispatch and terminal voltages, with G1's published
+    # angle as the reference so the solved angles can be read against the
+    # book directly (it quotes G1 at 20.2 deg, not at zero). Rotating the
+    # reference changes nothing physical -- see DerUnit.angle_set_deg.
     spec = [
-        (1, 1, BusType.SLACK, 700.0, 1.03, 6.5),
-        (2, 2, BusType.PV, 700.0, 1.01, 6.5),
-        (3, 3, BusType.PV, 719.0, 1.03, 6.175),
-        (4, 4, BusType.PV, 700.0, 1.01, 6.175),
+        (1, 1, BusType.SLACK, 700.0, 1.03, 6.5, 20.2),
+        (2, 2, BusType.PV, 700.0, 1.01, 6.5, 0.0),
+        (3, 3, BusType.PV, 719.0, 1.03, 6.175, 0.0),
+        (4, 4, BusType.PV, 700.0, 1.01, 6.175, 0.0),
     ]
     der_units = [
         DerUnit(
             id=i, bus=bus, unit_type=UnitType.SYNCHRONOUS_MACHINE, bus_type=bus_type,
-            v_set_pu=v, p_set_mw=p, xd_pu=0.3,
+            v_set_pu=v, angle_set_deg=a, p_set_mw=p, xd_pu=0.3,
             sn_mva=_KUNDUR_MACHINE_MVA,
             **_KUNDUR_EXCITER,
             **unit_kwargs,
             params={**kundur_machine_params(h), **extra_params},
         )
-        for i, bus, bus_type, p, v, h in spec
+        for i, bus, bus_type, p, v, h, a in spec
     ]
     return Network(
         name=name, f_hz=60.0, sn_mva=_KUNDUR_SN_MVA,

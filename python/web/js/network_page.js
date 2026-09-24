@@ -63,6 +63,8 @@ const FIELD_DEFS = {
     { key: "unit_type", label: "Unit type", type: "select", options: ["sm", "gfm", "gfl", "infinite_bus"] },
     { key: "bus_type", label: "Load-flow bus type", type: "select", options: ["slack", "pv", "pq"], help: "Exactly one unit must be the slack." },
     { key: "v_set_pu", label: "Voltage setpoint", unit: "pu", type: "number" },
+    { key: "angle_set_deg", label: "Voltage angle setpoint", unit: "\u00b0", type: "number",
+      help: "The reference angle, on the slack unit only \u2014 every other bus angle is solved against it. Moving it rotates every angle together and changes nothing physical: no power flow, no current, no eigenvalue. Set it to read bus angles against a published reference (Kundur's two-area case puts G1 at 20.2\u00b0)." },
     { key: "p_set_mw", label: "Active power setpoint", unit: "MW", type: "number" },
     { key: "q_set_mvar", label: "Reactive power setpoint", unit: "MVAr", type: "number" },
     { key: "p_cons_mw", label: "Auxiliary load P", unit: "MW", type: "number" },
@@ -302,7 +304,7 @@ const NetworkPage = {
     if (host) net.transformers.push({ hv_bus: host.id, lv_bus: busId, r_pu: 0.0, x_pu: 0.05, sn_mva: net.sn_mva, name: "" });
     net.der_units.push({
       id: nextId(net.der_units), bus: busId, unit_type: kind, bus_type: net.der_units.some(d => d.bus_type === "slack") ? "pq" : "slack",
-      v_set_pu: 1.0, p_set_mw: 0.0, q_set_mvar: 0.0, p_cons_mw: 0.0, q_cons_mvar: 0.0,
+      v_set_pu: 1.0, angle_set_deg: 0.0, p_set_mw: 0.0, q_set_mvar: 0.0, p_cons_mw: 0.0, q_cons_mvar: 0.0,
       controller: kind === "gfm" ? "droop" : null, xd_pu: kind === "sm" ? 0.2 : null,
     });
     this.afterEdit({ kind: "bus", id: busId });
@@ -569,7 +571,7 @@ const NetworkPage = {
       const kind = $("#insp-attach-type").value;
       net.der_units.push({
         id: nextId(net.der_units), bus: sel.id, unit_type: kind, bus_type: net.der_units.some(d => d.bus_type === "slack") ? "pq" : "slack",
-        v_set_pu: 1.0, p_set_mw: 0.0, q_set_mvar: 0.0, p_cons_mw: 0.0, q_cons_mvar: 0.0,
+        v_set_pu: 1.0, angle_set_deg: 0.0, p_set_mw: 0.0, q_set_mvar: 0.0, p_cons_mw: 0.0, q_cons_mvar: 0.0,
         controller: kind === "gfm" ? "droop" : null, xd_pu: kind === "sm" ? 0.2 : null,
       });
       this.afterEdit(sel);
@@ -702,7 +704,7 @@ const NetworkPage = {
         if (kind === "lines") net.lines.push({ from_bus: b0, to_bus: b1, r_pu: 0.01, x_pu: 0.1, b_pu: 0.001, length_km: 1.0, name: "" });
         if (kind === "transformers") net.transformers.push({ hv_bus: b0, lv_bus: b1, r_pu: 0.0, x_pu: 0.05, sn_mva: net.sn_mva, name: "" });
         if (kind === "loads") net.loads.push({ bus: b0, p_mw: 0.0, q_mvar: 0.001 * net.sn_mva, name: "" });
-        if (kind === "der_units") net.der_units.push({ id: nextId(net.der_units), bus: b0, unit_type: "gfl", bus_type: net.der_units.some(d => d.bus_type === "slack") ? "pq" : "slack", v_set_pu: 1.0, p_set_mw: 0.0, q_set_mvar: 0.0, p_cons_mw: 0.0, q_cons_mvar: 0.0, controller: null, xd_pu: null });
+        if (kind === "der_units") net.der_units.push({ id: nextId(net.der_units), bus: b0, unit_type: "gfl", bus_type: net.der_units.some(d => d.bus_type === "slack") ? "pq" : "slack", v_set_pu: 1.0, angle_set_deg: 0.0, p_set_mw: 0.0, q_set_mvar: 0.0, p_cons_mw: 0.0, q_cons_mvar: 0.0, controller: null, xd_pu: null });
         this.afterEdit(undefined);
       } else if (t.dataset.delKind) {
         net[t.dataset.delKind].splice(+t.dataset.delIndex, 1);

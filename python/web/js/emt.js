@@ -92,7 +92,7 @@ const EmtPage = {
           <p class="muted" id="emt-ev-note" style="font-size:0.76rem;margin:0.5rem 0 0"></p>
         </div>
         <div class="controls" style="margin-top:0.9rem">
-          <div class="field"><label for="emt-tf">Duration after T0 (s, max 3)</label><input type="number" id="emt-tf" step="0.1" min="0.05" max="3" value="1.0"></div>
+          <div class="field"><label for="emt-tf" title="No upper limit \u2014 how long is worth watching is your call. A long run is a long request, though: the live stream plots as it solves, where this one returns only when it finishes.">Duration after T0 (s)</label><input type="number" id="emt-tf" step="0.1" min="0.05" value="3.0"></div>
           <div class="field"><label for="emt-dt">Output timestep (s)</label><input type="number" id="emt-dt" step="any" placeholder="auto"></div>
         </div>
         <div class="card-title" style="margin-top:1.2rem">Scopes <span class="card-sub">— each scope is one plot panel; put any states, inputs, outputs and measurements in it</span></div>
@@ -370,7 +370,7 @@ const EmtPage = {
       perturb_name: ev ? "" : sel.value,
       perturb_offset: parseFloat($("#emt-amp").value) || 0,
       event: ev ? this.event() : null,
-      t_final: parseFloat($("#emt-tf").value) || 1.0,
+      t_final: parseFloat($("#emt-tf").value) || 3.0,
       dt: dtRaw ? parseFloat(dtRaw) : null,
       ...this.wanted(),
       t_pre: EMT_T_PRE,

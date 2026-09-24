@@ -253,10 +253,11 @@ def test_emt_live_default_plot_states_matches_one_shot_default():
 
 def test_emt_live_t_final_out_of_bounds_422s():
     # Validated synchronously before any streaming starts -- a normal 422
-    # JSON body, not a broken/empty stream.
+    # JSON body, not a broken/empty stream. There is no upper bound on how
+    # long a run may be, only that it is a positive, finite number.
     r = client.post(
         "/api/presets/wscc9_3sm/emt/live",
-        json={"perturb_kind": "state", "perturb_name": "dw_r_{SM_2}", "t_final": 999},
+        json={"perturb_kind": "state", "perturb_name": "dw_r_{SM_2}", "t_final": -1},
     )
     assert r.status_code == 422
     assert "t_final" in r.json()["detail"]
@@ -364,12 +365,19 @@ def test_emt_ambiguous_perturb_state_422s():
     assert r.status_code == 422
 
 
-def test_emt_t_final_out_of_bounds_422s():
-    r = client.post(
-        "/api/presets/wscc9_3sm/emt",
-        json={"perturb_kind": "state", "perturb_name": "dw_r_{SM_2}", "t_final": 10.0},
-    )
-    assert r.status_code == 422
+def test_emt_t_final_must_be_positive_and_finite():
+    """A long run is allowed -- how long is worth watching is the user's
+    call, and the slow phenomena need tens of seconds. What is refused is a
+    duration that is not a duration."""
+    # Only the values JSON can carry: a non-finite one cannot even be
+    # encoded into the request, and the validator is covered directly for
+    # those in test_kundur_regulators.py.
+    for bad in (0, -1.0):
+        r = client.post(
+            "/api/presets/wscc9_3sm/emt",
+            json={"perturb_kind": "state", "perturb_name": "dw_r_{SM_2}", "t_final": bad},
+        )
+        assert r.status_code == 422, bad
 
 
 def test_emt_solver_failure_is_a_clean_422_not_a_500(monkeypatch):

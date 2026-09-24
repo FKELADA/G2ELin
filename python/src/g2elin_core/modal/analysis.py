@@ -57,6 +57,9 @@ class ModalAnalysisResult:
 # repository sit at least four orders of magnitude further out.
 REFERENCE_MODE_TOL = 1e-4
 _ANGLE_PARTICIPATION = 0.9
+# A drifting frequency is aperiodic. The bound is loose because it only has
+# to separate a real eigenvalue from an oscillatory one, not to measure it.
+_FREE_FREQUENCY_IMAG_TOL = 1e-6
 
 
 def reference_angle_modes(result: "ModalAnalysisResult") -> list[int]:
@@ -81,6 +84,46 @@ def reference_angle_modes(result: "ModalAnalysisResult") -> list[int]:
         if abs(lam) <= REFERENCE_MODE_TOL and sum(result.participation[i, j] for i in angle) > _ANGLE_PARTICIPATION:
             out.append(j)
     return out
+
+
+def unregulated_frequency_mode(
+    result: "ModalAnalysisResult", exclude: "list[int] | None" = None
+) -> int | None:
+    """The mode that is the whole fleet's frequency drifting together.
+
+    Only call this when nothing in the network regulates frequency
+    (:meth:`g2elin_core.network.schema.Network.frequency_is_regulated`).
+    Then the model has one more marginal direction than the reference
+    angles account for: with every machine's mechanical power fixed, a
+    uniform speed change meets no restoring torque, so ``dtheta/dt = w``
+    and ``dw/dt = 0`` along it. That is a *defective* zero -- a Jordan
+    block, not a plain one -- which is why it lands further from the origin
+    numerically than the reference angles do: its error grows like the
+    square root of machine precision times the matrix norm, and on a
+    two-area model that is a few times 1e-4 rather than a few times 1e-11.
+
+    Chasing that with a tolerance would be guesswork, so this does not use
+    one. Exactly one such mode exists whenever the caller's precondition
+    holds, so it is identified as the real eigenvalue nearest the origin
+    whose participation lies wholly in the angle and speed states, with the
+    reference angles set aside. Returns None if no candidate qualifies,
+    which would mean the precondition did not really hold.
+    """
+    skip = set(exclude or ())
+    rotor = [
+        i for i, n in enumerate(result.state_names)
+        if n.startswith("theta") or n.startswith("dw_r") or n.startswith("w_pll")
+    ]
+    best, best_mag = None, None
+    for j, lam in enumerate(result.eigenvalues):
+        if j in skip or abs(lam.imag) > _FREE_FREQUENCY_IMAG_TOL:
+            continue  # a drifting frequency does not oscillate
+        share = sum(result.participation[i, j].real for i in rotor)
+        if share <= _ANGLE_PARTICIPATION:
+            continue
+        if best_mag is None or abs(lam) < best_mag:
+            best, best_mag = j, abs(lam)
+    return best
 
 
 def analyze(A: np.ndarray, state_names: list[str]) -> ModalAnalysisResult:

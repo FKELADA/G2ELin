@@ -142,10 +142,14 @@ def _bind(dae, funcs, jacs, point) -> NonlinearBlockComp:
 
 
 def nonlinear_sm_block(op: SmOperatingPoint, modes=None) -> NonlinearBlockComp:
-    key = mode_key(modes)
+    # The regulators this machine actually carries, read off its operating
+    # point exactly as linearize_sm does. They decide both the equations and
+    # the parameter vector, so building the model without them hands a
+    # Kundur machine's parameters to the original machine's equations.
+    key, reg = mode_key(modes), (op.exciter, op.pss, op.governor)
     return _bind(
-        sm_dae(op.is_slack, key), sm_nonlinear_funcs(op.is_slack, key),
-        sm_nonlinear_jacobians(op.is_slack, key), sm_nonlinear_point(op, modes),
+        sm_dae(op.is_slack, key, *reg), sm_nonlinear_funcs(op.is_slack, key, *reg),
+        sm_nonlinear_jacobians(op.is_slack, key, *reg), sm_nonlinear_point(op, modes),
     )
 
 

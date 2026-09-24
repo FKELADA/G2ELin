@@ -80,7 +80,7 @@ const ModalPage = {
     const m = state.modal.data;
     const ref = (m.reference_modes || []).length;
     $("#modal-status").innerHTML = `${m.n_states} states · ${m.stable ? '<span class="ok">small-signal stable</span>' : '<span class="bad">unstable</span>'} · max Re(λ) = ${m.max_real_part.toExponential(3)}`
-      + (ref ? ` · <span class="muted" title="Nothing pins the absolute position of the dq frame, so the model always has a marginal direction: turn every angle by the same amount and nothing physical changes. These modes sit at the origin by construction and are left out of the verdict above.">${ref} reference-angle mode${ref > 1 ? "s" : ""} (λ ≈ 0, not counted)</span>` : "");
+      + (ref ? ` · <span class="muted" title="Coordinates the model does not pin, marginal by construction rather than dynamically marginal, so they are left out of the verdict above. Nothing fixes the absolute position of the dq frame: turn every angle together and nothing physical changes. And if no unit regulates frequency — no governor, no grid-forming droop, no infinite bus — the common frequency is a free integrator too, which drifts rather than returning.">${ref} marginal mode${ref > 1 ? "s" : ""} (λ ≈ 0, not counted)</span>` : "");
   },
 
   sortedModes() { return [...state.modal.data.modes].sort((a, b) => b.real - a.real); },
@@ -482,7 +482,8 @@ const ModalPage = {
       const r = kind === "free"
         ? await netPost("modal/free_response", { perturb_state: ch.perturb, offset: ch.offset, t_final: ch.tFinal, plot_states: union })
         : await netPost("modal/step_response", { input_name: ch.input, output_names: union, amplitude: ch.amplitude, t_final: ch.tFinal });
-      ch.result = { t: r.t, series: r.series, label: kind === "free" ? `${ch.perturb} + ${ch.offset}` : `step ${ch.amplitude} in ${ch.input}` };
+      ch.result = { t: r.t, series: r.series, note: r.note || "",
+                    label: kind === "free" ? `${ch.perturb} + ${ch.offset}` : `step ${ch.amplitude} in ${ch.input}` };
       this.drawChannelPlots(kind, ch, node);
     } catch (e) { plots.innerHTML = errorHtml(e); }
     finally { setSpinner(spin, ""); }
@@ -490,7 +491,10 @@ const ModalPage = {
 
   drawChannelPlots(kind, ch, node) {
     const plots = node.querySelector('[data-role="plots"]');
-    plots.innerHTML = `<p class="status-line" style="margin-bottom:0.3rem">Linearised response to ${esc(ch.result.label)}${kind === "free" ? " (deviation from equilibrium)" : " (deviation from the operating point)"}</p>`;
+    plots.innerHTML = `<p class="status-line" style="margin-bottom:0.3rem">Linearised response to ${esc(ch.result.label)}${kind === "free" ? " (deviation from equilibrium)" : " (deviation from the operating point)"}</p>`
+      // A flat plot with no explanation reads as a broken one, so when the
+      // model says this input reaches nothing, say so instead.
+      + (ch.result.note ? `<div class="notice warn-bg" style="font-size:0.78rem;margin:0.3rem 0">${esc(ch.result.note)}</div>` : "");
     const group = {};
     const wrap = el(`<div class="subplots"></div>`);
     ch.subplots.forEach((sp, si) => {

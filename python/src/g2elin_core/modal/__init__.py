@@ -3,7 +3,9 @@ from .classify import ModeCategory, classify_modes, state_categories
 from .parameters import (
     EntryParameters, ParameterEffect, ParameterSensitivityResult, parameter_sensitivity,
 )
-from .analysis import reference_angle_modes, ModalAnalysisResult, analyze
+from .analysis import (
+    ModalAnalysisResult, analyze, reference_angle_modes, unregulated_frequency_mode,
+)
 from .toolbox import (
     ModeShapeResult,
     SensitivityEntry,

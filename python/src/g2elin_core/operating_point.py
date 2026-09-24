@@ -103,14 +103,44 @@ _GFM_DC_LINK_R_OHM = 500e3
 _GFM_DC_LINK_C_F = 50e-3
 _GFM_DC_LINK_T_DC = 1e-3
 _H_FIRST_ORDER = 3.0
+_H_SECOND_ORDER = 6.0  # the equivalent inertia the filtered droop is tuned for
 _KD_OPT = 200.0
 _DROOP_NQ = 0.0001
 _GFM_INNER_CURRENT_LOOP_TR_S = 0.1e-3  # script_generic.m's Inner_current_loop.tr
 
 
+def _gfm_outer_params(controller: str, *, mp: float, nq: float, wf: float, kpdc: float) -> dict:
+    """One outer power-control law's own parameters, under its own names.
+
+    Every formula is script_generic.m's, and every one of them is written in
+    terms of the droop tuning: the laws are meant to be *comparable*, tuned
+    to the same equivalent inertia and the same reactive gain, so that a
+    study can swap one for another and see what the law itself changes
+    rather than what a different tuning changes.
+    """
+    if controller in ("droop", "droop_filtered"):
+        out = {"mp": mp, "nq": nq, "wf": wf}
+        if controller == "droop_filtered":
+            # The cut-off that makes the filtered droop's second-order power
+            # response carry H.second_order seconds of equivalent inertia.
+            out["wc"] = wf / (2 * mp * wf * _H_SECOND_ORDER - 1)
+        return out
+    if controller == "dvoc":
+        return {"eta": mp, "alfa": 1.0 / (2 * nq), "wf": wf}
+    if controller == "vsm":
+        # J and Dp give the same first-order power response droop has; K and
+        # Dq do the same for the reactive channel.
+        return {"J": 1.0 / (mp * wf), "Dp": 1.0 / mp, "K": 1.0 / (nq * wf), "Dq": 1.0 / nq}
+    if controller == "matching":
+        # The DC-voltage loop's own P-gain sets how far the DC link moves,
+        # and mp turns that into the same frequency deviation droop gives.
+        return {"K_theta": mp * kpdc, "wf": wf}
+    raise ValueError(f"unknown GFM controller {controller!r}")
+
+
 def gfm_params(
     *, sn_mva: float, f_hz: float, un_kv: float, rt_pu: float, lt_pu: float,
-    tr_cl: float = _GFM_INNER_CURRENT_LOOP_TR_S,
+    tr_cl: float = _GFM_INNER_CURRENT_LOOP_TR_S, controller: str = "droop",
 ) -> dict:
     """Full parameter dict for :func:`g2elin_core.components.gfm.linearize_gfm`.
 
@@ -154,7 +184,7 @@ def gfm_params(
         "wb": wb_val, "wff": 1.0,
         "Rf": DEFAULT_GFM_FILTER_PARAMS["R1_pu"], "Lf": DEFAULT_GFM_FILTER_PARAMS["L1_pu"],
         "Cf": DEFAULT_GFM_FILTER_PARAMS["C_pu"], "Rt": rt_pu, "Lt": lt_pu,
-        "mp": mp, "nq": _DROOP_NQ, "wf": wf,
+        **_gfm_outer_params(controller, mp=mp, nq=_DROOP_NQ, wf=wf, kpdc=kpdc),
         "KpVL": kp_vl, "KiVL": ki_vl, "Kffi": 1.0,
         "KpCL": kp_cl, "KiCL": ki_cl, "Kffv": 1.0,
         "Cdc": dc_c_pu, "Gdc": dc_g_pu, "Kpdc": kpdc, "Tdc": _GFM_DC_LINK_T_DC,
@@ -217,7 +247,7 @@ NON_OVERRIDABLE_PARAMS = frozenset({"wb"})
 
 def overridable_param_keys(
     unit_type: str, *, exciter: str | None = None, pss: str | None = None,
-    governor: str | None = None,
+    governor: str | None = None, controller: str | None = None,
 ) -> frozenset[str]:
     """Names a ``DerUnit.params`` override may use for ``unit_type`` (empty for
     an infinite bus, which has no parameter set of its own).
@@ -232,7 +262,7 @@ def overridable_param_keys(
         keys = sm_params(**probe, exciter=exciter or "g2elin", pss=pss or "g2elin",
                          governor=governor or "g2elin")
     elif unit_type == "gfm":
-        keys = gfm_params(**probe, un_kv=20.0)
+        keys = gfm_params(**probe, un_kv=20.0, controller=controller or "droop")
     elif unit_type == "gfl":
         keys = gfl_params(**probe, un_kv=20.0)
     else:
@@ -246,6 +276,8 @@ def unit_keys(der) -> frozenset[str]:
         return overridable_param_keys(
             "sm", exciter=der.exciter_model, pss=der.pss_model, governor=der.governor_model
         )
+    if der.unit_type.value == "gfm":
+        return overridable_param_keys("gfm", controller=der.controller_model)
     return overridable_param_keys(der.unit_type.value)
 
 
@@ -282,9 +314,11 @@ def unit_params(network: Network, der) -> dict:
     if kind == "sm":
         defaults = sm_params(**base, exciter=der.exciter_model, pss=der.pss_model,
                              governor=der.governor_model)
-    elif kind in ("gfm", "gfl"):
-        fn = gfm_params if kind == "gfm" else gfl_params
-        defaults = fn(**base, un_kv=network.bus(der.bus).vn_kv)
+    elif kind == "gfm":
+        defaults = gfm_params(**base, un_kv=network.bus(der.bus).vn_kv,
+                              controller=der.controller_model)
+    elif kind == "gfl":
+        defaults = gfl_params(**base, un_kv=network.bus(der.bus).vn_kv)
     else:
         return {}
     return apply_param_overrides(der, defaults, network.sn_mva)
@@ -486,11 +520,13 @@ def compute_operating_point(network: Network, result: PowerFlowResult) -> Networ
             rt, lt = unit_transformer_rx(network, der)
             params = apply_param_overrides(der, gfm_params(
                 sn_mva=network.sn_mva, f_hz=network.f_hz, un_kv=un_kv, rt_pu=rt, lt_pu=lt,
+                controller=der.controller_model,
             ), network.sn_mva)
             gfm_ops[der.id] = GfmOperatingPoint(
                 params=params, v_terminal_pu=v_t, angle_terminal_rad=a_t,
                 p_terminal_pu=p_pu, q_terminal_pu=q_pu,
                 v_grid_pu=v_g, angle_grid_rad=a_g, theta_g_rad=theta_g_rad,
+                controller=der.controller_model,
             )
         else:
             rt, lt = unit_transformer_rx(network, der)

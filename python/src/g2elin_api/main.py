@@ -191,7 +191,10 @@ def unit_defaults(req: UnitDefaultsRequest) -> UnitDefaultsResponse:
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
     elif req.unit_type == "gfm":
-        params = gfm_params(**base, un_kv=req.un_kv)
+        try:
+            params = gfm_params(**base, un_kv=req.un_kv, controller=req.controller or "droop")
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
     elif req.unit_type == "gfl":
         params = gfl_params(**base, un_kv=req.un_kv)
     elif req.unit_type == "infinite_bus":

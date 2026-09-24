@@ -64,21 +64,36 @@ const ModelOrder = {
   // groups are swapped for the chosen ones. Everything else — levels,
   // cascades, the mode controls — works off this, so none of it has to know
   // that regulators are selectable at all.
+  // The groups a model option brings: one for a machine's regulators, a set
+  // for a converter's control law, none at all for a model fitted as "none".
+  optionGroups(opt) {
+    if (!opt) return [];
+    return (opt.groups && opt.groups.length) ? opt.groups : (opt.group ? [opt.group] : []);
+  },
+
   groupsFor(kind, der = null) {
     const e = this.catalogue[kind];
     if (!e || !e.regulators || !e.regulators.length || !der) return e ? e.groups : [];
-    const chosen = {};
-    const dropped = new Set();
+    // Every group any option of any slot could bring, and the ones the
+    // chosen options actually do. What a slot owns is replaced wholesale, so
+    // a law with two groups can stand where another had one, or none.
+    const owned = new Set(), selected = [];
     e.regulators.forEach(slot => {
-      const id = der[slot.id] || slot.default;
-      const opt = slot.options.find(o => o.id === id);
-      if (!opt) return;
-      // A model with no states of its own carries no group, so the machine
-      // simply does not have that group at all.
-      if (opt.group) chosen[opt.group.id] = opt.group;
-      else slot.options.forEach(o => { if (o.group) dropped.add(o.group.id); });
+      slot.options.forEach(o => this.optionGroups(o).forEach(g => owned.add(g.id)));
+      const chosen = slot.options.find(o => o.id === (der[slot.id] || slot.default));
+      this.optionGroups(chosen).forEach(g => selected.push(g));
     });
-    return e.groups.filter(g => !dropped.has(g.id) || chosen[g.id]).map(g => chosen[g.id] || g);
+    const byId = Object.fromEntries(selected.map(g => [g.id, g]));
+    const out = [];
+    let spliced = false;
+    e.groups.forEach(g => {
+      if (!owned.has(g.id)) { out.push(g); return; }
+      // The chosen groups go where the default's were, keeping the panel's
+      // reading order: plant, then control law, then angle.
+      if (!spliced) { out.push(...selected); spliced = true; }
+    });
+    if (!spliced && selected.length) out.push(...selected);
+    return out.filter((g, i) => out.findIndex(x => x.id === g.id) === i).map(g => byId[g.id] || g);
   },
 
   setRegulator(kind, slotId, modelId, der) {
@@ -94,8 +109,8 @@ const ModelOrder = {
   },
 
   // A regulator model's short name, for the summary table.
-  regulatorLabel(slotId, modelId) {
-    const slot = (this.catalogue.sm?.regulators || []).find(r => r.id === slotId);
+  regulatorLabel(kind, slotId, modelId) {
+    const slot = (this.catalogue[kind]?.regulators || []).find(r => r.id === slotId);
     const opt = slot && slot.options.find(o => o.id === (modelId || slot.default));
     return opt ? opt.label.replace(/\s*\(.*\)\s*$/, "") : (modelId || "");
   },
@@ -225,9 +240,9 @@ const ModelOrder = {
           ${regs.map(slot => {
             const chosen = der[slot.id] || slot.default;
             const opt = slot.options.find(o => o.id === chosen);
-            const states = (opt && opt.group) ? opt.group.states : [];
+            const states = this.optionGroups(opt).flatMap(g => g.states);
             return `<tr><td><span class="mo-g">${esc(slot.label)}</span><span class="mo-s">${esc(states.length ? states.join(", ") : "no states")}</span></td>
-              <td><select class="mo-regulator" data-mo-kind="${kind}" data-mo-scope="${scope}" data-mo-slot="${slot.id}" title="${esc((opt && opt.group && opt.group.note) || "")}">
+              <td><select class="mo-regulator" data-mo-kind="${kind}" data-mo-scope="${scope}" data-mo-slot="${slot.id}" title="${esc(this.optionGroups(opt).map(g => g.note).filter(Boolean).join(" "))}">
                 ${slot.options.map(o => `<option value="${o.id}"${o.id === chosen ? " selected" : ""}>${esc(o.label)}</option>`).join("")}
               </select></td></tr>`;
           }).join("")}
@@ -349,7 +364,8 @@ const ModelOrder = {
         <span><b>${r.n_states}</b> states${saved > 0 ? ` <span class="muted">(${saved} fewer than the full model's ${r.n_states_full})</span>` : ""}</span></div>
         <p class="mo-note">${esc(MODEL_CLASS_NOTE[r.model_class] || "")}</p>
         ${r.units.length ? `<table class="mo-units"><thead><tr><th>Unit</th><th>Model</th><th>States</th></tr></thead><tbody>
-          ${r.units.map(u => `<tr><td>${esc(u.label)}</td><td>${esc(this.levelLabel(u.unit_type, u.level))}${u.exciter ? `<span class="mo-s">${esc(this.regulatorLabel("exciter", u.exciter))} · ${esc(this.regulatorLabel("pss", u.pss))} · ${esc(this.regulatorLabel("governor", u.governor))}</span>` : ""}</td><td>${u.n_states}</td></tr>`).join("")}
+          ${r.units.map(u => `<tr><td>${esc(u.label)}</td><td>${esc(this.levelLabel(u.unit_type, u.level))}${u.exciter ? `<span class="mo-s">${esc(this.regulatorLabel("sm", "exciter", u.exciter))} · ${esc(this.regulatorLabel("sm", "pss", u.pss))} · ${esc(this.regulatorLabel("sm", "governor", u.governor))}</span>`
+          : u.controller ? `<span class="mo-s">${esc(this.regulatorLabel("gfm", "controller", u.controller))}</span>` : ""}</td><td>${u.n_states}</td></tr>`).join("")}
         </tbody></table>` : ""}`;
     } catch (e) {
       if (version !== state.version) return;

@@ -1164,6 +1164,7 @@ def model_summary_response(network: Network) -> ModelSummaryResponse:
             exciter=der.exciter_model if kind == "sm" else None,
             pss=der.pss_model if kind == "sm" else None,
             governor=der.governor_model if kind == "sm" else None,
+            controller=der.controller_model if kind == "gfm" else None,
         ))
 
     if network_dynamic and unit_fast_dynamic:

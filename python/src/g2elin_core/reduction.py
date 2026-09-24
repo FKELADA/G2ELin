@@ -39,7 +39,7 @@ __all__ = [
     "ELEMENTS", "element", "resolve_modes", "level_ids", "group_ids", "describe",
     "CATEGORIES", "SYNCHRONISATION", "CONTROL", "UNIT_ELECTRICAL", "NETWORK", "MIXED", "REFERENCE",
     "category_of_state", "group_of_state", "split_state_name",
-    "sm_element", "AVR_GROUPS", "PSS_GROUPS",
+    "sm_element", "gfm_element", "AVR_GROUPS", "PSS_GROUPS", "GFM_OUTER_GROUPS",
 ]
 
 MODES = (DYNAMIC, ALGEBRAIC, FROZEN)
@@ -367,11 +367,7 @@ _GFM = ElementModel(
         StateGroup("voltage_loop", "Outer voltage loop", ("M_VLd", "M_VLq"), ("M_VLd", "M_VLq"),
                    requires=("filter",), category=CONTROL),
         StateGroup(
-            "power_filter", "Power measurement filters", ("pm", "qm"), ("p_m", "q_m"),
-            note="algebraic = the droop sees instantaneous power", category=SYNCHRONISATION,
-        ),
-        StateGroup(
-            "angle", "Droop angle", ("theta",), ("theta",), allowed=(DYNAMIC,),
+            "angle", "Control angle", ("theta",), ("theta",), allowed=(DYNAMIC,),
             note="theta defines the converter's own frame and can never be removed",
             category=SYNCHRONISATION,
         ),
@@ -507,7 +503,92 @@ _NETWORK = ElementModel(
     },
 )
 
-ELEMENTS: dict[str, ElementModel] = {e.kind: e for e in (_NETWORK, _SM, _GFM, _GFL)}
+# --- the grid-forming outer laws ----------------------------------------------
+# What each of symGFM_types.m's control laws carries beyond the shared
+# cascade. The group ids are shared where the physics is: every law that
+# filters its power measurement calls that group "power_filter", so a saved
+# setting survives swapping one law for another that also has one.
+_POWER_FILTER = StateGroup(
+    "power_filter", "Power measurement filters", ("pm", "qm"), ("p_m", "q_m"),
+    note="algebraic = the control law sees instantaneous power",
+    category=SYNCHRONISATION,
+)
+# One state, one group id, whichever law owns it: `Dw` is the frequency
+# deviation the angle integrates in both the filtered droop and the VSM, so
+# it keeps one id and changes only its label and what may be done to it.
+# That is what keeps a saved reduction setting meaningful across a swap, and
+# what keeps looking a state up by name single-valued.
+_DROOP_FILTER = StateGroup(
+    "frequency", "Droop filter", ("Dw",), ("dw",), allowed=(DYNAMIC, ALGEBRAIC),
+    note="algebraic = the droop acts instantly again, i.e. plain droop",
+    category=SYNCHRONISATION,
+)
+GFM_OUTER_GROUPS: dict[str, tuple[StateGroup, ...]] = {
+    "droop": (_POWER_FILTER,),
+    "droop_filtered": (_POWER_FILTER, _DROOP_FILTER),
+    "dvoc": (
+        _POWER_FILTER,
+        StateGroup(
+            "voltage_dynamics", "dVOC voltage amplitude", ("ved_ref",), ("v_ed_ref",),
+            allowed=(DYNAMIC, ALGEBRAIC),
+            note="the amplitude the oscillator carries; algebraic = it settles instantly",
+            category=SYNCHRONISATION,
+        ),
+    ),
+    # A virtual synchronous machine measures power directly -- its inertia is
+    # what smooths the response -- so it has no power filters to reduce.
+    "vsm": (
+        StateGroup(
+            "frequency", "Virtual swing equation", ("Dw",), ("dw",), allowed=(DYNAMIC,),
+            note="the emulated rotor; removing it would leave no control law at all",
+            category=SYNCHRONISATION,
+        ),
+        StateGroup(
+            "flux", "Virtual flux", ("Phi",), ("Phi",), allowed=(DYNAMIC, ALGEBRAIC),
+            note="the emulated field; its product with speed is the voltage reference",
+            category=SYNCHRONISATION,
+        ),
+    ),
+    # Matching control takes its frequency from the DC link, so the only
+    # outer state is the measurement of that voltage.
+    "matching": (
+        StateGroup(
+            "dc_measurement", "DC voltage measurement", ("vdc_m",), ("v_dc_m",),
+            allowed=(DYNAMIC, ALGEBRAIC),
+            note="the filtered DC-link voltage, which *is* this law's frequency signal",
+            category=SYNCHRONISATION,
+        ),
+    ),
+}
+
+
+@lru_cache(maxsize=None)
+def gfm_element(controller: str = "droop") -> ElementModel:
+    """The catalogue for a converter running one particular control law.
+
+    Only the outer-loop groups differ; the filter, DC link and the two
+    cascaded loops are the same whichever law is running, which is why the
+    named levels below mean the same thing for all of them.
+    """
+    if controller not in GFM_OUTER_GROUPS:
+        raise ValueError(f"unknown GFM controller {controller!r} -- have {sorted(GFM_OUTER_GROUPS)}")
+    groups = tuple(_GFM.groups[:-1]) + GFM_OUTER_GROUPS[controller] + (_GFM.groups[-1],)
+    labels = dict(_GFM.level_labels)
+    # The lowest level is "whatever the outer law is, on its own".
+    labels["droop"] = {
+        "droop": "Droop only (RMS)",
+        "droop_filtered": "Filtered droop only (RMS)",
+        "dvoc": "dVOC only (RMS)",
+        "vsm": "Virtual machine only (RMS)",
+        "matching": "Matching only (RMS)",
+    }[controller]
+    return ElementModel(
+        kind="gfm", label=_GFM.label, groups=groups, levels=_GFM.levels,
+        level_labels=labels, level_notes=_GFM.level_notes,
+    )
+
+
+ELEMENTS: dict[str, ElementModel] = {e.kind: e for e in (_NETWORK, _SM, gfm_element(), _GFL)}
 
 
 # Block-name prefix -> (catalogue kind, the one group it can be). The passive
@@ -559,6 +640,11 @@ def _group_category(kind: str, group_id: str) -> str:
     for variant in (*PSS_GROUPS.values(), *AVR_GROUPS.values(), *GOVERNOR_GROUPS.values()):
         if kind == "sm" and variant is not None and variant.id == group_id:
             return variant.category
+    if kind == "gfm":
+        for groups in GFM_OUTER_GROUPS.values():
+            for variant in groups:
+                if variant.id == group_id:
+                    return variant.category
     return element(kind).group(group_id).category
 
 
@@ -588,21 +674,38 @@ for _variant in (*PSS_GROUPS.values(), *AVR_GROUPS.values(), *GOVERNOR_GROUPS.va
         continue
     for _name in _variant.states:
         _STATE_TO_GROUP[("sm", _name)] = _variant.id
+for _groups in GFM_OUTER_GROUPS.values():
+    for _variant in _groups:
+        for _name in _variant.states:
+            # A state name has to mean one group. Two laws may each own a
+            # state called `dw`, but if they filed it under different group
+            # ids this lookup would answer with whichever was registered
+            # last -- silently, and differently depending on import order.
+            _seen = _STATE_TO_GROUP.get(("gfm", _name))
+            if _seen is not None and _seen != _variant.id:
+                raise AssertionError(
+                    f"gfm state {_name!r} is in group {_seen!r} for one control law and "
+                    f"{_variant.id!r} for another; give it one id in both"
+                )
+            _STATE_TO_GROUP[("gfm", _name)] = _variant.id
 
 
 def element(
     kind: str, *, exciter: str | None = None, pss: str | None = None,
-    governor: str | None = None,
+    governor: str | None = None, controller: str | None = None,
 ) -> ElementModel:
     """The catalogue for one element type.
 
     ``exciter``, ``pss`` and ``governor`` pick a synchronous machine's
-    regulators, whose state groups depend on the models chosen. Callers that
-    hold a unit pass them; callers asking about the element *type* leave them
-    out and get the defaults.
+    regulators, and ``controller`` a grid-forming converter's power-control
+    law; their state groups depend on the models chosen. Callers that hold a
+    unit pass them; callers asking about the element *type* leave them out
+    and get the defaults.
     """
     if kind == "sm" and (exciter or pss or governor):
         return sm_element(exciter or "g2elin", pss or "g2elin", governor or "g2elin")
+    if kind == "gfm" and controller:
+        return gfm_element(controller)
     try:
         return ELEMENTS[kind]
     except KeyError:
@@ -672,6 +775,24 @@ SM_REGULATORS = {
 }
 
 
+#: A converter's outer power-control laws, and the state groups each brings.
+#: Shaped like SM_REGULATORS so the UI can drive both from one code path.
+GFM_CONTROLLERS = {
+    "controller": {
+        "label": "Power control law",
+        "default": "droop",
+        "options": [
+            {"id": "droop", "label": "Droop"},
+            {"id": "droop_filtered", "label": "Droop behind a filter (2nd-order response)"},
+            {"id": "dvoc", "label": "dVOC (dispatchable virtual oscillator)"},
+            {"id": "vsm", "label": "VSM (virtual synchronous machine)"},
+            {"id": "matching", "label": "Matching (DC voltage sets frequency)"},
+        ],
+        "groups": GFM_OUTER_GROUPS,
+    },
+}
+
+
 def describe(kind: str) -> dict:
     """The catalogue for one element type as plain JSON-able data -- what
     the API hands the web UI to build its pickers from, so the UI never
@@ -697,6 +818,22 @@ def describe(kind: str) -> dict:
         ],
         "groups": [_group_info(g) for g in e.groups],
     }
+    if kind == "gfm":
+        out["regulators"] = [
+            {
+                "id": slot,
+                "label": spec["label"],
+                "default": spec["default"],
+                # A law brings several groups where a regulator brings one,
+                # so the UI is handed the whole set it should swap in.
+                "options": [
+                    {**opt, "group": None,
+                     "groups": [_group_info(g) for g in spec["groups"][opt["id"]]]}
+                    for opt in spec["options"]
+                ],
+            }
+            for slot, spec in GFM_CONTROLLERS.items()
+        ]
     if kind == "sm":
         out["regulators"] = [
             {

@@ -517,6 +517,7 @@ class UnitDefaultsRequest(BaseModel):
     exciter: str | None = None  # synchronous machines: which regulator models,
     pss: str | None = None      # since each brings its own parameter names
     governor: str | None = None
+    controller: str | None = None  # grid-forming converters: which power-control law
 
 
 class UnitDefaultsResponse(BaseModel):
@@ -587,6 +588,9 @@ class RegulatorOptionInfo(BaseModel):
     label: str
     #: None for a model with no states of its own, such as "no governor".
     group: StateGroupInfo | None = None
+    #: Several, for a model that brings more than one group (a converter's
+    #: power-control law). Empty when `group` carries the single one.
+    groups: list[StateGroupInfo] = []
 
 
 class RegulatorSlotInfo(BaseModel):
@@ -626,6 +630,7 @@ class UnitModelRow(BaseModel):
     exciter: str | None = None  # synchronous machines only
     pss: str | None = None
     governor: str | None = None
+    controller: str | None = None  # grid-forming converters only
 
 
 class ModelSummaryResponse(BaseModel):

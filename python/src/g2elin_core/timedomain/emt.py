@@ -154,9 +154,13 @@ def nonlinear_sm_block(op: SmOperatingPoint, modes=None) -> NonlinearBlockComp:
 
 
 def nonlinear_gfm_block(op: GfmOperatingPoint, modes=None) -> NonlinearBlockComp:
-    key = mode_key(modes)
+    # The control law this converter runs, read off its operating point just
+    # as linearize_gfm does -- it decides both the equations and the
+    # parameter vector, and building the model without it is the mistake
+    # nonlinear_sm_block made with the machine's regulators.
+    key, ctrl = mode_key(modes), op.controller
     return _bind(
-        gfm_dae(key), gfm_nonlinear_funcs(key), gfm_nonlinear_jacobians(key),
+        gfm_dae(key, ctrl), gfm_nonlinear_funcs(key, ctrl), gfm_nonlinear_jacobians(key, ctrl),
         gfm_nonlinear_point(op, modes),
     )
 

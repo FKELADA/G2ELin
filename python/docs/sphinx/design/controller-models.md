@@ -811,7 +811,32 @@ sweep, the sensitivity scan and the defaults endpoint all go through it.
 `reduction.sm_element(exciter, pss, governor)` builds the catalogue for one
 machine's set, and `Network.unit_element(der)` is what every per-unit caller
 now goes through. A model fitted as `none` contributes no group at all rather
-than an empty one, so the UI never draws a control with nothing under it. The group *ids* are the same whichever model is chosen, so a saved
+than an empty one, so the UI never draws a control with nothing under it.
+
+**And it carried the grid-forming work with it, as §5.2 hoped.** All five of
+`symGFM_types.m`'s power-control laws are now selectable per converter --
+droop, droop behind a filter, dVOC, VSM and matching control -- on the same
+machinery: `gfm_element(controller)` for the groups, per-law parameter sets
+under each law's own names, and the law read off the operating point by both
+the linear and the nonlinear builder. VSM and matching drop the power
+filters entirely, which was the case that made a per-type catalogue
+untenable in the first place.
+
+Two things that work differently there. A law brings a *set* of groups where
+a regulator brings one, so the catalogue hands the UI the whole set to swap
+in. And the parameters are written in terms of the droop tuning, as
+`script_generic.m` writes them: `eta = mp`, `J = 1/(mp*wf)`, `K_theta =
+mp*Kpdc` and so on. That is deliberate -- the laws are meant to be
+*comparable*, tuned to the same equivalent inertia and reactive gain, so a
+study that swaps one for another sees what the law changes rather than what
+a different tuning changes.
+
+One trap found there and worth stating generally: **a state name must mean
+one group.** The filtered droop's filter state and the VSM's swing state are
+both `Dw`, displayed `dw`, and they were filed under different group ids --
+so looking a state up by name answered with whichever was registered last,
+silently. They share one id now, and the lookup refuses to be built if any
+two laws disagree about a name again. The group *ids* are the same whichever model is chosen, so a saved
 level or per-group override survives swapping an exciter — only the symbols
 behind the group change. The GFM controller work can reuse all of it.
 

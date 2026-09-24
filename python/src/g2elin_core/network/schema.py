@@ -393,6 +393,11 @@ class DerUnit(BaseModel):
         return self
 
     @property
+    def controller_model(self) -> str:
+        """This converter's outer power-control law, defaulted."""
+        return (self.controller or GfmController.DROOP).value
+
+    @property
     def exciter_model(self) -> str:
         """This machine's exciter, defaulted -- what the model builders take."""
         return (self.exciter or ExciterModel.G2ELIN).value
@@ -527,6 +532,8 @@ class Network(BaseModel):
         if der.unit_type is UnitType.SYNCHRONOUS_MACHINE:
             return reduction.element("sm", exciter=der.exciter_model, pss=der.pss_model,
                                      governor=der.governor_model)
+        if der.unit_type is UnitType.GFM:
+            return reduction.element("gfm", controller=der.controller_model)
         return reduction.element(der.unit_type.value)
 
     def frequency_is_regulated(self) -> bool:

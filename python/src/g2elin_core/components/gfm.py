@@ -1,5 +1,11 @@
-"""Grid-forming converter (Droop control only), ported from
-``Functions/symGFM_types.m``'s ``'Droop'`` case + ``Functions/GFM_subs.m``.
+"""Grid-forming converter, ported from ``Functions/symGFM_types.m`` +
+``Functions/GFM_subs.m``.
+
+All five of that file's outer power-control laws are here -- droop, droop
+behind a filter, dVOC, VSM and matching control -- selected per unit through
+``DerUnit.controller``. They differ only in the outer loop (see
+:func:`_outer_loop`); the cascaded voltage and current loops, the LC filter
+and the DC link are shared.
 
 Only the non-slack variant and the ``Droop`` outer-loop are implemented —
 CIGRE's islanded preset uses ``GFM_P_control = 'Droop'`` and its GFM units
@@ -15,6 +21,8 @@ from __future__ import annotations
 
 import cmath
 from collections.abc import Mapping
+from dataclasses import dataclass
+from enum import Enum
 from functools import lru_cache
 
 import sympy as sp
@@ -31,22 +39,142 @@ wb, wff, Rf, Lf, Cf, Rt, Lt, mp, nq, wf, KpVL, KiVL, Kffi, KpCL, KiCL, Kffv, Cdc
 isd, isq, igd, igq, ved, veq, vdc, idc = sp.symbols("isd isq igd igq ved veq vdc idc")
 pm, theta, qm, M_VLd, M_VLq, M_CLd, M_CLq = sp.symbols("pm theta qm M_VLd M_VLq M_CLd M_CLq")
 md, mq, w = sp.symbols("md mq w")
+
+# The outer power-control laws other than plain droop (symGFM_types.m). Each
+# brings states and parameters of its own; the names are that file's.
+Dw, Phi, vdc_m, ved_ref_s = sp.symbols("Dw Phi vdc_m ved_ref")
+wc, eta, alfa, J, Dp, K, Dq, K_theta = sp.symbols("wc eta alfa J Dp K Dq K_theta")
 p_ref, q_ref, ve_ref, w_ref, vdc_ref, theta_g, vgd_g, vgq_g = sp.symbols(
     "p_ref q_ref ve_ref w_ref vdc_ref theta_g vgd_g vgq_g"
 )
 
-_STATE_NAMES = ["i_sd", "i_sq", "i_gd", "i_gq", "v_ed", "v_eq", "v_dc", "i_dc",
-                "p_m", "theta", "q_m", "M_VLd", "M_VLq", "M_CLd", "M_CLq"]
+#: The states every control law shares, in order. The outer law's own states
+#: are spliced in between the DC link and the voltage loop, which is where
+#: symGFM_types.m puts them.
+_PLANT_STATE_NAMES = ["i_sd", "i_sq", "i_gd", "i_gq", "v_ed", "v_eq", "v_dc", "i_dc"]
+_INNER_STATE_NAMES = ["M_VLd", "M_VLq", "M_CLd", "M_CLq"]
 
 
-@lru_cache(maxsize=16)
-def gfm_dae(modes: tuple[tuple[str, str], ...] = ()) -> ComponentDAE:
+class GfmControlKind(str, Enum):
+    """Which outer power-control law a grid-forming converter runs.
+
+    These are ``symGFM_types.m``'s ``P_type`` cases. They differ in three
+    things and nothing else: which states the outer loop carries, how it
+    forms the frequency deviation ``Dw``, and how it forms the voltage
+    reference the cascaded loops then track. Everything downstream -- the
+    voltage loop, the current loop, the filter, the DC link -- is identical.
+    """
+
+    DROOP = "droop"
+    DROOP_FILTERED = "droop_filtered"
+    DVOC = "dvoc"
+    VSM = "vsm"
+    MATCHING = "matching"
+
+
+@dataclass(frozen=True)
+class _OuterLoop:
+    """One power-control law, as the pieces :func:`gfm_dae` splices in."""
+
+    states: tuple[tuple[sp.Symbol, sp.Expr, str], ...]
+    dw: sp.Expr        # the frequency deviation the angle integrates
+    ved_ref: sp.Expr   # the d-axis voltage reference the voltage loop tracks
+    veq_ref: sp.Expr = sp.Integer(0)
+
+
+def _outer_loop(kind: GfmControlKind, *, p: sp.Expr, q: sp.Expr) -> _OuterLoop:
+    """The outer power-control law, transcribed from ``symGFM_types.m``.
+
+    ``theta`` belongs to every one of them -- integrating the frequency is
+    what makes a converter grid-*forming* -- so each law lists it in the
+    place that file's own ``stateVec`` puts it, rather than the caller
+    guessing a position that happens to be right for four of the five.
+    """
+    dpm, dqm = wf * (p - pm), wf * (q - qm)
+    p_filter, q_filter = (pm, dpm, "p_m"), (qm, dqm, "q_m")
+    angle = (theta, wb * w, "theta")
+    droop_v_ref = ve_ref + (q_ref - qm) * nq
+
+    if kind is GfmControlKind.DROOP:
+        return _OuterLoop(
+            states=(p_filter, angle, q_filter),
+            dw=mp * (p_ref - pm), ved_ref=droop_v_ref,
+        )
+
+    if kind is GfmControlKind.DROOP_FILTERED:
+        # The droop law itself behind a first-order filter, which is what
+        # gives the converter a second-order (inertia-like) power response
+        # rather than the first-order one plain droop has.
+        return _OuterLoop(
+            states=(p_filter, (Dw, mp * wc * (p_ref - pm) - wc * Dw, "dw"), angle, q_filter),
+            dw=Dw, ved_ref=droop_v_ref,
+        )
+
+    if kind is GfmControlKind.DVOC:
+        # Dispatchable virtual oscillator control: the voltage *amplitude* is
+        # a state with dynamics of its own, driven by the reactive error and
+        # pulled back toward ve_ref by the alfa term, and both channels are
+        # normalised by the square of the amplitude.
+        dved_ref = (
+            eta * ((q_ref / ve_ref**2) - (qm / ved_ref_s**2))
+            + (eta * alfa / ve_ref**2) * (ve_ref**2 - ved_ref_s**2)
+        ) * ved_ref_s
+        return _OuterLoop(
+            states=(p_filter, angle, q_filter, (ved_ref_s, dved_ref, "v_ed_ref")),
+            dw=eta * ((p_ref / ve_ref**2) - (pm / ved_ref_s**2)),
+            ved_ref=ved_ref_s,
+        )
+
+    if kind is GfmControlKind.VSM:
+        # A virtual synchronous machine: a swing equation on Dw with inertia
+        # J and damping Dp, and a flux state Phi whose product with speed is
+        # the voltage reference. It measures p and q *directly*, so it has no
+        # power filters at all -- the inertia is what smooths the response.
+        return _OuterLoop(
+            states=(
+                (Dw, (1 / (J * wff)) * (p_ref - p) - (Dp / J) * Dw, "dw"),
+                angle,
+                (Phi, (1 / K) * (q_ref - q) + (Dq / K) * (ve_ref - ved), "Phi"),
+            ),
+            dw=Dw, ved_ref=w * Phi,
+        )
+
+    # Matching control: the DC-link voltage *is* the frequency signal, which
+    # is what a machine's speed does physically. No power measurement at all.
+    return _OuterLoop(
+        states=((vdc_m, wf * (vdc - vdc_m), "v_dc_m"), angle),
+        dw=K_theta * (vdc_m - vdc_ref), ved_ref=ve_ref,
+    )
+
+
+#: The parameters each control law owns, under symGFM_types.m's own names.
+#: A converter runs one law, so only its parameters are in its dict.
+OUTER_SYMBOLS: dict[str, tuple[sp.Symbol, ...]] = {
+    GfmControlKind.DROOP: (mp, nq, wf),
+    GfmControlKind.DROOP_FILTERED: (mp, nq, wf, wc),
+    GfmControlKind.DVOC: (eta, alfa, wf),
+    GfmControlKind.VSM: (J, Dp, K, Dq),
+    GfmControlKind.MATCHING: (K_theta, wf),
+}
+OUTER_PARAM_NAMES = {k: tuple(x.name for x in v) for k, v in OUTER_SYMBOLS.items()}
+
+
+@lru_cache(maxsize=64)
+def gfm_dae(
+    modes: tuple[tuple[str, str], ...] = (),
+    controller: GfmControlKind = GfmControlKind.DROOP,
+) -> ComponentDAE:
     """``modes`` is a :func:`~g2elin_core.components.base.mode_key` tuple
     naming the states this converter gives up -- see
-    :mod:`g2elin_core.reduction`. The default ``()`` is the full 15-state
-    model.
+    :mod:`g2elin_core.reduction`.
+
+    ``controller`` chooses the outer power-control law. The default is plain
+    droop, the 15-state model this component has always built. The others
+    carry different outer states: droop-behind-a-filter and dVOC add one to
+    droop's three, VSM and matching drop the power filters entirely for two
+    and three states respectively.
     """
-    state_vec = [isd, isq, igd, igq, ved, veq, vdc, idc, pm, theta, qm, M_VLd, M_VLq, M_CLd, M_CLq]
+    controller = GfmControlKind(controller)
     alg_vec = [md, mq, w]
     us_vec = [p_ref, q_ref, ve_ref, w_ref, vdc_ref]
     ug_vec = [theta_g, vgd_g, vgq_g]
@@ -68,27 +196,29 @@ def gfm_dae(modes: tuple[tuple[str, str], ...] = ()) -> ComponentDAE:
 
     q = -ved * igq + veq * igd
     p = ved * igd + veq * igq
-    Dw = mp * (p_ref - pm)
-    dpm = wf * (p - pm)
-    dqm = wf * (q - qm)
-    ved_ref = ve_ref + (q_ref - qm) * nq
-    veq_ref = 0
-    dtheta = wb * w
+    outer = _outer_loop(controller, p=p, q=q)
 
-    dM_VLd = KiVL * (ved_ref - ved)
-    dM_VLq = KiVL * (veq_ref - veq)
-    isd_ref = KpVL * (ved_ref - ved) + M_VLd + Kffi * igd - wff * Cf * veq
-    isq_ref = KpVL * (veq_ref - veq) + M_VLq + Kffi * igq + wff * Cf * ved
+    dM_VLd = KiVL * (outer.ved_ref - ved)
+    dM_VLq = KiVL * (outer.veq_ref - veq)
+    isd_ref = KpVL * (outer.ved_ref - ved) + M_VLd + Kffi * igd - wff * Cf * veq
+    isq_ref = KpVL * (outer.veq_ref - veq) + M_VLq + Kffi * igq + wff * Cf * ved
     dM_CLd = KiCL * (isd_ref - isd)
     dM_CLq = KiCL * (isq_ref - isq)
 
-    diffeq_vec = [disd, disq, digd, digq, dved, dveq, dvdc, didc, dpm, dtheta, dqm,
-                  dM_VLd, dM_VLq, dM_CLd, dM_CLq]
+    plant_states = list(zip(
+        [isd, isq, igd, igq, ved, veq, vdc, idc],
+        [disd, disq, digd, digq, dved, dveq, dvdc, didc],
+        _PLANT_STATE_NAMES,
+    ))
+    inner_states = list(zip(
+        [M_VLd, M_VLq, M_CLd, M_CLq], [dM_VLd, dM_VLq, dM_CLd, dM_CLq], _INNER_STATE_NAMES,
+    ))
+    all_states = plant_states + list(outer.states) + inner_states
 
     alg = [
         md - (1 / vdc) * (KpCL * (isd_ref - isd) + Kffv * ved - wff * Lf * isq + M_CLd),
         mq - (1 / vdc) * (KpCL * (isq_ref - isq) + Kffv * veq + wff * Lf * isd + M_CLq),
-        w - Dw - w_ref,
+        w - outer.dw - w_ref,
     ]
 
     igd_g_out = igd * sp.cos(theta - theta_g) - igq * sp.sin(theta - theta_g)
@@ -97,7 +227,7 @@ def gfm_dae(modes: tuple[tuple[str, str], ...] = ()) -> ComponentDAE:
     output_vec = [p, q, w, Vt, igd_g_out, igq_g_out]
 
     state_vec, diffeq_vec, state_names, alg_vec, alg, output_vec = apply_reduction(
-        states=list(zip(state_vec, diffeq_vec, _STATE_NAMES)),
+        states=all_states,
         modes=dict(modes),
         alg_vec=alg_vec,
         algeq_vec=alg,
@@ -122,13 +252,19 @@ def gfm_dae(modes: tuple[tuple[str, str], ...] = ()) -> ComponentDAE:
 
 
 @lru_cache(maxsize=16)
-def gfm_nonlinear_funcs(modes: tuple[tuple[str, str], ...] = ()) -> NonlinearFuncs:
-    return gfm_dae(modes).nonlinear_funcs()
+def gfm_nonlinear_funcs(
+    modes: tuple[tuple[str, str], ...] = (),
+    controller: GfmControlKind = GfmControlKind.DROOP,
+) -> NonlinearFuncs:
+    return gfm_dae(modes, controller).nonlinear_funcs()
 
 
 @lru_cache(maxsize=16)
-def gfm_nonlinear_jacobians(modes: tuple[tuple[str, str], ...] = ()) -> NonlinearJacobians:
-    return gfm_dae(modes).nonlinear_jacobians()
+def gfm_nonlinear_jacobians(
+    modes: tuple[tuple[str, str], ...] = (),
+    controller: GfmControlKind = GfmControlKind.DROOP,
+) -> NonlinearJacobians:
+    return gfm_dae(modes, controller).nonlinear_jacobians()
 
 
 class GfmOperatingPoint(RebuiltWithParams):
@@ -145,6 +281,7 @@ class GfmOperatingPoint(RebuiltWithParams):
         v_grid_pu: float,
         angle_grid_rad: float,
         theta_g_rad: float,
+        controller: GfmControlKind = GfmControlKind.DROOP,
     ):
         # locals() here, before anything else runs, is exactly the
         # arguments -- see RebuiltWithParams.
@@ -191,6 +328,19 @@ class GfmOperatingPoint(RebuiltWithParams):
         self.vdc0 = self.vdc_ref0
         self.w0 = 1.0
         self.Dw0 = 0.0
+        self.controller = GfmControlKind(controller)
+        # The outer laws other than droop carry a state of their own. Each
+        # sits where its own equation is at rest with p = p_ref, q = q_ref
+        # and the terminal voltage where the power flow put it:
+        #   dVOC   the amplitude state settles at the reference amplitude,
+        #          which zeroes both its reactive error and its alfa pull;
+        #   VSM    ved_ref = w*Phi has to equal that same amplitude, and
+        #          w is 1 at rest;
+        #   Match. the measured DC voltage is the DC voltage, which the DC
+        #          loop holds at its reference.
+        self.ved_ref0 = self.ve_ref0
+        self.Phi0 = self.ve_ref0 / self.w0
+        self.vdc_m0 = self.vdc0
 
         vdc_ref0 = self.vdc_ref0
         self.md0, self.mq0 = vmd0 / vdc_ref0, vmq0 / vdc_ref0
@@ -208,12 +358,18 @@ def _gfm_operating_subs(op: GfmOperatingPoint) -> dict:
     p = op.p
     return equilibrium_subs({
         wb: p["wb"], wff: p["wff"], Rf: p["Rf"], Lf: p["Lf"], Cf: p["Cf"], Rt: p["Rt"], Lt: p["Lt"],
-        mp: p["mp"], nq: p["nq"], wf: p["wf"], KpVL: p["KpVL"], KiVL: p["KiVL"], Kffi: p["Kffi"],
+        KpVL: p["KpVL"], KiVL: p["KiVL"], Kffi: p["Kffi"],
         KpCL: p["KpCL"], KiCL: p["KiCL"], Kffv: p["Kffv"], Cdc: p["Cdc"], Gdc: p["Gdc"],
         Kpdc: p["Kpdc"], Tdc: p["Tdc"],
+        # The outer law's own parameters, under its own names. Only the
+        # chosen law's are in `p`, and only its symbols reach the equations.
+        **{sym: p[sym.name] for sym in OUTER_SYMBOLS[op.controller]},
         isd: op.isd0, isq: op.isq0, igd: op.igd0, igq: op.igq0, ved: op.ved0, veq: op.veq0,
         vdc: op.vdc0, idc: op.idc0, pm: op.pm0, theta: op.theta0, qm: op.qm0,
         M_VLd: op.M_VLd0, M_VLq: op.M_VLq0, M_CLd: op.M_CLd0, M_CLq: op.M_CLq0,
+        # The outer laws' own states. Only the chosen law's appear in its
+        # equations, so the rest are simply unused entries here.
+        Dw: op.Dw0, Phi: op.Phi0, vdc_m: op.vdc_m0, ved_ref_s: op.ved_ref0,
         md: op.md0, mq: op.mq0, w: op.w0,
         p_ref: op.p_ref0, q_ref: op.q_ref0, ve_ref: op.ve_ref0, w_ref: op.w_ref0, vdc_ref: op.vdc_ref0,
         theta_g: op.theta_g0, vgd_g: op.vgd_g0, vgq_g: op.vgq_g0,
@@ -221,9 +377,9 @@ def _gfm_operating_subs(op: GfmOperatingPoint) -> dict:
 
 
 def linearize_gfm(op: GfmOperatingPoint, modes: Mapping[str, str] | None = None) -> LinearComponent:
-    return gfm_dae(mode_key(modes)).linearize(_gfm_operating_subs(op))
+    return gfm_dae(mode_key(modes), op.controller).linearize(_gfm_operating_subs(op))
 
 
 def gfm_nonlinear_point(op: GfmOperatingPoint, modes: Mapping[str, str] | None = None) -> tuple:
     """``(x0, z0, u0, p0)`` for :func:`gfm_nonlinear_funcs`."""
-    return gfm_dae(mode_key(modes)).point_from_subs(_gfm_operating_subs(op))
+    return gfm_dae(mode_key(modes), op.controller).point_from_subs(_gfm_operating_subs(op))

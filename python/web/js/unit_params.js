@@ -28,6 +28,19 @@ const SM_REGULATORS = [
   }],
 ];
 
+// A converter's outer power-control law, and the parameters each one brings.
+// Same shape as SM_REGULATORS: the law is chosen on the unit, and only its
+// own parameters are shown (and accepted by the backend).
+const GFM_CONTROLLERS = [
+  ["controller", "Power control law", {
+    droop: ["Droop", ["mp", "nq", "wf"]],
+    droop_filtered: ["Droop behind a filter (2nd-order response)", ["mp", "nq", "wf", "wc"]],
+    dvoc: ["dVOC (dispatchable virtual oscillator)", ["eta", "alfa", "wf"]],
+    vsm: ["VSM (virtual synchronous machine)", ["J", "Dp", "K", "Dq"]],
+    matching: ["Matching (DC voltage sets frequency)", ["K_theta", "wf"]],
+  }],
+];
+
 const PARAM_GROUPS = {
   sm: [
     ["Stator & rotor windings (pu)", ["Ra", "Ll", "Lad", "Laq", "Lfd", "Rfd", "L1d", "R1d", "L1q", "R1q", "L2q", "R2q"]],
@@ -36,7 +49,6 @@ const PARAM_GROUPS = {
   ],
   gfm: [
     ["LC filter & transformer (pu)", ["Rf", "Lf", "Cf", "Rt", "Lt"]],
-    ["Droop control (outer power loop)", ["mp", "nq", "wf"]],
     ["Voltage loop", ["KpVL", "KiVL", "Kffi"]],
     ["Current loop (inner)", ["KpCL", "KiCL", "Kffv"]],
     ["DC link", ["Cdc", "Gdc", "Kpdc", "Tdc"]],
@@ -52,13 +64,19 @@ const PARAM_GROUPS = {
 };
 
 // The two regulator groups a machine shows, for the models it carries.
+function unitModelSlots(der) {
+  if (der.unit_type === "sm") return SM_REGULATORS;
+  if (der.unit_type === "gfm") return GFM_CONTROLLERS;
+  return [];
+}
+
 function regulatorGroups(der) {
-  if (der.unit_type !== "sm") return [];
+  if (!unitModelSlots(der).length) return [];
   // A model fitted as "none" brings no parameters, so it contributes no
   // group -- the picker for it still shows, above.
-  return SM_REGULATORS.map(([slot, title, models]) => {
-    const chosen = der[slot] || "g2elin";
-    const entry = models[chosen] || models.g2elin;
+  return unitModelSlots(der).map(([slot, title, models]) => {
+    const fallback = models.g2elin ? "g2elin" : "droop";
+    const entry = models[der[slot] || fallback] || models[fallback];
     return [title, entry[1]];
   }).filter(([, keys]) => keys.length);
 }
@@ -79,6 +97,10 @@ const PARAM_HELP = {
   Rt: "transformer resistance", Lt: "transformer reactance", RL_pu: "auxiliary load resistance",
   Rf: "filter resistance", Lf: "filter inductance", Cf: "filter capacitance",
   nq: "voltage/reactive-power droop", wf: "power-measurement filter cut-off (rad/s)",
+  wc: "droop filter cut-off (rad/s)", eta: "dVOC synchronisation gain", alfa: "dVOC amplitude-regulation gain",
+  J: "virtual inertia constant (s)", Dp: "virtual damping (pu)",
+  K: "virtual excitation gain", Dq: "virtual voltage droop (pu)",
+  K_theta: "DC-voltage to frequency gain (pu)",
   KpVL: "voltage loop proportional gain", KiVL: "voltage loop integral gain", Kffi: "current feed-forward gain",
   KpCL: "current loop proportional gain", KiCL: "current loop integral gain", Kffv: "voltage feed-forward gain",
   Cdc: "DC-link capacitance (pu)", Gdc: "DC-link conductance (pu)", Kpdc: "DC-voltage control gain", Tdc: "DC source time constant (s)",
@@ -177,6 +199,8 @@ const UnitParams = {
       body.exciter = der.exciter || "g2elin";
       body.pss = der.pss || "g2elin";
       body.governor = der.governor || "g2elin";
+    } else if (der.unit_type === "gfm") {
+      body.controller = der.controller || "droop";
     }
     const key = JSON.stringify(body);
     if (!this._defaultsCache.has(key)) this._defaultsCache.set(key, api("/api/units/defaults", jsonPost(body)).then(r => r.params));
@@ -196,7 +220,7 @@ const UnitParams = {
     const link = unitTransformerRx(der);
     // Don't rebuild (and lose focus/typing) when nothing structural changed.
     const { Rt: _rt, Lt: _lt, ...rest } = defaults;
-    const key = `${der.id}|${der.unit_type}|${link.linked}|${der.exciter || ""}|${der.pss || ""}|${der.governor || ""}|${JSON.stringify(rest)}`;
+    const key = `${der.id}|${der.unit_type}|${link.linked}|${der.exciter || ""}|${der.pss || ""}|${der.governor || ""}|${der.controller || ""}|${JSON.stringify(rest)}`;
     if (box.dataset.key === key && box.querySelector(".uparams")) {
       Object.assign(box._defaults, defaults);  // Rt/Lt follow the transformer
       this.refreshMarks(box, der, box._defaults);
@@ -219,9 +243,9 @@ const UnitParams = {
      : noTransformer ? " Rt/Lt will follow this unit's transformer; there is none yet, so they show placeholder defaults."
      : " This unit has no transformer of its own yet; Rt/Lt show the network's first transformer until it has one."}</p>
           <div class="notice warn-bg" data-role="plant-note" style="display:none;font-size:0.76rem;margin:0.4rem 0"></div>
-          ${der.unit_type === "sm" ? `<div class="ugroup uregulators"><div class="ugroup-title">Regulator models</div>
-            ${SM_REGULATORS.map(([slot, title, models]) => {
-              const chosen = der[slot] || "g2elin";
+          ${unitModelSlots(der).length ? `<div class="ugroup uregulators"><div class="ugroup-title">${der.unit_type === "sm" ? "Regulator models" : "Control law"}</div>
+            ${unitModelSlots(der).map(([slot, title, models]) => {
+              const chosen = der[slot] || (models.g2elin ? "g2elin" : "droop");
               const help = "Each model brings its own parameters, listed below. Choosing \u2018none\u2019 removes the equipment altogether \u2014 its states and its parameters go with it, rather than being left idle.";
               return `<div class="ureg-row">
                 <label for="ureg-${der.id}-${slot}" title="${esc(help)}"><code>${esc(title)}</code></label>
@@ -252,7 +276,7 @@ const UnitParams = {
       const slot = sel.dataset.regulator;
       der[slot] = sel.value;
       const kept = new Set(regulatorGroups(der).flatMap(g => g[1]));
-      const ownedByAny = new Set(SM_REGULATORS.flatMap(([, , models]) =>
+      const ownedByAny = new Set(unitModelSlots(der).flatMap(([, , models]) =>
         Object.values(models).flatMap(([, keys]) => keys)));
       Object.keys(der.params || {}).forEach(k => {
         if (ownedByAny.has(k) && !kept.has(k)) delete der.params[k];

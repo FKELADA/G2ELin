@@ -18,15 +18,32 @@ from g2elin_core.components.sm import linearize_sm
 from g2elin_core.interconnect import AssembledSystem, assemble_network
 from g2elin_core.network.breakers import frame_references, node_capacitances
 from g2elin_core.network.schema import Network
-from g2elin_core.operating_point import compute_operating_point
+from g2elin_core.operating_point import NetworkOperatingPoint, compute_operating_point
 from g2elin_core.powerflow import PowerFlowResult
 
 
 def linearize_network(network: Network, result: PowerFlowResult) -> AssembledSystem:
+    """The closed-loop small-signal model of one network at one operating point."""
+    return assemble_network(network, **linear_components(network, result))
+
+
+def linear_components(
+    network: Network, result: PowerFlowResult, *, op: NetworkOperatingPoint | None = None
+) -> dict:
+    """Every element's own linearised state-space, before they are wired
+    together -- what :func:`linearize_network` assembles, and what a caller
+    needs to know which block is which (see
+    :mod:`g2elin_core.modal.parameters`).
+
+    ``op`` is the network's operating point, computed here when not given. A
+    caller that needs the operating point in its own right can pass the one
+    it already has rather than have it built a second time.
+    """
     if not result.converged:
         raise ValueError("power flow did not converge; can't linearize an unsolved operating point")
 
-    op = compute_operating_point(network, result)
+    if op is None:
+        op = compute_operating_point(network, result)
     wb_val = 2 * 3.141592653589793 * network.f_hz
     # Which dynamics each element keeps (network/schema.ModelOptions). The
     # default is "all of them", i.e. exactly the model this pipeline built
@@ -119,8 +136,7 @@ def linearize_network(network: Network, result: PowerFlowResult) -> AssembledSys
         for idx, rx in op.transformer_rx.items()
     }
 
-    return assemble_network(
-        network,
+    return dict(
         der_components=der_components,
         node_components=node_components,
         line_components=line_components,

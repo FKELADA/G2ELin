@@ -470,3 +470,34 @@ def equilibrium_subs(subs: dict) -> dict:
     only returns symbols that actually appear in the equations.
     """
     return {**subs, **{eq_symbol(sym): value for sym, value in subs.items()}}
+
+
+class RebuiltWithParams:
+    """Mixin: an operating point that can be rebuilt with other parameters.
+
+    An operating point is built from the solved power flow -- terminal
+    voltage, dispatch, reference angle -- plus the unit's parameter set.
+    Changing a machine constant leaves everything but the last of those
+    alone, so the unit's own operating point can be redone without redoing
+    the network's.
+
+    That matters for a parameter scan
+    (:mod:`g2elin_core.modal.parameters`), which perturbs one parameter at a
+    time: rebuilding one unit is a fraction of a millisecond where
+    ``compute_operating_point`` on a 118-bus network is thirty.
+
+    **One unit is not always enough.** In the MATLAB-compatible frame
+    (``Network.frame_follows_slack``) the slack machine's rotor angle is the
+    reference every other unit's angle is measured from, so its ``Ra``, ``Ll``
+    and ``Laq`` -- the three constants that set that angle -- change every
+    other unit's operating point too. Rebuilding that one unit is then not
+    the same as recomputing the network's, and a caller that needs those
+    right has to go the long way round; the parameter scan does.
+    """
+
+    #: Arguments this instance was constructed from, recorded by ``__init__``.
+    _built_from: dict
+
+    def with_params(self, params: dict):
+        """A copy of this operating point built from ``params`` instead."""
+        return type(self)(**{**self._built_from, "params": params})

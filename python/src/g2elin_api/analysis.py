@@ -427,9 +427,11 @@ def modal_parameter_sensitivity_response(
     """Which physical parameter moves the chosen mode, and which parameters
     the entries of A it is most sensitive to are built from.
 
-    Costs two linearisations per parameter scanned -- milliseconds each, but
-    a full scan of a large network is still a few seconds, so the request can
-    narrow it to particular units or parameters.
+    Costs two *component* linearisations per parameter scanned, well under a
+    millisecond each: a full 118-bus scan of 1674 parameters is a few seconds,
+    less than this request's own eigendecomposition. The request can still be
+    narrowed to particular units or parameters when only those are of
+    interest.
     """
     net = energized_or_422(network)
     result = run_power_flow(net)

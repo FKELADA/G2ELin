@@ -13,6 +13,7 @@ import sympy as sp
 
 from .base import (
     ComponentDAE, LinearComponent, NonlinearFuncs, NonlinearJacobians,
+    RebuiltWithParams,
     apply_reduction, build_dae, equilibrium_subs, mode_key,
 )
 
@@ -116,7 +117,7 @@ def gfl_nonlinear_jacobians(modes: tuple[tuple[str, str], ...] = ()) -> Nonlinea
     return gfl_dae(modes).nonlinear_jacobians()
 
 
-class GflOperatingPoint:
+class GflOperatingPoint(RebuiltWithParams):
     """Mirrors ``GFL_subs.m``. Eg0/Ig0/Is0/Vm0 physics are identical to
     :class:`g2elin_core.components.gfm.GfmOperatingPoint` (same LCL-filter
     converter structure) — see there for the derivation. ``M_d0``/``M_q0``/
@@ -139,6 +140,9 @@ class GflOperatingPoint:
         angle_grid_rad: float,
         theta_g_rad: float,
     ):
+        # locals() here, before anything else runs, is exactly the
+        # arguments -- see RebuiltWithParams.
+        self._built_from = {k: v for k, v in locals().items() if k != "self"}
         self.p = params
         Rf_, Lf_ = params["Rf"], params["Lf"]
 

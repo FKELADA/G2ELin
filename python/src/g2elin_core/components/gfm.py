@@ -21,6 +21,7 @@ import sympy as sp
 
 from .base import (
     ComponentDAE, LinearComponent, NonlinearFuncs, NonlinearJacobians,
+    RebuiltWithParams,
     apply_reduction, build_dae, equilibrium_subs, mode_key,
 )
 
@@ -130,7 +131,7 @@ def gfm_nonlinear_jacobians(modes: tuple[tuple[str, str], ...] = ()) -> Nonlinea
     return gfm_dae(modes).nonlinear_jacobians()
 
 
-class GfmOperatingPoint:
+class GfmOperatingPoint(RebuiltWithParams):
     """Mirrors ``GFM_subs.m`` + the "GFM Initializations" block of ``script_generic.m``."""
 
     def __init__(
@@ -145,6 +146,9 @@ class GfmOperatingPoint:
         angle_grid_rad: float,
         theta_g_rad: float,
     ):
+        # locals() here, before anything else runs, is exactly the
+        # arguments -- see RebuiltWithParams.
+        self._built_from = {k: v for k, v in locals().items() if k != "self"}
         self.p = params
         Rf_, Lf_ = params["Rf"], params["Lf"]
 

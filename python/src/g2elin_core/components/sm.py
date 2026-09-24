@@ -30,6 +30,7 @@ import sympy as sp
 
 from .base import (
     ComponentDAE, LinearComponent, NonlinearFuncs, NonlinearJacobians,
+    RebuiltWithParams,
     apply_reduction, build_dae, equilibrium_subs, mode_key,
 )
 
@@ -189,7 +190,7 @@ def sm_nonlinear_jacobians(is_slack: bool, modes: tuple[tuple[str, str], ...] = 
     return sm_dae(is_slack, modes).nonlinear_jacobians()
 
 
-class SmOperatingPoint:
+class SmOperatingPoint(RebuiltWithParams):
     """Everything needed to linearize one SM instance, computed from the
     solved power flow the way ``script_generic.m``'s "SM Initializations"
     section + ``SG_subs.m`` do.
@@ -209,6 +210,9 @@ class SmOperatingPoint:
         theta_g_rad: float,
         is_slack: bool,
     ):
+        # locals() here, before anything else runs, is exactly the
+        # arguments -- see RebuiltWithParams.
+        self._built_from = {k: v for k, v in locals().items() if k != "self"}
         self.p = params
         Ra_ = params["Ra"]
         Lq_ = params["Ll"] + params["Laq"]

@@ -61,10 +61,10 @@ builder over an arbitrary `Network` JSON, not just the fixed presets):
   numeric-column convention with named, validated fields. Being a pydantic
   model (not a dataclass) is what lets it round-trip to/from JSON for
   free — the basis for the web UI's network editor/builder, further down.
-- `g2elin_core.network.presets` — 15 preset cases in 4 families (5 in the
-  original slice, described below; 10 more DER-mix variants on the WSCC-9
-  and CIGRE-islanded topologies, added later — see "Web UI (P7)" further
-  down):
+- `g2elin_core.network.presets` — 24 preset cases in 5 families: the CIGRE MV
+  benchmark (islanded and interconnected), WSCC 9-bus, single-machine and
+  two-machine cases, Kundur's two-area system, and the IEEE 14, 39 and
+  118-bus cases. A few are described below; the web UI lists them all:
   - `wscc9_3sm()` — WSCC 9-bus, 3 synchronous machines (`Functions/WSCC_raw.m`
     + `WSCC/script_WSCC.m`, case `'WSCC_3SM'`). Transcribed line-by-line.
   - `cigre_islanded_1sm_2gfm_1gfl()` — CIGRE MV benchmark feeder, islanded,
@@ -177,6 +177,11 @@ produced NaN participation factors under exactly the conditions CIGRE has
   Deliberately simpler than pandapower's native batch API for now — see the
   module docstring for the tradeoff and how to swap in the faster path
   later if sweep size ever makes it matter.
+
+<!-- doc-facts: stop -->
+<!-- Below here is the record of how this got built. Its numbers describe the
+     state at the time each entry was written and are deliberately not updated;
+     tools/check_docs_facts.py stops here. -->
 
 ### A second, more consequential bug — found by cross-validating linear against nonlinear
 

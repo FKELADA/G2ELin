@@ -592,3 +592,22 @@ def test_a_quasi_stationary_bus_labels_its_waveforms_as_reconstructions():
     ms = MeasurementSet(build_nonlinear_network(net, run_power_flow(net)))
     phase = next(m for m in ms.catalog() if m.name.startswith("v_a_{bus"))
     assert "phasor" in phase.label
+
+
+def test_the_documentation_states_the_right_numbers():
+    """Prose goes stale quietly. A sentence that says "19 presets" stays
+    readable and confident long after the twentieth is added, and nothing
+    fails -- which is the kind of error a reader has no way to catch.
+
+    tools/check_docs_facts.py asserts the countable claims against the code.
+    It stops at a marker in the README, because a changelog states what was
+    true when it was written and correcting those numbers would falsify its
+    history rather than fix it.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    tool = Path(__file__).resolve().parents[1] / "tools" / "check_docs_facts.py"
+    r = subprocess.run([sys.executable, str(tool)], capture_output=True, text=True)
+    assert r.returncode == 0, f"documentation is out of date:\n{r.stdout}{r.stderr}"

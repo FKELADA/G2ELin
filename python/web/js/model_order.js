@@ -339,8 +339,17 @@ const ModelOrder = {
       </div>`;
   },
 
+  // Which unit types the network has, which is what the panel's sections
+  // are: one per type present, so adding the first converter or retyping
+  // the last machine changes the panel itself and not just its numbers.
+  presentKey() {
+    return [...new Set((state.network?.der_units || []).map(d => d.unit_type))].sort().join(",");
+  },
+
   async mount(box) {
     await this.load();
+    this.box = box;
+    this.rendered = this.presentKey();
     box.innerHTML = this.panelHtml();
     this.bind(box);
     const freq = $("#mo-net-freq", box);
@@ -351,6 +360,12 @@ const ModelOrder = {
   },
 
   async refreshSummary() {
+    // A unit added, removed or retyped changes which sections belong here,
+    // and the summary alone cannot express that -- rebuild the panel.
+    if (this.box && this.rendered !== undefined && this.presentKey() !== this.rendered) {
+      await this.mount(this.box);
+      return;
+    }
     const out = $("#mo-summary");
     if (!out || !state.network) return;
     const version = state.version;

@@ -476,8 +476,14 @@ const NetworkPage = {
     obj[field] = v;
     let rerender = input.tagName === "SELECT" || field.endsWith("closed");
     if (field === "unit_type") {
+      // The model a unit carries belongs to its type: a converter has a
+      // control law, a machine has an exciter, a stabiliser and a governor.
+      // Leaving the old type's behind fails validation ("only meaningful
+      // for ..."), so they go with the parameters they named.
       if (v === "gfm" && !obj.controller) obj.controller = "droop";
       if (v !== "gfm") obj.controller = null;
+      if (v !== "sm") { obj.exciter = null; obj.pss = null; obj.governor = null; }
+      if (v !== "sm") obj.xd_pu = null;
       this.retypeUnitParams(obj);
     }
     if (field === "bus_type" && v === "slack") {

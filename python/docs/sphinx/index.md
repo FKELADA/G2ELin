@@ -11,14 +11,20 @@ integrates the same model nonlinearly in time.
 
 What you can do with it:
 
-- **Build or load a network** — 19 presets (WSCC 9-bus, CIGRE MV islanded and
-  interconnected, single-machine cases), or draw one from scratch, with
+- **Build or load a network** — 24 presets (the CIGRE MV benchmark islanded and
+  interconnected, WSCC 9-bus, single- and two-machine cases, Kundur's two-area
+  system, and IEEE 14, 39 and 118-bus), or draw one from scratch, with
   breakers on every branch, load and unit.
 - **Solve power flow** — several solvers, single or batch, on networks that
   may be split into islands.
-- **Analyse modes** — eigenvalue maps, participation, sensitivity, mode
-  shapes, free and step responses, and root loci that sweep any parameter,
-  including each control loop's tuning.
+- **Choose the models** — a machine's exciter, stabiliser and governor, and a
+  converter's power-control law (droop, filtered droop, dVOC, VSM, matching),
+  per unit; and how much of each element's dynamics to keep, which is what
+  makes the same case EMT or RMS.
+- **Analyse modes** — eigenvalue maps, participation, sensitivity (including
+  which *physical parameter* moves a mode), mode shapes, free and step
+  responses, and root loci that sweep any parameter, including each control
+  loop's tuning.
 - **Simulate in time** — nonlinear runs with network events (breaker
   openings, load steps, phase jumps) and the linearised response overlaid.
 - **Choose the model order** — keep every dynamic for an EMT run, or make

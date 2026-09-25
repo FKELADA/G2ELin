@@ -55,13 +55,23 @@ if errorlevel 1 (
   exit /b 1
 )
 
-rem --- 4. The manual, built once --------------------------------------------
-if not exist "docs\sphinx\_build\html\index.html" (
-  echo   [3/4] Building the documentation ^(once^) ...
+rem --- 4. The manual, rebuilt when its sources have changed -----------------
+rem Built only when missing before, so updating the tool left the interface
+rem serving the old manual with nothing to say so. Compare the newest source
+rem against what was built (through a file: quoting python -c inside for /f
+rem is a minefield).
+set "DOCS=stale"
+"%VENV%" -c "import pathlib,sys;b=pathlib.Path('docs/sphinx/_build/html/index.html');src=[p for p in pathlib.Path('docs/sphinx').rglob('*') if p.is_file() and '_build' not in p.parts];print('fresh' if b.exists() and src and b.stat().st_mtime>=max(p.stat().st_mtime for p in src) else 'stale')" > "%TEMP%\g2elin_docs.txt" 2>nul
+if exist "%TEMP%\g2elin_docs.txt" (
+  set /p DOCS=<"%TEMP%\g2elin_docs.txt"
+  del "%TEMP%\g2elin_docs.txt" >nul 2>&1
+)
+if /i "%DOCS%"=="fresh" (
+  echo   [3/4] Documentation already up to date.
+) else (
+  echo   [3/4] Building the documentation ...
   "%VENV%" tools\build_docs.py >nul 2>&1
   if errorlevel 1 echo   [!] The manual did not build - everything else still works.
-) else (
-  echo   [3/4] Documentation already built.
 )
 
 rem --- 5. Serve, on the first free port, and open a browser ------------------
@@ -77,6 +87,9 @@ if exist "%TEMP%\g2elin_port.txt" (
 echo   [4/4] Starting the web interface on http://127.0.0.1:%PORT%
 echo.
 echo   Close this window (or press Ctrl+C) to stop G2ELin.
+echo.
+echo   G2ELin is free and open access. If it helps your work, you can
+echo   support it at https://buymeacoffee.com/FadiKelada
 echo.
 start "" /b cmd /c "ping -n 7 127.0.0.1 >nul & start "" http://127.0.0.1:%PORT%"
 "%VENV%" -m uvicorn g2elin_api.main:app --port %PORT%

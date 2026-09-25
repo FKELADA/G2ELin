@@ -47,6 +47,12 @@ the test suite, the notebooks, troubleshooting and server deployment.
 
 See each directory's README for requirements, installation, and usage instructions specific to that implementation.
 
+## Support this work
+
+G2ELin is open access and developed in the open. If it is useful to you and
+you would like to support its development, you can
+[buy me a coffee](https://buymeacoffee.com/FadiKelada).
+
 ## Copyright and License
 This tool is developed by Fadi Kelada at G2ELab. It is provided under the GNU GPL-3 license.
 

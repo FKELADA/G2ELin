@@ -123,6 +123,9 @@ validator <modules/network>` checks for — see
 
 ## Contents
 
+If G2ELin is useful to you and you would like to support its development,
+you can [buy me a coffee](https://buymeacoffee.com/FadiKelada).
+
 ```{toctree}
 :maxdepth: 2
 :caption: Getting started

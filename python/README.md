@@ -83,6 +83,7 @@ src/g2elin_api/
 web/                  the static frontend (plain JS)
 notebooks/            tour.ipynb
 tools/                docs build, preset import, cross-validation, deployment
+  ui_tour/            records the captioned video tour of the interface
 tests/                the test suite; tests/golden/ holds the MATLAB regression fixtures
 docs/
   sphinx/             the manual
